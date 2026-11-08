@@ -1,0 +1,153 @@
+//! Against real servers, when told where they are:
+//! ZAPROS_TEST_PG=host:port:db:user:password, ZAPROS_TEST_CH=…, ZAPROS_TEST_ORA=host:port:service:user:password.
+
+use std::time::{Duration, Instant};
+
+use super::*;
+
+fn spec(var: &str, kind: Kind) -> Option<(Spec, String)> {
+    let v = std::env::var(var).ok()?;
+    let p: Vec<&str> = v.split(':').collect();
+    let s = Spec { kind, host: p[0].into(), port: p[1].parse().unwrap(), database: p[2].into(), user: p[3].into(), save_password: false, tls: Tls::Disable, ..Default::default() };
+    Some((s, p[4].into()))
+}
+
+fn rows(o: Outcome) -> Table {
+    match o {
+        Outcome::Rows(t) => t,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn common(s: &mut dyn Session, big: &str, slow: &str, bad: &str) {
+    let mut notes = Vec::new();
+    let t = rows(s.run(big, 100, &mut |n| notes.push(n)).unwrap());
+    assert_eq!(t.rows.len(), 100);
+    assert!(t.more);
+    // The session is fine after a cut-short query.
+    let t = rows(s.run("select 1 as x", 10, &mut |_| {}).unwrap());
+    assert_eq!(t.rows[0][0].as_deref(), Some("1"));
+    assert!(t.cols[0].numeric);
+    let e = s.run(bad, 10, &mut |_| {}).unwrap_err();
+    assert!(e.at.is_some(), "{e:?}");
+    assert!(!e.lost);
+    // Cancel from another thread.
+    let c = s.canceller();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(700));
+        c();
+    });
+    let t0 = Instant::now();
+    let r = s.run(slow, 10, &mut |_| {});
+    assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+    assert!(r.is_err(), "{r:?}");
+    assert!(s.alive());
+    assert!(s.run("select 2", 10, &mut |_| {}).is_ok());
+    let root = s.children(&[]).unwrap();
+    assert!(!root.is_empty());
+}
+
+#[test]
+fn postgres() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) else { return };
+    let mut s = open(&sp, &pw).unwrap();
+    assert!(s.version().starts_with("PostgreSQL"));
+    common(&mut *s, "select g from generate_series(1, 100000) g", "select pg_sleep(30)", "select * from customers where idd = 1");
+    let mut notes = Vec::new();
+    rows(s.run("select vip(1)", 10, &mut |n| notes.push(n)).unwrap());
+    let r = s.run("do $$ begin raise notice 'hello %', 42; end $$", 10, &mut |n| notes.push(n)).unwrap();
+    assert!(matches!(r, Outcome::Done(_)));
+    assert!(notes.iter().any(|n| n.contains("hello 42")), "{notes:?}");
+    let t = rows(s.run("select id, name, total from big_orders limit 3", 10, &mut |_| {}).unwrap());
+    assert_eq!(t.cols[2].ty, "numeric");
+    assert!(matches!(s.run("update customers set active = true where id = 1", 10, &mut |_| {}).unwrap(), Outcome::Done(Some(1))));
+    let schemas = s.children(&[]).unwrap();
+    assert_eq!(schemas[0].name, "public");
+    let p = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let tables = s.children(&p(&["public", "tables"])).unwrap();
+    assert!(tables.iter().any(|t| t.name == "orders"));
+    let fns = s.children(&p(&["public", "functions"])).unwrap();
+    assert!(fns.iter().any(|f| f.name == "vip(p_id integer)"), "{fns:?}");
+    assert!(s.children(&p(&["public", "procedures"])).unwrap().iter().any(|f| f.name.starts_with("touch_customer")));
+    assert!(s.children(&p(&["public", "tables", "orders", "indexes"])).unwrap().iter().any(|i| i.name == "orders_customer"));
+    assert_eq!(s.children(&p(&["public", "views", "big_orders"])).unwrap().len(), 6);
+    let ddl = s.source(&p(&["public", "tables", "orders"]), ObjKind::Table).unwrap();
+    assert!(ddl.contains("CREATE TABLE public.orders") && ddl.contains("FOREIGN KEY") && ddl.contains("CREATE INDEX orders_customer"), "{ddl}");
+    assert!(s.source(&p(&["public", "functions", "vip(p_id integer)"]), ObjKind::Function).unwrap().contains("raise notice"));
+    assert!(s.source(&p(&["public", "views", "big_orders"]), ObjKind::View).unwrap().contains("CREATE OR REPLACE VIEW"));
+    assert!(s.source(&p(&["public", "types", "order_state"]), ObjKind::Type).unwrap().contains("ENUM ('new'"));
+    assert!(s.source(&p(&["public", "sequences", "invoice_no"]), ObjKind::Sequence).unwrap().contains("START WITH 1000"));
+    let rels = s.relations(&[]).unwrap();
+    assert!(rels.iter().any(|r| r.name == "customers" && r.cols.iter().any(|c| c.0 == "email")));
+    // Wrong password: an error, quickly, not a hang.
+    let e = open(&sp, "nope").err().unwrap();
+    assert!(e.message.contains("28P01") || e.message.to_lowercase().contains("password"), "{}", e.message);
+}
+
+#[test]
+fn clickhouse() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) else { return };
+    let mut s = open(&sp, &pw).unwrap();
+    assert!(s.version().starts_with("ClickHouse"));
+    common(&mut *s, "select number from numbers(100000000)", "select sleepEachRow(1) from numbers(30) settings max_block_size = 1", "select * from events where kindd = 1");
+    let t = rows(s.run("select kind, count() c from events group by kind order by kind", 10, &mut |_| {}).unwrap());
+    assert_eq!(t.rows.len(), 3);
+    assert_eq!(t.cols[1].ty, "UInt64");
+    // A session: SET and temporary tables live on.
+    s.run("create temporary table tmp (x UInt8)", 10, &mut |_| {}).unwrap();
+    s.run("insert into tmp values (1), (2)", 10, &mut |_| {}).unwrap();
+    assert_eq!(rows(s.run("select sum(x) from tmp", 10, &mut |_| {}).unwrap()).rows[0][0].as_deref(), Some("3"));
+    let p = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(s.children(&p(&["default", "tables"])).unwrap().iter().any(|t| t.name == "events"));
+    assert!(s.children(&p(&["default", "views"])).unwrap().iter().any(|t| t.name == "buys"));
+    assert!(s.source(&p(&["default", "tables", "events"]), ObjKind::Table).unwrap().contains("MergeTree"));
+    assert!(s.relations(&[]).unwrap().iter().any(|r| r.name == "events"));
+    // Own FORMAT: text as it came.
+    let t = rows(s.run("select 1 format TSV", 10, &mut |_| {}).unwrap());
+    assert_eq!(t.rows[0][0].as_deref(), Some("1"));
+    let e = open(&sp, "nope").err().unwrap();
+    assert!(e.message.contains("516") || e.message.contains("Authentication"), "{}", e.message);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+fn oracle() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) else { return };
+    let mut s = open(&sp, &pw).unwrap();
+    common(&mut *s, "select level from dual connect by level <= 100000", "select count(*) from all_objects a, all_objects b, all_objects c", "select dummyy from dual");
+    s.run("begin execute immediate 'drop table people'; exception when others then null; end;", 10, &mut |_| {}).unwrap();
+    s.run("create table people (id number primary key, name varchar2(100))", 10, &mut |_| {}).unwrap();
+    assert!(matches!(s.run("insert into people select level, 'p' || level from dual connect by level <= 5", 10, &mut |_| {}).unwrap(), Outcome::Done(Some(5))));
+    let mut notes = Vec::new();
+    s.run("begin dbms_output.put_line('hi from plsql'); end;", 10, &mut |n| notes.push(n)).unwrap();
+    assert_eq!(notes, vec!["hi from plsql"]);
+    let e = s.run("create or replace procedure broken is begin nul; end;", 10, &mut |_| {}).unwrap_err();
+    assert!(e.message.contains("PLS-") || e.message.contains("errors"), "{}", e.message);
+    s.run("create or replace procedure fine(p number) is begin null; end;", 10, &mut |_| {}).unwrap();
+    let user = sp.user.to_uppercase();
+    let p = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(s.children(&p(&[&user, "tables"])).unwrap().iter().any(|t| t.name == "PEOPLE"));
+    assert!(s.children(&p(&[&user, "procedures"])).unwrap().iter().any(|t| t.name == "FINE"));
+    assert!(s.source(&p(&[&user, "tables", "PEOPLE"]), ObjKind::Table).unwrap().contains("CREATE TABLE"));
+    assert!(s.source(&p(&[&user, "procedures", "FINE"]), ObjKind::Procedure).unwrap().contains("PROCEDURE"));
+    assert!(s.relations(&[]).unwrap().iter().any(|r| r.name == "PEOPLE"));
+}
+
+#[test]
+fn sqlite() {
+    let dir = std::env::temp_dir().join(format!("zapros-test-{}", new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sp = Spec { kind: Kind::Sqlite, database: dir.join("t.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut s = open(&sp, "").unwrap();
+    s.run("create table t (id integer primary key, name text, v real)", 10, &mut |_| {}).unwrap();
+    s.run("create view tv as select * from t", 10, &mut |_| {}).unwrap();
+    assert!(matches!(s.run("insert into t (name, v) values ('a', 1.5), ('b', null)", 10, &mut |_| {}).unwrap(), Outcome::Done(Some(2))));
+    let t = rows(s.run("select * from t", 1, &mut |_| {}).unwrap());
+    assert!(t.more && t.rows.len() == 1 && t.cols[2].numeric);
+    let big = "with recursive c(x) as (select 1 union all select x + 1 from c) select x from c";
+    common(&mut *s, big, "with recursive c(x) as (select 1 union all select x + 1 from c) select count(*) from c", "select idd from t");
+    assert_eq!(s.children(&["tables".into(), "t".into()]).unwrap().len(), 3);
+    let src = s.source(&["views".into(), "tv".into()], ObjKind::View).unwrap();
+    assert!(src.to_lowercase().contains("create view tv"), "{src:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
