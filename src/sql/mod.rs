@@ -5,6 +5,7 @@ pub mod complete;
 pub mod embed;
 pub mod fmt;
 pub mod lex;
+pub mod outline;
 
 use std::ops::Range;
 

@@ -75,11 +75,14 @@ fn insert_at_cursor(app: &mut App, s: &str) {
 
 fn databases(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut app.tree_filter).hint_text(t("🔎 фильтр объектов", "🔎 filter objects")).desired_width(ui.available_width() - 34.0));
+    // The button first (right to left), the field takes what's left: it
+    // never pushes the panel wider.
+    let row = egui::Vec2::new(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if ui.button("➕").on_hover_text(t("Новое подключение", "New connection")).clicked() {
             app.conn_edit = Some(crate::dialogs::ConnEdit::new(None));
         }
+        ui.add(egui::TextEdit::singleline(&mut app.tree_filter).hint_text(t("🔎 фильтр объектов", "🔎 filter objects")).desired_width(ui.available_width()));
     });
     egui::ScrollArea::both().id_salt("db-tree").auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
@@ -201,7 +204,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
             let e = e.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(Color32::from_rgb(230, 80, 80), crate::app::head(&e, 160)).on_hover_text(&e);
-                if ui.small_button("↻").clicked() {
+                if ui.button("↻").clicked() {
                     app.request_children(conn, path.clone());
                 }
             });
@@ -325,13 +328,13 @@ fn files(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).strong()).on_hover_text(root.display().to_string());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("📂").on_hover_text(t("Другая папка", "Another folder")).clicked() {
+            if ui.button("📂").on_hover_text(t("Другая папка", "Another folder")).clicked() {
                 app.project_input = Some(root.to_string_lossy().into_owned());
             }
-            if ui.small_button("↻").on_hover_text(t("Обновить", "Refresh")).clicked() {
+            if ui.button("↻").on_hover_text(t("Обновить", "Refresh")).clicked() {
                 app.files.clear();
             }
-            if ui.small_button("➕").on_hover_text(t("Новый SQL-файл", "New SQL file")).clicked() {
+            if ui.button("➕").on_hover_text(t("Новый SQL-файл", "New SQL file")).clicked() {
                 app.save_as = Some((String::new(), root.join("new.sql").to_string_lossy().into_owned()));
             }
         });

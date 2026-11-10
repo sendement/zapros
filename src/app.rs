@@ -103,6 +103,10 @@ pub struct TabRt {
     pub check_key: u64,
     pub check_due: Option<Instant>,
     pub server_err: Option<(Range<usize>, String)>,
+    /// The structure panel's entities: (text key, specification / all, body).
+    pub outline: Option<(u64, Vec<sql::outline::Entity>, Vec<sql::outline::Entity>)>,
+    /// The text changed: worked out again once typing pauses.
+    pub outline_due: Option<Instant>,
 }
 
 pub struct PasswordAsk {
@@ -142,6 +146,9 @@ pub struct App {
     pub tx_ask: Option<(Vec<String>, TxThen)>,
     /// Closing once the commits asked for are done (since when).
     pub quitting: Option<Instant>,
+    pub outline_filter: String,
+    /// The structure panel's search takes the keys next frame.
+    pub outline_focus: bool,
     force_close: bool,
     pub settings_open: bool,
     pub ws_edit: Option<usize>,
@@ -216,6 +223,8 @@ impl App {
             confirm: None,
             tx_ask: None,
             quitting: None,
+            outline_filter: String::new(),
+            outline_focus: false,
             force_close: false,
             settings_open: false,
             ws_edit: None,
@@ -335,6 +344,21 @@ impl App {
             l.auto = on;
         }
         l.query.send(Req::Tx(op));
+    }
+
+    /// Shows the package's body (or specification) in the current tab.
+    pub fn show_part(&mut self, body: bool) {
+        let id = self.tab().id.clone();
+        if self.tab_mut().show_part(body) {
+            let rt = self.rt.entry(id).or_default();
+            rt.issues.clear();
+            rt.server_err = None;
+            rt.check_key = 0;
+            rt.check_due = None;
+            rt.ed.popup = None;
+            rt.ed.focus = true;
+            self.touch();
+        }
     }
 
     /// Commit / Roll back for the current tab's connection (by hand only).
@@ -484,6 +508,7 @@ impl App {
                 }
                 self.new_tab(title, text, None);
                 self.tab_mut().path = Some(path.to_path_buf());
+                self.tab_mut().split_package();
             }
             Err(e) => self.toast(format!("{}: {e}", path.display())),
         }
@@ -492,7 +517,7 @@ impl App {
     pub fn save_tab(&mut self, wi: usize, ti: usize) {
         let tab = &self.session.workspaces[wi].tabs[ti];
         match tab.path.clone() {
-            Some(p) => match std::fs::write(&p, &tab.text) {
+            Some(p) => match std::fs::write(&p, tab.full_text()) {
                 Ok(()) => {
                     self.session.workspaces[wi].tabs[ti].modified = false;
                     if let Some(dir) = p.parent() {
@@ -798,6 +823,8 @@ impl App {
                     Ok(s) => {
                         let conn = ev.conn.clone();
                         self.new_tab(Some(open_as), s, Some(conn));
+                        // A package: specification and body apart.
+                        self.tab_mut().split_package();
                     }
                     Err(e) => self.toast(e),
                 },
@@ -868,6 +895,7 @@ impl App {
             ThemePref::Light => egui::ThemePreference::Light,
         });
         ctx.set_zoom_factor(self.settings.ui_scale.clamp(0.5, 3.0));
+        ctx.all_styles_mut(crate::ui::standard);
     }
 
     /// The active tab's connection starts in the background (when no
@@ -910,6 +938,20 @@ impl App {
 
     fn global_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
+        let (structure, spec, body) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O), i.consume_key(Modifiers::ALT, Key::Num1), i.consume_key(Modifiers::ALT, Key::Num2)));
+        if structure {
+            // Shown: to its search; shown and searched: hidden.
+            if self.session.outline && ctx.memory(|m| m.has_focus(egui::Id::new("outline-filter"))) {
+                self.session.outline = false;
+            } else {
+                self.session.outline = true;
+                self.outline_focus = true;
+            }
+            self.touch();
+        }
+        if spec || body {
+            self.show_part(body);
+        }
         let (new, close, next, prev) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::COMMAND, Key::N),

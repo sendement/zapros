@@ -29,6 +29,28 @@ const FILLET: f32 = 6.0;
 /// Where the first workspace tab starts, from the sheet's left edge.
 const TABS_FROM: f32 = 16.0;
 
+/// One look for every field, button, list and menu: corners, height,
+/// padding (the painted tabs and icons use the same radius).
+pub const RADIUS: u8 = 6;
+
+pub fn standard(s: &mut egui::Style) {
+    let r = egui::CornerRadius::same(RADIUS);
+    s.spacing.interact_size.y = 24.0;
+    s.spacing.button_padding = Vec2::new(8.0, 3.0);
+    s.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    s.spacing.menu_margin = egui::Margin::same(6);
+    s.spacing.window_margin = egui::Margin::same(12);
+    s.spacing.combo_width = 120.0;
+    let v = &mut s.visuals;
+    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.corner_radius = r;
+    }
+    // Fields and buttons edged alike when at rest.
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
+    v.window_corner_radius = egui::CornerRadius::same(10);
+    v.menu_corner_radius = egui::CornerRadius::same(8);
+}
+
 /// The window's backdrop: the side panel and around the sheet (a little
 /// darker than the sheet the editor and results lie on).
 pub fn chrome(v: &egui::Visuals) -> Color32 {
@@ -54,7 +76,7 @@ fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 7.0, fill);
+    ui.painter().rect_filled(rect, RADIUS, fill);
     let color = if on || r.hovered() { v.strong_text_color() } else { v.text_color() };
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(17.0), color);
     r.on_hover_text(tip)
@@ -65,7 +87,7 @@ fn icon_menu(ui: &mut egui::Ui, glyph: &str, tip: &str, add: impl FnOnce(&mut eg
     let r = icon(ui, glyph, false, tip);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
     if open {
-        ui.painter().rect_stroke(r.rect, 7.0, ui.visuals().widgets.hovered.bg_stroke, egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(r.rect, RADIUS, ui.visuals().widgets.hovered.bg_stroke, egui::StrokeKind::Inside);
     }
     egui::Popup::menu(&r).show(|ui| {
         ui.set_min_width(220.0);
@@ -343,7 +365,7 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     let plus = Rect::from_min_size(Pos2::new(x, row.top() + 4.0 + (row.height() - 4.0 - plus_w) / 2.0), Vec2::splat(plus_w));
     let r = ui.interact(plus, ui.id().with("ws-new"), egui::Sense::click());
     if r.hovered() {
-        painter.rect_filled(plus, 7.0, v.widgets.hovered.weak_bg_fill);
+        painter.rect_filled(plus, RADIUS, v.widgets.hovered.weak_bg_fill);
     }
     painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
     if r.on_hover_text(t("Новое рабочее пространство", "New workspace")).clicked() {
@@ -406,7 +428,7 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                     };
                     let path = tab.path.clone();
                     let title = tab_title(tab);
-                    let fr = egui::Frame::NONE.fill(fill).corner_radius(6.0).inner_margin(egui::Margin { left: 9, right: 5, top: 4, bottom: 4 }).stroke(stroke);
+                    let fr = egui::Frame::NONE.fill(fill).corner_radius(RADIUS).inner_margin(egui::Margin { left: 9, right: 5, top: 4, bottom: 4 }).stroke(stroke);
                     let shown = fr
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -472,7 +494,19 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                         }
                         if ui.button(t("Дублировать", "Duplicate")).clicked() {
                             let tb = app.ws().tabs[i].clone();
-                            app.new_tab(Some(format!("{} (2)", tb.title)), tb.text, tb.conn);
+                            app.new_tab(Some(format!("{} (2)", tb.title)), tb.full_text(), tb.conn);
+                            app.tab_mut().split_package();
+                            ui.close();
+                        }
+                        if app.ws().tabs[i].other.is_some() {
+                            if ui.button(t("Объединить спецификацию и тело", "Join specification and body")).clicked() {
+                                app.session.workspaces[wi].tabs[i].join_parts();
+                                app.touch();
+                                ui.close();
+                            }
+                        } else if crate::sql::outline::split_package(&app.ws().tabs[i].text).is_some() && ui.button(t("Разделить пакет на спецификацию и тело", "Split the package into specification and body")).clicked() {
+                            app.session.workspaces[wi].tabs[i].split_package();
+                            app.touch();
                             ui.close();
                         }
                         ui.menu_button(t("Перенести в пространство", "Move to workspace"), |ui| {
@@ -639,6 +673,13 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             ui.add(egui::Spinner::new());
             ui.label(crate::app::fmt_took(d));
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let on = app.session.outline;
+            if ui.add(egui::Button::selectable(on, if compact { "☰".to_string() } else { format!("☰ {}", t("Структура", "Structure")) })).on_hover_text(t("Панель структуры: функции, процедуры, типы, запросы   Ctrl+Shift+O", "Structure panel: functions, procedures, types, statements   Ctrl+Shift+O")).clicked() {
+                app.session.outline = !on;
+                app.touch();
+            }
+        });
     });
 }
 
@@ -710,6 +751,10 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.add_space(3.0);
         toolbar(app, ui);
         ui.add_space(2.0);
+        if app.tab().other.is_some() {
+            crate::outline_ui::parts_bar(app, ui);
+            ui.add_space(2.0);
+        }
         let full = ui.available_height();
         let h = if app.results_max { full - 60.0 } else { app.session.results_height.clamp(80.0, (full - 80.0).max(80.0)) };
         let r = egui::Panel::bottom("results").frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 0 })).resizable(!app.results_max).default_size(h).size_range(60.0..=(full - 60.0).max(61.0)).show(ui, |ui| crate::results::panel(app, ui));
@@ -720,6 +765,22 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
         let top = ui.cursor().top();
         ui.painter().hline(sheet.x_range().shrink(1.0), top - 2.0, ui.visuals().widgets.noninteractive.bg_stroke);
+        if app.session.outline {
+            let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+            let r = egui::Panel::right("outline")
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 10, right: 0, top: 4, bottom: 4 }))
+                .show_separator_line(false)
+                .resizable(true)
+                .default_size(app.session.outline_width)
+                .size_range(170.0..=520.0)
+                .show(ui, |ui| crate::outline_ui::panel(app, ui));
+            let rect = r.response.rect;
+            ui.painter().vline(rect.left() + 2.0, rect.y_range(), stroke);
+            if (rect.width() - app.session.outline_width).abs() > 1.0 {
+                app.session.outline_width = rect.width();
+                app.touch();
+            }
+        }
         let ws = app.ws().clone();
         let tab_id = app.tab().id.clone();
         let conn = app.tab_conn(&ws, app.tab());
@@ -731,13 +792,14 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let ti = app.session.workspaces[wi].active;
         let settings = app.settings.clone();
         let tab = &mut app.session.workspaces[wi].tabs[ti];
+        let part = tab.on_body;
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
         let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels };
         let out = egui::ScrollArea::both()
-            .id_salt(("editor-scroll", &tab_id))
+            .id_salt(("editor-scroll", &tab_id, tab.on_body))
             .auto_shrink([false, false])
-            .show(ui, |ui| editor::show(ui, egui::Id::new(("editor", &tab_id)), &mut tab.text, &mut rt.ed, &cx))
+            .show(ui, |ui| editor::show(ui, egui::Id::new(("editor", &tab_id, part)), &mut tab.text, &mut rt.ed, &cx))
             .inner;
         rt.issues = issues;
         if out.changed {

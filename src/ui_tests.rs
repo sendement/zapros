@@ -449,3 +449,35 @@ fn dynamic_sql_coloured_and_formatted() {
     assert!(text.contains("%I") && text.contains("%L"), "{text}");
     shot(&mut h, "dyn-pg-formatted");
 }
+
+#[test]
+fn package_parts_and_structure() {
+    let (mut h, _g) = harness("pkg", "", false);
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    h.state_mut().conns.list.push(ora);
+    let pkg = include_str!("../examples/seed/ora.sql");
+    let a = pkg.find("create or replace package shop_pkg").unwrap();
+    let b = pkg.find("create or replace function order_vat").unwrap();
+    // As the database gives it: the specification, then the body.
+    h.state_mut().new_tab(Some("SHOP_PKG".into()), pkg[a..b].to_string(), Some("ora".into()));
+    h.state_mut().tab_mut().split_package();
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    assert!(h.state().tab().text.starts_with("create or replace package shop_pkg as"));
+    // The body's function in the structure: a click shows the body there.
+    let at_body = h.state().tab().other.as_ref().unwrap().find("function customer_ltv").unwrap();
+    focus_editor(&mut h, 10);
+    shot(&mut h, "pkg-spec");
+    key(&mut h, egui::Key::Num2, egui::Modifiers::ALT);
+    focus_editor(&mut h, at_body + 12);
+    settle(&mut h);
+    assert!(h.state().tab().on_body);
+    assert!(h.state().tab().text.starts_with("create or replace package body shop_pkg"));
+    shot(&mut h, "pkg-body");
+    // Saved whole: specification first.
+    let full = h.state().tab().full_text();
+    assert!(full.find("package shop_pkg").unwrap() < full.find("package body shop_pkg").unwrap());
+    h.state_mut().tab_mut().join_parts();
+    assert!(h.state().tab().other.is_none() && h.state().tab().text == full);
+}

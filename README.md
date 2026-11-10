@@ -28,6 +28,15 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,
   keys, indexes. Double-click opens an object's DDL; "first 200 rows",
   "insert SELECT with all columns", copy / insert names.
+- **Packages in two parts.** An Oracle package (opened from the tree or a
+  file) shows its specification and body as two sub-tabs (Alt+1 / Alt+2),
+  each run (compiled) on its own and saved together.
+- **Structure panel** (Ctrl+Shift+O) beside the editor: the script's
+  statements and the objects they create; in a package its functions,
+  procedures, types, subtypes, cursors, exceptions, constants, variables
+  and initialization (both parts when split). A click goes there, a double
+  click on a declaration goes to its body; the entity under the cursor is
+  lit; a search narrows it.
 - **Project files** in the same panel: a folder of `.sql` scripts.
 - **Static analysis while typing**: unclosed strings, comments and
   brackets, `CASE` without `END` — and in PL/SQL and PL/pgSQL bodies
@@ -71,6 +80,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 | Ctrl+E, F7 | explain plan |
 | Shift+Esc | stop |
 | Ctrl+Alt+Enter · Ctrl+Alt+Backspace | commit · roll back |
+| Ctrl+Shift+O | structure panel (and its search) |
+| Alt+1 · Alt+2 | package specification · body |
 | Ctrl+Shift+F | format |
 | Ctrl+Space | hints |
 | Ctrl+/ · Ctrl+D | comment lines · duplicate line |

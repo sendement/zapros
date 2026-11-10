@@ -7,6 +7,7 @@ mod dialogs;
 mod editor;
 mod fonts;
 mod i18n;
+mod outline_ui;
 mod results;
 mod secrets;
 mod side;

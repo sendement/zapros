@@ -191,11 +191,67 @@ pub struct Tab {
     pub conn: Option<String>,
     /// The text differs from the file's.
     pub modified: bool,
+    /// A package in two parts: the one not on screen (spec or body).
+    pub other: Option<String>,
+    /// The body is on screen (else the specification).
+    pub on_body: bool,
 }
 
 impl Default for Tab {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false }
+        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false }
+    }
+}
+
+impl Tab {
+    /// Both parts of a package, specification first (as saved / run whole).
+    pub fn full_text(&self) -> String {
+        match &self.other {
+            None => self.text.clone(),
+            Some(o) if self.on_body => format!("{o}\n{}", self.text),
+            Some(o) => format!("{}\n{o}", self.text),
+        }
+    }
+
+    /// The (specification, body) texts, when split.
+    pub fn parts(&self) -> Option<(&str, &str)> {
+        let o = self.other.as_deref()?;
+        Some(if self.on_body { (o, &self.text) } else { (&self.text, o) })
+    }
+
+    /// Splits a package's text in two (the specification shown).
+    pub fn split_package(&mut self) -> bool {
+        if self.other.is_some() {
+            return false;
+        }
+        match crate::sql::outline::split_package(&self.text) {
+            Some((spec, body)) => {
+                self.text = spec;
+                self.other = Some(body);
+                self.on_body = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn join_parts(&mut self) {
+        if self.other.is_some() {
+            self.text = self.full_text();
+            self.other = None;
+            self.on_body = false;
+        }
+    }
+
+    /// Shows the body (or the specification).
+    pub fn show_part(&mut self, body: bool) -> bool {
+        if body == self.on_body {
+            return false;
+        }
+        let Some(o) = self.other.as_mut() else { return false };
+        std::mem::swap(&mut self.text, o);
+        self.on_body = body;
+        true
     }
 }
 
@@ -228,11 +284,14 @@ pub struct Session {
     pub side_width: f32,
     /// The side panel shows the project's files (else the database's objects).
     pub side_files: bool,
+    /// The structure panel beside the editor.
+    pub outline: bool,
+    pub outline_width: f32,
 }
 
 impl Default for Session {
     fn default() -> Self {
-        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false }
+        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, outline: true, outline_width: 250.0 }
     }
 }
 

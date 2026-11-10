@@ -38,6 +38,15 @@ pub fn all(app: &mut App, ctx: &egui::Context) {
     small(app, ctx);
 }
 
+/// Width of a dialog's text fields; of its number fields.
+pub const FIELD_W: f32 = 320.0;
+pub const NUM_W: f32 = 64.0;
+
+/// A number field of the standard size.
+fn num<T: egui::emath::Numeric>(ui: &mut egui::Ui, v: &mut T, range: std::ops::RangeInclusive<T>) -> egui::Response {
+    ui.add_sized([NUM_W, ui.spacing().interact_size.y], egui::DragValue::new(v).range(range))
+}
+
 fn conn_edit(app: &mut App, ctx: &egui::Context) {
     let Some(mut ed) = app.conn_edit.take() else { return };
     let mut open = true;
@@ -64,14 +73,17 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
             ui.end_row();
             ui.label(t("Название", "Name"));
             let hint = s.title();
-            ui.add(egui::TextEdit::singleline(&mut s.name).hint_text(hint));
+            ui.add(egui::TextEdit::singleline(&mut s.name).hint_text(hint).desired_width(FIELD_W));
             ui.end_row();
             if s.kind != Kind::Sqlite {
                 ui.label(t("Хост", "Host"));
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut s.host).desired_width(220.0).hint_text(if s.kind == Kind::Oracle { t("пусто — TNS / дескриптор ниже", "empty: TNS / descriptor below") } else { "localhost" }));
+                    // Host, "port", port: as wide as the fields under it.
+                    let label = ui.painter().layout_no_wrap(t("порт", "port").into(), egui::TextStyle::Body.resolve(ui.style()), Color32::WHITE).size().x;
+                    let gap = ui.spacing().item_spacing.x;
+                    ui.add(egui::TextEdit::singleline(&mut s.host).desired_width(FIELD_W - NUM_W - label - gap * 2.0).hint_text(if s.kind == Kind::Oracle { t("пусто — TNS / дескриптор ниже", "empty: TNS / descriptor below") } else { "localhost" }));
                     ui.label(t("порт", "port"));
-                    ui.add(egui::DragValue::new(&mut s.port).range(0..=65535));
+                    num(ui, &mut s.port, 0..=65535);
                 });
                 ui.end_row();
             }
@@ -86,21 +98,25 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
                 Kind::ClickHouse => "default",
                 Kind::Postgres => "postgres",
             };
-            ui.add(egui::TextEdit::singleline(&mut s.database).hint_text(hint).desired_width(300.0));
+            ui.add(egui::TextEdit::singleline(&mut s.database).hint_text(hint).desired_width(FIELD_W));
             ui.end_row();
             if s.kind != Kind::Sqlite {
                 ui.label(t("Пользователь", "User"));
-                ui.add(egui::TextEdit::singleline(&mut s.user).hint_text(match s.kind {
-                    Kind::Oracle => "system / sys as sysdba",
-                    Kind::ClickHouse => "default",
-                    _ => "postgres",
-                }));
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.user)
+                        .hint_text(match s.kind {
+                            Kind::Oracle => "system / sys as sysdba",
+                            Kind::ClickHouse => "default",
+                            _ => "postgres",
+                        })
+                        .desired_width(FIELD_W),
+                );
                 ui.end_row();
                 ui.label(t("Пароль", "Password"));
-                ui.vertical(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut ed.password).password(true).hint_text(if ed.is_new { "" } else { t("не менять", "unchanged") }));
-                    ui.checkbox(&mut s.save_password, t("Сохранить пароль (в связке ключей системы)", "Save password (in the system keyring)"));
-                });
+                ui.add(egui::TextEdit::singleline(&mut ed.password).password(true).hint_text(if ed.is_new { "" } else { t("не менять", "unchanged") }).desired_width(FIELD_W));
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut s.save_password, t("Сохранить пароль (в связке ключей системы)", "Save password (in the system keyring)"));
                 ui.end_row();
                 ui.label(if s.kind == Kind::ClickHouse { "HTTPS" } else { "TLS" });
                 ui.horizontal(|ui| match s.kind {
@@ -126,21 +142,23 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
                 });
                 ui.end_row();
                 ui.label(t("Таймаут, с", "Timeout, s"));
-                ui.add(egui::DragValue::new(&mut s.connect_timeout).range(1..=600));
+                num(ui, &mut s.connect_timeout, 1..=600);
                 ui.end_row();
             }
             ui.label(t("Строк максимум", "Row limit"));
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut s.row_limit).range(0..=10_000_000));
+                num(ui, &mut s.row_limit, 0..=10_000_000);
                 ui.label(RichText::new(t("0 — как в настройках", "0: from settings")).weak().small());
             });
             ui.end_row();
             ui.label(t("Только чтение", "Read only"));
             ui.checkbox(&mut s.read_only, t("запретить изменения (на стороне сервера)", "forbid changes (server side)"));
-            if s.kind.transactions() {
-                ui.checkbox(&mut s.auto_commit, t("автокоммит (иначе фиксировать вручную)", "auto-commit (else commit by hand)"));
-            }
             ui.end_row();
+            if s.kind.transactions() {
+                ui.label(t("Транзакции", "Transactions"));
+                ui.checkbox(&mut s.auto_commit, t("автокоммит (иначе фиксировать вручную)", "auto-commit (else commit by hand)"));
+                ui.end_row();
+            }
             ui.label(t("Цвет", "Colour"));
             ui.horizontal(|ui| {
                 if ui.selectable_label(s.color.is_none(), "∅").clicked() {
@@ -457,7 +475,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 });
                 ui.horizontal(|ui| {
                     ui.label(t("Строк в результате максимум", "Rows per result at most"));
-                    ui.add(egui::DragValue::new(&mut s.row_limit).range(1..=10_000_000));
+                    num(ui, &mut s.row_limit, 1..=10_000_000);
                 });
                 ui.checkbox(&mut s.continue_on_error, t("Продолжать скрипт после ошибки", "Go on with the script after an error"));
                 ui.checkbox(&mut s.confirm_unsafe, t("Спрашивать перед UPDATE / DELETE без WHERE", "Ask before UPDATE / DELETE without WHERE"));
@@ -469,7 +487,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 });
                 ui.horizontal(|ui| {
                     ui.label(t("Ширина табуляции", "Tab width"));
-                    ui.add(egui::DragValue::new(&mut s.tab_width).range(1..=8));
+                    num(ui, &mut s.tab_width, 1..=8);
                 });
                 ui.checkbox(&mut s.auto_pairs, t("Закрывать скобки и кавычки парой", "Close brackets and quotes in pairs"));
                 ui.checkbox(&mut s.blank_line_splits, t("Пустая строка разделяет запросы (для Ctrl+Enter)", "An empty line separates statements (for Ctrl+Enter)"));
@@ -546,7 +564,7 @@ fn workspace(app: &mut App, ctx: &egui::Context) {
         let ws = &mut app.session.workspaces[i];
         egui::Grid::new("ws").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label(t("Название", "Name"));
-            changed |= ui.text_edit_singleline(&mut ws.name).changed();
+            changed |= ui.add(egui::TextEdit::singleline(&mut ws.name).desired_width(FIELD_W)).changed();
             ui.end_row();
             ui.label(t("Цвет", "Colour"));
             ui.horizontal(|ui| {
@@ -566,7 +584,7 @@ fn workspace(app: &mut App, ctx: &egui::Context) {
             ui.end_row();
             ui.label(t("Подключение", "Connection"));
             let cur = ws.conn.as_ref().and_then(|c| conns.iter().find(|(id, _)| id == c)).map_or(t("нет", "none").to_string(), |(_, n)| n.clone());
-            egui::ComboBox::from_id_salt("ws-conn").selected_text(cur).width(260.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("ws-conn").selected_text(cur).width(FIELD_W).show_ui(ui, |ui| {
                 if ui.selectable_label(ws.conn.is_none(), t("нет", "none")).clicked() {
                     ws.conn = None;
                     changed = true;
@@ -712,6 +730,8 @@ fn small(app: &mut App, ctx: &egui::Context) {
                     ("Shift+Esc", t("остановить запрос", "stop the query")),
                     ("Ctrl+Alt+Enter", t("зафиксировать транзакцию (без автокоммита)", "commit (auto-commit off)")),
                     ("Ctrl+Alt+Backspace", t("откатить транзакцию", "roll back")),
+                    ("Ctrl+Shift+O", t("панель структуры и поиск по ней", "structure panel and its search")),
+                    ("Alt+1 / Alt+2", t("спецификация / тело пакета", "package specification / body")),
                     ("Ctrl+Shift+F", t("форматировать", "format")),
                     ("Ctrl+Space", t("подсказки", "hints")),
                     ("Ctrl+/", t("закомментировать строки", "comment lines")),

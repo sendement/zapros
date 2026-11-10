@@ -77,7 +77,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let mut rt = app.rt.remove(&tab_id).unwrap_or_default();
     let mut export: Option<usize> = None;
     ui.horizontal(|ui| {
-        egui::ScrollArea::horizontal().id_salt("res-tabs").max_width(ui.available_width() - 320.0).show(ui, |ui| {
+        egui::ScrollArea::horizontal().id_salt("res-tabs").max_width((ui.available_width() - 380.0).max(80.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, r) in rt.results.iter().enumerate() {
                     let label = format!("▦ {} ({}{})", r.title, r.table.rows.len(), if r.table.more { "+" } else { "" });
@@ -169,7 +169,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) {
                 let s = val.clone().unwrap_or_else(|| "NULL".into());
                 let one = crate::app::head(&s, 240);
                 ui.label(RichText::new(one).small().monospace());
-                if ui.small_button("🗐").on_hover_text(t("Копировать значение", "Copy value")).clicked() {
+                if ui.button("🗐").on_hover_text(t("Копировать значение", "Copy value")).clicked() {
                     ctx.copy_text(s);
                 }
             });
