@@ -213,3 +213,19 @@ fn sqlite_transactions() {
     by_hand(&sp, "", "zapros_tx", "create table zapros_tx (n int check (typeof(n) = 'integer'))", "drop table if exists zapros_tx");
     let _ = std::fs::remove_file(&d);
 }
+
+/// Every connection saved in the user's config opens with its saved
+/// password and shows its tree: cargo test saved_connections -- --ignored
+#[test]
+#[ignore]
+fn saved_connections() {
+    let list: crate::config::Connections = crate::config::load(&crate::config::config_dir().join("connections.json"));
+    assert!(!list.list.is_empty());
+    for sp in &list.list {
+        let pw = crate::secrets::get(&sp.id).unwrap_or_default();
+        let mut s = open(sp, &pw).unwrap_or_else(|e| panic!("{}: {}", sp.title(), e.message));
+        let root: Vec<String> = s.children(&[]).unwrap().into_iter().map(|o| o.name).collect();
+        let rels = s.relations(&[]).unwrap().len();
+        eprintln!("{} — {} — {root:?}, {rels} tables in hints", sp.title(), s.version());
+    }
+}

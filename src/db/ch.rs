@@ -274,9 +274,15 @@ impl Session for Ch {
     }
 
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {
-        let cond = if schemas.is_empty() { "database = currentDatabase()".to_string() } else { format!("database IN ({})", schemas.iter().map(|s| literal(s)).collect::<Vec<_>>().join(", ")) };
+        // None asked for: every database but the system's.
+        let cond = if schemas.is_empty() {
+            "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')".to_string()
+        } else {
+            format!("database IN ({})", schemas.iter().map(|s| literal(s)).collect::<Vec<_>>().join(", "))
+        };
         let rows = self.rows(&format!("SELECT database, table, name, type FROM system.columns WHERE {cond} ORDER BY database, table, position"))?;
-        Ok(super::pg::group_relations(rows))
+        let current = self.rows("SELECT currentDatabase()")?.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default();
+        Ok(qualify(super::pg::group_relations(rows), &[current]))
     }
 
     fn canceller(&self) -> Canceller {

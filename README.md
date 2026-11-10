@@ -66,6 +66,20 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 | Ctrl+T · Ctrl+W · Ctrl+Tab | new · close · next tab |
 | Ctrl+S | save to file |
 
+## Demo data
+
+`examples/seed/` fills a shop database (customers, products, orders with
+items and payments, staff in departments; names in Russian) with views,
+functions, a procedure, a trigger, a sequence, a materialized view and —
+in Oracle — a package, an object type, a synonym and a scheduler job:
+
+```sh
+psql -U shop -d shop -f examples/seed/pg.sql                        # 300k orders, 900k items
+sqlplus shop/shop@//host/FREEPDB1 @examples/seed/ora.sql            # ora_user.sql as SYSTEM first
+clickhouse-client --multiquery < examples/seed/ch.sql               # 1M orders, 5M page views
+python3 examples/seed/sqlite.py shop.db                              # 100k orders
+```
+
 ## Building
 
 ```sh

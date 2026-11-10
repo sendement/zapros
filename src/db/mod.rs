@@ -286,6 +286,17 @@ pub struct Relation {
     pub schema: String,
     pub name: String,
     pub cols: Vec<(String, String)>,
+    /// Off the search path (another schema / database): written with its
+    /// schema when a hint puts it in.
+    pub qualify: bool,
+}
+
+/// Marks the relations outside `visible` schemas as needing their schema.
+pub fn qualify(mut rels: Vec<Relation>, visible: &[String]) -> Vec<Relation> {
+    for r in &mut rels {
+        r.qualify = !visible.iter().any(|v| v.eq_ignore_ascii_case(&r.schema));
+    }
+    rels
 }
 
 /// Talks to one server; lives on its worker's thread.

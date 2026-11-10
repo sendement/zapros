@@ -69,6 +69,12 @@ const SNIPPETS: &[(&str, &str, &str)] = &[
     ("lj", "LEFT JOIN $0 ON ", "LEFT JOIN … ON"),
 ];
 
+/// How a table goes into the text: bare on the search path, else with
+/// its schema.
+fn qualified(r: &Relation, d: Dialect) -> String {
+    if r.qualify { format!("{}.{}", quote(&r.schema, d), quote(&r.name, d)) } else { quote(&r.name, d) }
+}
+
 fn ident_text(src: &str, t: &Tok) -> Option<String> {
     match t.kind {
         Tk::Word | Tk::Keyword => Some(t.text(src).to_string()),
@@ -211,7 +217,7 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, fo
     } else if matches!(prev.as_str(), "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" | "TRUNCATE" | "DESCRIBE" | "DESC") || (prev == "," && before.iter().rev().find(|t| t.kind == Tk::Keyword).is_some_and(|t| t.text(&src[stmt.start..start]).eq_ignore_ascii_case("FROM"))) {
         let mut schemas: Vec<&str> = rels.iter().map(|r| r.schema.as_str()).collect();
         schemas.dedup();
-        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: quote(&r.name, d), kind: Kind::Table, detail: format!("{} · {}", r.schema, r.cols.len()) }));
+        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d), kind: Kind::Table, detail: format!("{} · {}", r.schema, r.cols.len()) }));
         items.extend(schemas.iter().map(|s| Item { label: s.to_string(), insert: quote(s, d), kind: Kind::Schema, detail: String::new() }));
     } else {
         if prev == "ON" {
@@ -228,7 +234,7 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, fo
             let name = if d == Dialect::ClickHouse { f.to_string() } else { case.apply(f) };
             Item { label: f.to_string(), insert: format!("{name}($0)"), kind: Kind::Function, detail: String::new() }
         }));
-        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: quote(&r.name, d), kind: Kind::Table, detail: r.schema.clone() }));
+        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d), kind: Kind::Table, detail: r.schema.clone() }));
     }
     let p = prefix.to_lowercase();
     let mut scored: Vec<(u8, Item)> = items
@@ -281,8 +287,8 @@ mod tests {
 
     fn rels() -> Vec<Relation> {
         vec![
-            Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())] },
-            Relation { schema: "public".into(), name: "orders".into(), cols: vec![("id".into(), "int".into()), ("user_id".into(), "int".into()), ("total".into(), "numeric".into())] },
+            Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())], qualify: false },
+            Relation { schema: "public".into(), name: "orders".into(), cols: vec![("id".into(), "int".into()), ("user_id".into(), "int".into()), ("total".into(), "numeric".into())], qualify: false },
         ]
     }
 
@@ -307,6 +313,18 @@ mod tests {
         let src = "select * from users u join orders o on ";
         let h = hints(src, src.len(), Dialect::Postgres, &rels(), Case::Upper, true).unwrap();
         assert_eq!(h.items[0].insert, "o.user_id = u.id");
+    }
+
+    #[test]
+    fn tables_off_the_search_path_keep_their_schema() {
+        let mut r = rels();
+        r.push(Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true });
+        let src = "select * from inv";
+        let h = hints(src, src.len(), Dialect::Postgres, &r, Case::Upper, false).unwrap();
+        assert_eq!(h.items[0].insert, "sales.invoices");
+        // Its columns by alias all the same.
+        let h = hints("select i. from sales.invoices i", 9, Dialect::Postgres, &r, Case::Upper, false).unwrap();
+        assert_eq!(h.items[0].label, "id");
     }
 
     #[test]

@@ -312,12 +312,26 @@ impl Session for Ora {
 
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {
         let mut out = Vec::new();
-        let list: Vec<String> = if schemas.is_empty() { vec![self.rows("SELECT USER FROM dual", &[])?.remove(0).remove(0)] } else { schemas.to_vec() };
+        let me = self.rows("SELECT USER FROM dual", &[])?.remove(0).remove(0);
+        // None asked for: the user's own and what others (not Oracle's own
+        // schemas) let it see.
+        let list: Vec<String> = if schemas.is_empty() {
+            let mut l = vec![me.clone()];
+            let others = self.rows(
+                "SELECT DISTINCT t.owner FROM all_tables t JOIN all_users u ON u.username = t.owner
+                  WHERE u.oracle_maintained = 'N' AND t.owner <> USER ORDER BY 1",
+                &[],
+            )?;
+            l.extend(others.into_iter().filter_map(|r| r.into_iter().next()));
+            l
+        } else {
+            schemas.to_vec()
+        };
         for s in list {
             let rows = self.rows("SELECT owner, table_name, column_name, data_type FROM all_tab_columns WHERE owner = :1 AND table_name NOT LIKE 'BIN$%' ORDER BY table_name, column_id", &[&s])?;
             out.extend(super::pg::group_relations(rows));
         }
-        Ok(out)
+        Ok(qualify(out, &[me]))
     }
 
     fn canceller(&self) -> Canceller {

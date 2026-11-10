@@ -116,3 +116,20 @@ fn file_remove(id: &str) {
         store(&m).ok();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Stores passwords given as ZAPROS_SEED_SECRETS="id=password,…" (for
+    /// setting up local test databases): cargo test seed_secrets -- --ignored
+    #[test]
+    #[ignore]
+    fn seed_secrets() {
+        let v = std::env::var("ZAPROS_SEED_SECRETS").unwrap_or_default();
+        for pair in v.split(',').filter(|p| !p.is_empty()) {
+            let (id, pw) = pair.split_once('=').expect("id=password");
+            let at = super::set(id, pw).unwrap();
+            assert_eq!(super::get(id).as_deref(), Some(pw));
+            eprintln!("{id}: {at}");
+        }
+    }
+}

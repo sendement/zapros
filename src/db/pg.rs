@@ -408,7 +408,18 @@ impl Session for Pg {
     }
 
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {
-        let list = if schemas.is_empty() { self.one("select array_to_string(current_schemas(false), ',')", &[])? } else { schemas.join(",") };
+        // None asked for: every schema of the user's (those on the search
+        // path written bare, the others with their schema).
+        let path: Vec<String> = self.one("select array_to_string(current_schemas(false), ',')", &[])?.split(',').map(str::to_string).collect();
+        let list = if schemas.is_empty() {
+            self.one(
+                "select string_agg(nspname, ',') from pg_namespace
+                  where nspname !~ '^pg_' and nspname <> 'information_schema' and has_schema_privilege(oid, 'USAGE')",
+                &[],
+            )?
+        } else {
+            schemas.join(",")
+        };
         let rows = self.rows(
             "select n.nspname::text, c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod)
                from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -417,7 +428,7 @@ impl Session for Pg {
               order by 1, 2, a.attnum",
             &[&list],
         )?;
-        Ok(group_relations(rows))
+        Ok(qualify(group_relations(rows), &path))
     }
 
     fn canceller(&self) -> Canceller {
@@ -498,7 +509,7 @@ pub fn group_relations(rows: Vec<Vec<String>>) -> Vec<Relation> {
     let mut out: Vec<Relation> = Vec::new();
     for r in rows {
         if out.last().is_none_or(|l| l.schema != r[0] || l.name != r[1]) {
-            out.push(Relation { schema: r[0].clone(), name: r[1].clone(), cols: Vec::new() });
+            out.push(Relation { schema: r[0].clone(), name: r[1].clone(), cols: Vec::new(), qualify: false });
         }
         out.last_mut().unwrap().cols.push((r[2].clone(), r.get(3).cloned().unwrap_or_default()));
     }
