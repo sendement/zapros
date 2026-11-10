@@ -160,61 +160,45 @@ fn warn_color(dark: bool) -> Color32 {
 
 /// The text laid out with colours.
 pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> LayoutJob {
+    use crate::sql::embed::Class;
     let pal: &Palette = if cx.dark { &cx.settings.dark } else { &cx.settings.light };
-    let toks = lex::lex(text, cx.dialect);
+    // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
+    let spans = crate::sql::embed::classify(text, cx.dialect, cx.settings.embedded_sql);
     let mono = FontId::monospace(font);
     let bold = if mono_bold && pal.bold_keywords { FontId::new(font, FontFamily::Name("mono-bold".into())) } else { mono.clone() };
     let rainbow = if cx.dark { RAINBOW_DARK } else { RAINBOW_LIGHT };
-    // Each token's format.
-    let mut depth = 0usize;
-    let mut fmts: Vec<TextFormat> = Vec::with_capacity(toks.len());
-    for (k, tk) in toks.iter().enumerate() {
+    // SQL in a string: a faint wash of the string colour, deeper ones more.
+    let wash = |level: u8| {
+        let c = rgb(pal.string);
+        let a = (if cx.dark { 16 } else { 22 }) * level.min(3);
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+    };
+    let fmt_of = |sp: &crate::sql::embed::Span| -> TextFormat {
         let mut f = TextFormat::simple(mono.clone(), rgb(pal.text));
-        match tk.kind {
-            Tk::Keyword => {
-                let called = toks[k + 1..].iter().find(|x| x.kind != Tk::Space).is_some_and(|x| x.kind == Tk::Open && x.text(text) == "(");
-                if called && !matches!(tk.text(text).to_ascii_uppercase().as_str(), "IN" | "EXISTS" | "AS" | "VALUES" | "ON" | "USING" | "OVER" | "AND" | "OR" | "NOT" | "INTO" | "ANY" | "ALL" | "FILTER" | "WITHIN") {
-                    f.color = rgb(pal.function);
-                } else {
-                    f.color = rgb(pal.keyword);
-                    f.font_id = bold.clone();
-                }
+        match sp.class {
+            Class::Keyword => {
+                f.color = rgb(pal.keyword);
+                f.font_id = bold.clone();
             }
-            Tk::Word => {
-                let w = tk.text(text);
-                let called = toks[k + 1..].iter().find(|x| x.kind != Tk::Space).is_some_and(|x| x.kind == Tk::Open && x.text(text) == "(");
-                let after_dot = k > 0 && toks[k - 1].kind == Tk::Dot;
-                if called && !after_dot {
-                    f.color = rgb(pal.function);
-                } else if crate::sql::is_type(w) && !after_dot {
-                    f.color = rgb(pal.type_);
-                }
-            }
-            Tk::Str => f.color = rgb(pal.string),
-            Tk::Number => f.color = rgb(pal.number),
-            Tk::LineComment | Tk::BlockComment => {
+            Class::Function => f.color = rgb(pal.function),
+            Class::Type => f.color = rgb(pal.type_),
+            Class::Str => f.color = rgb(pal.string),
+            Class::Number => f.color = rgb(pal.number),
+            Class::Comment => {
                 f.color = rgb(pal.comment);
                 f.italics = pal.italic_comments;
             }
-            Tk::Quoted => f.color = rgb(pal.quoted),
-            Tk::Param => f.color = rgb(pal.param),
-            Tk::Open => {
-                if pal.rainbow {
-                    f.color = rainbow[depth % 4];
-                }
-                depth += 1;
-            }
-            Tk::Close => {
-                depth = depth.saturating_sub(1);
-                if pal.rainbow {
-                    f.color = rainbow[depth % 4];
-                }
-            }
-            Tk::Op | Tk::Comma | Tk::Semi | Tk::Dot | Tk::Slash => f.color = rgb(pal.operator),
-            _ => {}
+            Class::Quoted => f.color = rgb(pal.quoted),
+            Class::Param => f.color = rgb(pal.param),
+            Class::Op => f.color = rgb(pal.operator),
+            Class::Bracket(depth) => f.color = if pal.rainbow { rainbow[depth as usize % 4] } else { rgb(pal.operator) },
+            Class::Text => {}
         }
-        fmts.push(f);
-    }
+        if sp.level > 0 {
+            f.background = wash(sp.level);
+        }
+        f
+    };
     // Overlays: problems, the server's error, the bracket pair.
     let mut over: Vec<(Range<usize>, u8)> = Vec::new();
     for i in cx.issues {
@@ -227,7 +211,7 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         over.push((a..a + 1, 4));
         over.push((b..b + 1, 4));
     }
-    let mut cuts: Vec<usize> = toks.iter().map(|t| t.start).collect();
+    let mut cuts: Vec<usize> = spans.iter().map(|t| t.range.start).collect();
     for (r, _) in &over {
         // (Ranges found before the last edit may end inside a letter.)
         cuts.push(floor(text, r.start));
@@ -245,10 +229,10 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         if a >= b {
             continue;
         }
-        while ti + 1 < toks.len() && toks[ti + 1].start <= a {
+        while ti + 1 < spans.len() && spans[ti + 1].range.start <= a {
             ti += 1;
         }
-        let mut f = fmts.get(ti).cloned().unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
+        let mut f = spans.get(ti).map(&fmt_of).unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
         for (r, kind) in &over {
             if r.start <= a && b <= r.end.max(r.start + 1) && r.start < text.len() {
                 match kind {

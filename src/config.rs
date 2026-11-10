@@ -135,6 +135,8 @@ pub struct Settings {
     pub hints_auto: bool,
     pub hint_case: Case,
     pub auto_pairs: bool,
+    /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
+    pub embedded_sql: bool,
     pub format: FmtOptions,
     pub dark: Palette,
     pub light: Palette,
@@ -165,6 +167,7 @@ impl Default for Settings {
             light: Palette::light(),
             confirm_unsafe: true,
             autosave_secs: 3,
+            embedded_sql: true,
         }
     }
 }

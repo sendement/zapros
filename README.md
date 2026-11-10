@@ -39,6 +39,17 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Hints**: columns after `alias.`, tables after `FROM` / `JOIN`, a join
   condition guessed from column names after `ON`, keywords and functions of
   the dialect, snippets (`sel`, `case`, `cte`, …).
+- **SQL inside strings.** Dynamic SQL (`EXECUTE IMMEDIATE`, PL/pgSQL
+  `EXECUTE`, `OPEN … FOR`, `format()`, `DBMS_SQL.PARSE`), strings kept in
+  variables that end up there, literals reading as a statement, and
+  PostgreSQL `$$` bodies are coloured as SQL (strings in them on a faint
+  wash). A statement built with `||` is read as one text, the expressions
+  standing in as placeholders, so quotes, brackets and clauses pair up
+  across the pieces. The formatter lays such a statement out — a `q'[…]'`
+  or `'…'` literal over several lines, a `||` chain one piece per line with
+  the quotes under each other — and only re-cases keywords in a piece of a
+  statement (`v_sql := v_sql || ' and …'`); anything it can't redo token
+  for token is left alone.
 - **Formatter** ("river" style, leading commas; keyword / function case
   configurable). PL/SQL units and `$$` bodies are left as written.
 - **Highlighting** with a palette per theme (colour pickers, bold keywords,

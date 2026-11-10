@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod complete;
+pub mod embed;
 pub mod fmt;
 pub mod lex;
 

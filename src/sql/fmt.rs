@@ -94,6 +94,26 @@ fn tokens(src: &str, d: Dialect) -> Vec<Tok> {
             out[j] = Tok { k: K::Keyword, s: up, ..out[j].clone() };
         }
     }
+    // A sign before a number with no operand before it stays on it: -12.
+    let mut j = 0;
+    while j + 1 < out.len() {
+        let unary = out[j].k == K::Op
+            && matches!(out[j].s.as_str(), "-" | "+")
+            && (j == 0
+                || matches!(out[j - 1].k, K::Open | K::Comma | K::Op)
+                || out[j - 1].k == K::Keyword
+                    && matches!(
+                        out[j - 1].s.as_str(),
+                        "SELECT" | "THEN" | "ELSE" | "WHEN" | "AND" | "OR" | "NOT" | "RETURN" | "IN" | "BETWEEN" | "BY" | "VALUES" | "IS" | "LIKE" | "WHERE" | "ON" | "SET" | "LIMIT" | "OFFSET" | "DEFAULT" | "INTERVAL" | "HAVING"
+                    ))
+            && out[j + 1].k == K::Word
+            && out[j + 1].s.starts_with(|c: char| c.is_ascii_digit() || c == '.');
+        if unary {
+            let num = out.remove(j + 1);
+            out[j] = Tok { k: K::Word, s: format!("{}{}", out[j].s, num.s), own: out[j].own };
+        }
+        j += 1;
+    }
     out
 }
 
@@ -573,11 +593,13 @@ fn format_one(src: &str, d: Dialect) -> String {
 pub struct Options {
     pub keywords: Case,
     pub functions: Case,
+    /// SQL in strings (dynamic SQL, $$ bodies) laid out too.
+    pub embedded: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true }
     }
 }
 
@@ -617,7 +639,7 @@ pub fn format(src: &str, d: Dialect, o: Options) -> String {
     if src.ends_with('\n') {
         s.push('\n');
     }
-    s
+    if o.embedded { super::embed::format_strings(&s, d, o, 0) } else { s }
 }
 
 /// Keywords and functions in the case asked for ("as is": as in `orig`).
@@ -676,11 +698,18 @@ mod tests {
         assert_eq!(format(src, Dialect::Oracle, o), "-- head\nSELECT a\n     , b\n  FROM t;\n\nbegin\n  null;\nend;\n/\n");
         let src = "do $$ begin perform 1; end $$;";
         assert_eq!(format(src, Dialect::Postgres, o), src);
-        let lower = Options { keywords: Case::Lower, functions: Case::Lower };
+        let lower = Options { keywords: Case::Lower, functions: Case::Lower, ..o };
         assert_eq!(format("SELECT Count(x) FROM t", Dialect::Postgres, lower), "select count(x)\n  from t");
-        let keep = Options { keywords: Case::AsIs, functions: Case::AsIs };
+        let keep = Options { keywords: Case::AsIs, functions: Case::AsIs, ..o };
         assert_eq!(format("Select Count(x) from t", Dialect::Postgres, keep), "Select Count(x)\n  from t");
         assert_eq!(format("select countIf(x > 1) from t", Dialect::ClickHouse, o), "SELECT countIf(x > 1)\n  FROM t");
+    }
+
+    #[test]
+    fn signs_and_binds_stay_put() {
+        let o = Options::default();
+        let f = format("select add_months(d, -12), x - 1, case when a then -1 else +2 end from t where a = :1 and b = -0.5", Dialect::Oracle, o);
+        assert!(f.contains("ADD_MONTHS(d, -12)") && f.contains("x - 1") && f.contains("THEN -1 ELSE +2") && f.contains(":1") && f.contains("= -0.5"), "{f}");
     }
 
     #[test]

@@ -495,7 +495,8 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.label(t("Функции", "Functions"));
                     case_pick(ui, &mut s.format.functions, "ff");
                 });
-                ui.label(RichText::new(t("Стиль «река»: ключевые слова выровнены по правому краю SELECT, запятые в начале строки. PL/SQL-блоки и тела в $$ не трогаются.", "\"River\" style: clause words end where SELECT does, leading commas. PL/SQL blocks and $$ bodies are left alone.")).weak().small());
+                ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
+                ui.label(RichText::new(t("Стиль «река»: ключевые слова выровнены по правому краю SELECT, запятые в начале строки. Сами PL/SQL-блоки и тела в $$ не перекладываются, но запросы в строках внутри них (EXECUTE IMMEDIATE, EXECUTE, format()) раскладываются: склейка через || — по куску на строку, кусок запроса — только регистр.", "\"River\" style: clause words end where SELECT does, leading commas. PL/SQL blocks and $$ bodies keep their layout, but statements in strings inside them (EXECUTE IMMEDIATE, EXECUTE, format()) are laid out: a || chain gets a piece per line, a piece of a statement only its case.")).weak().small());
                 ui.separator();
                 ui.label(RichText::new(t("Пример", "Preview")).strong());
                 let f = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format);
@@ -504,13 +505,14 @@ fn settings(app: &mut App, ctx: &egui::Context) {
             _ => {
                 let dark = ui.visuals().dark_mode;
                 ui.label(RichText::new(if dark { t("Палитра тёмной темы", "Dark theme palette") } else { t("Палитра светлой темы", "Light theme palette") }).strong());
+                ui.checkbox(&mut s.embedded_sql, t("SQL внутри строк подсвечивать как SQL (динамический SQL, тела $$)", "Colour SQL inside strings as SQL (dynamic SQL, $$ bodies)"));
                 let p = if dark { &mut s.dark } else { &mut s.light };
                 palette_ui(ui, p);
                 if ui.button(t("Вернуть по умолчанию", "Reset to defaults")).clicked() {
                     *p = if dark { Palette::dark() } else { Palette::light() };
                 }
                 ui.separator();
-                let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\nselect (1 + 2";
+                let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\nselect (1 + 2";
                 let issues = crate::sql::check::check(&sample, Dialect::Postgres, None);
                 let snapshot = s.clone();
                 let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[] };

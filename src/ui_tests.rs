@@ -410,3 +410,42 @@ fn random_typing_never_panics() {
     eprintln!("fuzz text ({} → {} bytes):\n{end}", start.len(), end.len());
     assert!(end != start && end.chars().filter(|c| !c.is_ascii()).count() > 20, "typing didn't reach the editor");
 }
+
+pub const ORA_DYNAMIC: &str = "create or replace procedure purge_orders(p_status varchar2, p_days number) is\n  v_sql varchar2(4000);\n  v_cnt number;\nbegin\n  v_sql := 'select count(*) from orders o join customers c on c.id = o.customer_id where o.status = :1 and o.created_at < sysdate - ' || p_days;\n  if p_status = 'new' then\n    v_sql := v_sql || ' and o.note is null and c.segment in (''retail'', ''vip'')';\n  end if;\n  execute immediate v_sql into v_cnt using p_status;\n  execute immediate q'[delete from order_audit where changed_at < add_months(sysdate, -12) and new_status = 'cancelled']';\n  dbms_output.put_line('Удалено: ' || v_cnt);\nend;\n/\n";
+
+pub const PG_DYNAMIC: &str = "create or replace function sales.archive(p_table text, p_before date) returns bigint\nlanguage plpgsql as $$\ndeclare\n  n bigint;\nbegin\n  execute format('insert into archive.%I select * from sales.%I where created_at < %L and status in (''delivered'', ''cancelled'')', p_table, p_table, p_before);\n  get diagnostics n = row_count;\n  execute 'delete from sales.' || quote_ident(p_table) || ' where created_at < $1' using p_before;\n  return n;\nend $$;\n";
+
+#[test]
+fn dynamic_sql_coloured_and_formatted() {
+    let (mut h, _g) = harness("dyn", ORA_DYNAMIC, false);
+    // An Oracle connection that never answers: only its dialect is used.
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    let pg = Spec { id: "pgd".into(), name: "pg".into(), kind: Kind::Postgres, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    h.state_mut().conns.list.extend([ora, pg]);
+    h.state_mut().tab_mut().conn = Some("ora".into());
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    shot(&mut h, "dyn-ora");
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    h.state_mut().ask = None;
+    settle(&mut h);
+    let text = h.state().tab().text.clone();
+    assert!(text.contains("'SELECT COUNT(*)'"), "{text}");
+    assert!(text.contains("q'[DELETE"), "{text}");
+    assert!(text.contains("' AND o.note IS NULL"), "{text}");
+    shot(&mut h, "dyn-ora-formatted");
+    h.state_mut().new_tab(Some("pg".into()), PG_DYNAMIC.into(), Some("pgd".into()));
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    shot(&mut h, "dyn-pg");
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    h.state_mut().ask = None;
+    settle(&mut h);
+    let text = h.state().tab().text.clone();
+    assert!(text.contains("%I") && text.contains("%L"), "{text}");
+    shot(&mut h, "dyn-pg-formatted");
+}
