@@ -144,6 +144,13 @@ pub fn first_word(sql: &str) -> &str {
     t.iter().find(|t| !t.trivia()).filter(|t| matches!(t.kind, Tk::Keyword | Tk::Word)).map_or("", |t| t.text(sql))
 }
 
+/// A quoted name's text: without its quotes (the closing one may be
+/// missing while it's being typed).
+pub fn unquote(s: &str) -> &str {
+    let inner = s.get(1..).unwrap_or("");
+    inner.strip_suffix(['"', '`', ']']).unwrap_or(inner)
+}
+
 /// The first `n` words of a statement, lower case (comments skipped).
 pub fn first_words(sql: &str, n: usize) -> Vec<String> {
     let t = lex::lex(sql, Dialect::Generic);
@@ -246,7 +253,7 @@ pub fn statement_at(src: &str, at: usize, d: Dialect, blank_lines: bool) -> Opti
         return Some(r.clone());
     }
     // After the ";": the statement before, while still on its line.
-    let line_start = src[..at.min(src.len())].rfind('\n').map_or(0, |i| i + 1);
+    let line_start = src[..crate::editor::floor(src, at)].rfind('\n').map_or(0, |i| i + 1);
     all.iter().rev().find(|r| r.end <= at && r.end + 1 >= line_start && src[r.end..at].trim_start_matches(';').trim().is_empty()).cloned()
 }
 

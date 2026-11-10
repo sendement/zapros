@@ -672,7 +672,7 @@ pub fn status(app: &mut App, ui: &mut egui::Ui) {
                 if let Some(rt) = app.rt.get(&tab.id) {
                     if let Some((p, _)) = rt.ed.cursor {
                         let line = crate::app::line_of(&tab.text, p);
-                        let col = tab.text[..p.min(tab.text.len())].rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+                        let col = tab.text[..crate::editor::floor(&tab.text, p)].rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
                         ui.label(RichText::new(format!("{line}:{col}")).small());
                     }
                     let e = rt.issues.iter().filter(|i| i.sev == Sev::Error).count();

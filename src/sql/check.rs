@@ -279,7 +279,7 @@ fn unknown_names(src: &str, s: &[&Tok], words: &[String], depth: &[i32], d: Dial
         let t = s.get(k)?;
         match t.kind {
             Tk::Word | Tk::Keyword => Some(t.text(src).to_lowercase()),
-            Tk::Quoted => Some(t.text(src)[1..t.text(src).len().saturating_sub(1)].to_lowercase()),
+            Tk::Quoted => Some(super::unquote(t.text(src)).to_lowercase()),
             _ => None,
         }
     };

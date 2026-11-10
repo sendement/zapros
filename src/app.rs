@@ -938,7 +938,7 @@ impl App {
 }
 
 pub fn line_of(text: &str, at: usize) -> usize {
-    text[..at.min(text.len())].matches('\n').count() + 1
+    text[..crate::editor::floor(text, at)].matches('\n').count() + 1
 }
 
 pub fn head(s: &str, n: usize) -> String {

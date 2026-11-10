@@ -207,9 +207,9 @@ pub fn lex(src: &str, d: Dialect) -> Vec<Tok> {
                 _ => Tk::Op,
             };
             if kind == Tk::Op {
-                let three = &src[i..(i + 3).min(n)];
+                // (Bytes: a letter of two bytes may follow.)
                 let ops = ["->>", "#>>", "<=>", "<=", ">=", "<>", "!=", "||", "::", "->", "#>", "=>", ":=", "@>", "<@", "&&", "**", "!~", "~*"];
-                i += ops.iter().find(|op| three.starts_with(*op)).map_or(1, |op| op.len());
+                i += ops.iter().find(|op| b[i..].starts_with(op.as_bytes())).map_or(1, |op| op.len());
             } else if c >= 0x80 {
                 i += src[i..].chars().next().map_or(1, char::len_utf8);
             } else {

@@ -95,8 +95,18 @@ fn byte_of(text: &str, ci: usize) -> usize {
     text.char_indices().nth(ci).map_or(text.len(), |(b, _)| b)
 }
 
+/// A byte offset moved back onto a character's start (offsets kept from
+/// before an edit may land inside a letter).
+pub fn floor(text: &str, b: usize) -> usize {
+    let mut b = b.min(text.len());
+    while !text.is_char_boundary(b) {
+        b -= 1;
+    }
+    b
+}
+
 fn char_of(text: &str, b: usize) -> usize {
-    text[..b.min(text.len())].chars().count()
+    text[..floor(text, b)].chars().count()
 }
 
 fn line_start(text: &str, b: usize) -> usize {
@@ -219,8 +229,9 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
     }
     let mut cuts: Vec<usize> = toks.iter().map(|t| t.start).collect();
     for (r, _) in &over {
-        cuts.push(r.start.min(text.len()));
-        cuts.push(r.end.min(text.len()));
+        // (Ranges found before the last edit may end inside a letter.)
+        cuts.push(floor(text, r.start));
+        cuts.push(floor(text, r.end));
     }
     cuts.push(text.len());
     cuts.sort_unstable();
@@ -231,7 +242,7 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
     let mut ti = 0;
     for w in cuts.windows(2) {
         let (a, b) = (w[0], w[1]);
-        if a >= b || !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+        if a >= b {
             continue;
         }
         while ti + 1 < toks.len() && toks[ti + 1].start <= a {
@@ -501,8 +512,10 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             }
             // Backspace between an empty pair takes both.
             if cx.settings.auto_pairs && a == b && a > 0 && new_sel.is_none() {
-                let pair = &text[a.saturating_sub(1).min(a)..(a + 1).min(text.len())];
-                if matches!(pair, "()" | "[]" | "''" | "\"\"") && text.is_char_boundary(a - 1) && i.consume_key(Modifiers::NONE, Key::Backspace) {
+                // (Bytes around the cursor: next to a letter of two bytes
+                // they're no pair, and the slice would cut it.)
+                let pair = text.get(a - 1..a + 1).unwrap_or("");
+                if matches!(pair, "()" | "[]" | "''" | "\"\"") && i.consume_key(Modifiers::NONE, Key::Backspace) {
                     text.replace_range(a - 1..a + 1, "");
                     new_sel = Some((a - 1, a - 1));
                     out.changed = true;
@@ -570,10 +583,10 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let weak = ui.visuals().weak_text_color();
     let strong = ui.visuals().strong_text_color();
     let cursor_b = output.cursor_range.map(|r| byte_of(text, r.primary.index.0)).or(cursor_now);
-    let cur_line = cursor_b.map(|c| text[..c.min(text.len())].matches('\n').count());
+    let cur_line = cursor_b.map(|c| text[..floor(text, c)].matches('\n').count());
     let (_, stmt) = around(st, text, cursor_b, cx);
-    let stmt_lines = stmt.map(|r| (text[..r.start].matches('\n').count(), text[..r.end].matches('\n').count()));
-    let err_lines: std::collections::HashSet<usize> = cx.issues.iter().filter(|i| i.sev == Sev::Error).map(|i| text[..i.range.start.min(text.len())].matches('\n').count()).collect();
+    let stmt_lines = stmt.map(|r| (text[..floor(text, r.start)].matches('\n').count(), text[..floor(text, r.end)].matches('\n').count()));
+    let err_lines: std::collections::HashSet<usize> = cx.issues.iter().filter(|i| i.sev == Sev::Error).map(|i| text[..floor(text, i.range.start)].matches('\n').count()).collect();
     let clip = ui.clip_rect();
     let mut line = 0;
     let mut new_line = true;

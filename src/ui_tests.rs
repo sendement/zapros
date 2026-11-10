@@ -340,3 +340,73 @@ fn light_theme_sheet() {
     }
     shot(&mut h, "light");
 }
+
+#[test]
+fn typing_cyrillic() {
+    let (mut h, _g) = harness("cyr", SCRIPT, false);
+    for at in [0usize, 30, 120, SCRIPT.len()] {
+        focus_editor(&mut h, at);
+        type_text(&mut h, "привет мир ёжик ЩУКА ");
+        type_text(&mut h, "(кейс 'строка' \"ид\" -- коммент\n");
+        key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+        type_text(&mut h, "фыва.пролд ");
+        key(&mut h, egui::Key::Backspace, egui::Modifiers::NONE);
+        key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        key(&mut h, egui::Key::Space, egui::Modifiers::COMMAND);
+        type_text(&mut h, "ж");
+        key(&mut h, egui::Key::Tab, egui::Modifiers::NONE);
+        key(&mut h, egui::Key::Slash, egui::Modifiers::COMMAND);
+        key(&mut h, egui::Key::D, egui::Modifiers::COMMAND);
+        settle(&mut h);
+    }
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    settle(&mut h);
+}
+
+/// Random typing (Cyrillic, brackets, quotes, keys, hints) anywhere in the
+/// text: nothing may cut a letter in half.
+#[test]
+fn random_typing_never_panics() {
+    let (mut h, _g) = harness("fuzz", "select имя, (цена * 2) from товары т where т.код = 'щ';\n", false);
+    let mut seed: u64 = std::env::var("ZAPROS_FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let mut rnd = |n: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n
+    };
+    let bits = ["ж", "Щука", "ёлка ", "(", ")", "'", "\"", "[", "]", ".", " ", ",", ";", "case ", "end", "select ", "from ", "т.", "ы", "--", "$$", "€", "日本", "😀"];
+    let keys = [egui::Key::Backspace, egui::Key::Delete, egui::Key::Enter, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowUp, egui::Key::Tab, egui::Key::Home, egui::Key::End];
+    let steps: usize = std::env::var("ZAPROS_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    let start = h.state().tab().text.clone();
+    focus_editor(&mut h, 10);
+    for n in 0..steps {
+        match rnd(10) {
+            0 => {
+                let len = h.state().tab().text.len();
+                let at = rnd(len + 1);
+                focus_editor(&mut h, at);
+            }
+            1..=5 => type_text(&mut h, bits[rnd(bits.len())]),
+            6 | 7 => {
+                let m = if rnd(4) == 0 { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+                key(&mut h, keys[rnd(keys.len())], m);
+            }
+            8 => {
+                let k = [egui::Key::Space, egui::Key::Slash, egui::Key::D][rnd(3)];
+                key(&mut h, k, egui::Modifiers::COMMAND);
+            }
+            _ => {
+                let p = egui::pos2(300.0 + rnd(900) as f32, 100.0 + rnd(380) as f32);
+                h.input_mut().events.push(egui::Event::PointerMoved(p));
+                h.step();
+            }
+        }
+        if n % 150 == 149 {
+            key(&mut h, egui::Key::F, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+            settle(&mut h);
+        }
+    }
+    settle(&mut h);
+    let end = h.state().tab().text.clone();
+    eprintln!("fuzz text ({} → {} bytes):\n{end}", start.len(), end.len());
+    assert!(end != start && end.chars().filter(|c| !c.is_ascii()).count() > 20, "typing didn't reach the editor");
+}

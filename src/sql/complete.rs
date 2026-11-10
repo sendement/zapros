@@ -72,10 +72,7 @@ const SNIPPETS: &[(&str, &str, &str)] = &[
 fn ident_text(src: &str, t: &Tok) -> Option<String> {
     match t.kind {
         Tk::Word | Tk::Keyword => Some(t.text(src).to_string()),
-        Tk::Quoted => {
-            let s = t.text(src);
-            Some(s[1..s.len().saturating_sub(1)].to_string())
-        }
+        Tk::Quoted => Some(super::unquote(t.text(src)).to_string()),
         _ => None,
     }
 }
