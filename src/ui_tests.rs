@@ -566,6 +566,20 @@ fn bands_at_scale_and_in_strings() {
         h.step();
     }
     shot(&mut h, "frames");
+    // The tab's ✕ shows on hover (the tab grows to it).
+    let crosses = |h: &Harness<'static, App>| h.query_all_by_label("🗙").count();
+    let before = crosses(&h);
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(325.0, 62.0)));
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "tab-hover");
+    assert_eq!(crosses(&h), before + 1, "the ✕ under the pointer");
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(900.0, 700.0)));
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(crosses(&h), before, "no ✕ away from it");
 }
 
 #[test]

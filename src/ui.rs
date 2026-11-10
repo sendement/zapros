@@ -24,6 +24,8 @@ pub fn conn_dot(app: &App, conn: &str) -> (Color32, String) {
 /// Height of the row of workspace tabs (and of the icons beside it).
 pub const ROW_H: f32 = 32.0;
 const SHEET_R: f32 = 8.0;
+/// Gap between a not-chosen workspace tab and the sheet.
+const IDLE_GAP: f32 = 4.0;
 const TAB_R: f32 = 8.0;
 const FILLET: f32 = 6.0;
 /// Where the first workspace tab starts, from the sheet's left edge.
@@ -291,13 +293,14 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
         let color = rgb(app.session.workspaces[i].color);
         let r = ui.interact(rect, ui.id().with(("ws-tab", i)), egui::Sense::click());
         let is_active = i == active;
-        let body = if is_active { rect } else { Rect::from_min_max(rect.min + Vec2::new(0.0, 4.0), rect.max) };
+        // Not chosen: a rounded box clear of the sheet's edge.
+        let body = if is_active { rect } else { Rect::from_min_max(rect.min + Vec2::new(0.0, 4.0), rect.max - Vec2::new(0.0, IDLE_GAP)) };
         if is_active {
             active_rect = Some(body);
         } else {
             let k = if r.hovered() { 0.40 } else { 0.22 };
             let k = if v.dark_mode { k } else { k * 0.7 };
-            painter.rect_filled(body, egui::CornerRadius { nw: TAB_R as u8, ne: TAB_R as u8, sw: 0, se: 0 }, color.gamma_multiply(k));
+            painter.rect_filled(body, TAB_R, color.gamma_multiply(k));
         }
         // Its text (the active one's drawn after the sheet).
         let fg = if is_active { v.strong_text_color() } else { v.text_color() };
@@ -363,10 +366,10 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     painter.extend(active_text);
     // "+": a new workspace.
     // Like a not-chosen tab: rounded on top, standing on the sheet.
-    let plus = Rect::from_min_max(Pos2::new(x, row.top() + 4.0), Pos2::new(x + plus_w + 6.0, sheet.top() - 1.0));
+    let plus = Rect::from_min_max(Pos2::new(x, row.top() + 4.0), Pos2::new(x + plus_w + 6.0, sheet.top() - IDLE_GAP));
     let r = ui.interact(plus, ui.id().with("ws-new"), egui::Sense::click());
     let k = if r.hovered() { 1.0 } else { 0.6 };
-    painter.rect_filled(plus, egui::CornerRadius { nw: TAB_R as u8, ne: TAB_R as u8, sw: 0, se: 0 }, v.widgets.inactive.weak_bg_fill.gamma_multiply(k));
+    painter.rect_filled(plus, TAB_R, v.widgets.inactive.weak_bg_fill.gamma_multiply(k));
     painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
     if r.on_hover_text(t("Новое рабочее пространство", "New workspace")).clicked() {
         let color = COLORS[app.session.workspaces.len() % COLORS.len()];
@@ -412,6 +415,7 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                 let mut drag: Option<(usize, usize)> = None;
                 // (The "+" as tall as the tabs.)
                 let mut tab_h = 24.0f32;
+                let close_always = app.settings.close_always;
                 // Not chosen: the same rounded box, a quiet edge.
                 let idle_fill = v.widgets.inactive.weak_bg_fill.gamma_multiply(0.55);
                 let idle_stroke = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
@@ -452,7 +456,12 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                                     txt = txt.color(Color32::from_rgb(230, 90, 90));
                                 }
                                 let lr = ui.add(egui::Label::new(txt).sense(egui::Sense::click_and_drag()).selectable(false));
-                                let x = ui.add_visible(active || hovered, egui::Button::new(RichText::new("🗙").small()).frame(false));
+                                // On hover only: the tab grows to take it.
+                                let x = if close_always || hovered {
+                                    ui.add(egui::Button::new(RichText::new("🗙").small()).frame(false))
+                                } else {
+                                    ui.allocate_response(Vec2::ZERO, egui::Sense::hover())
+                                };
                                 (lr, x)
                             })
                             .inner
@@ -582,6 +591,24 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+const GREEN: Color32 = Color32::from_rgb(76, 175, 80);
+const TEAL: Color32 = Color32::from_rgb(38, 166, 154);
+const RED: Color32 = Color32::from_rgb(229, 57, 53);
+const BLUE: Color32 = Color32::from_rgb(66, 133, 244);
+const VIOLET: Color32 = Color32::from_rgb(171, 71, 188);
+
+/// A toolbar button in its colour: a wash of it, its edge, the icon in it.
+fn tinted(text: String, c: Color32) -> egui::Button<'static> {
+    let (icon, rest) = text.split_once(' ').map_or((text.as_str(), None), |(a, b)| (a, Some(b)));
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::TextStyle::Button;
+    RichText::new(icon).color(c).append_to(&mut job, &egui::Style::default(), egui::FontSelection::Style(font.clone()), egui::Align::Center);
+    if let Some(rest) = rest {
+        RichText::new(format!(" {rest}")).append_to(&mut job, &egui::Style::default(), egui::FontSelection::Style(font), egui::Align::Center);
+    }
+    egui::Button::new(job).fill(c.gamma_multiply(0.16)).stroke(Stroke::new(1.0, c.gamma_multiply(0.55)))
+}
+
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     ui.horizontal(|ui| {
@@ -632,19 +659,19 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.separator();
         let running = app.rt.get(&tab.id).and_then(|r| r.run.as_ref()).map(|r| r.since.elapsed());
-        if ui.add_enabled(running.is_none(), egui::Button::new(lbl("▶", t("Выполнить", "Run")))).on_hover_text(tip(t("Выполнить запрос", "Run statement"), "Ctrl+Enter")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("▶", t("Выполнить", "Run")), GREEN)).on_hover_text(tip(t("Выполнить запрос", "Run statement"), "Ctrl+Enter")).clicked() {
             app.run(&ctx, false, false);
         }
-        if ui.add_enabled(running.is_none(), egui::Button::new(lbl("⏩", t("Скрипт", "Script")))).on_hover_text(tip(t("Выполнить скрипт", "Run script"), "Ctrl+Shift+Enter / F5")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("⏩", t("Скрипт", "Script")), TEAL)).on_hover_text(tip(t("Выполнить скрипт", "Run script"), "Ctrl+Shift+Enter / F5")).clicked() {
             app.run(&ctx, true, false);
         }
-        if ui.add_enabled(running.is_some(), egui::Button::new(lbl("■", t("Стоп", "Stop")))).on_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).on_disabled_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).clicked() {
+        if ui.add_enabled(running.is_some(), tinted(lbl("■", t("Стоп", "Stop")), RED)).on_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).on_disabled_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).clicked() {
             app.cancel();
         }
-        if ui.add_enabled(running.is_none(), egui::Button::new(lbl("🔍", t("План", "Plan")))).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
             app.run(&ctx, false, true);
         }
-        if ui.button(lbl("✨", t("Формат", "Format"))).on_hover_text(tip(t("Форматировать", "Format"), "Ctrl+Shift+F")).clicked() {
+        if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(t("Форматировать", "Format"), "Ctrl+Shift+F")).clicked() {
             app.format();
         }
         // Transactions, where the database has them.
@@ -664,7 +691,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             }
             if !auto {
                 let warm = Color32::from_rgb(230, 160, 40);
-                let mut commit = egui::Button::new(tx_lbl("✔", t("Зафиксировать", "Commit")));
+                let mut commit = tinted(tx_lbl("✔", t("Зафиксировать", "Commit")), GREEN);
                 let mut commit_tip = tip(t("Зафиксировать транзакцию", "Commit"), "Ctrl+Alt+Enter");
                 if pending {
                     commit = commit.fill(warm.gamma_multiply(0.35)).stroke(Stroke::new(1.0, warm));
@@ -674,7 +701,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 if ui.add_enabled(can, commit).on_hover_text(commit_tip).clicked() {
                     app.tx(c, crate::db::TxOp::Commit);
                 }
-                if ui.add_enabled(can, egui::Button::new(tx_lbl("⟲", t("Откатить", "Roll back")))).on_hover_text(tip(t("Откатить транзакцию", "Roll back"), "Ctrl+Alt+Backspace")).clicked() {
+                if ui.add_enabled(can, tinted(tx_lbl("⟲", t("Откатить", "Roll back")), RED)).on_hover_text(tip(t("Откатить транзакцию", "Roll back"), "Ctrl+Alt+Backspace")).clicked() {
                     app.tx(c, crate::db::TxOp::Rollback);
                 }
             }

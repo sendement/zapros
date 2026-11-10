@@ -152,6 +152,8 @@ pub struct Settings {
     /// Confirm UPDATE / DELETE without WHERE before running.
     pub confirm_unsafe: bool,
     pub autosave_secs: u64,
+    /// The script tabs' ✕: always there, or only under the pointer.
+    pub close_always: bool,
 }
 
 impl Default for Settings {
@@ -177,6 +179,7 @@ impl Default for Settings {
             confirm_unsafe: true,
             autosave_secs: 3,
             embedded_sql: true,
+            close_always: false,
         }
     }
 }

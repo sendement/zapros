@@ -476,6 +476,11 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.add(egui::Slider::new(&mut s.ui_scale, 0.7..=2.0).step_by(0.05));
                 });
                 ui.horizontal(|ui| {
+                    ui.label(t("Крестик закрытия вкладки", "Tab's close button"));
+                    ui.radio_value(&mut s.close_always, true, t("всегда", "always"));
+                    ui.radio_value(&mut s.close_always, false, t("при наведении", "on hover"));
+                });
+                ui.horizontal(|ui| {
                     ui.label(t("Строк в результате максимум", "Rows per result at most"));
                     num(ui, &mut s.row_limit, 1..=10_000_000);
                 });

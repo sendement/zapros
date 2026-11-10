@@ -70,6 +70,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   SELECT / FROM / JOIN / WHERE / GROUP BY…, inside SQL strings and `$$`
   bodies too. The block (bracket, CASE, BEGIN…END, IF, LOOP) at the caret
   gets a frame in its band's colour, the one under the pointer a fainter one.
+- **Tabs**: a script tab's ✕ always shown or only under the pointer (the
+  tab grows to it) — in the settings; toolbar buttons in their colours (run
+  green, stop red, plan blue…).
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,
