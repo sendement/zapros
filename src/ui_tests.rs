@@ -699,9 +699,15 @@ fn results_in_batches_export_and_totals() {
     }
     shot(&mut h, "export");
     h.get_by_label_contains("Сохранить").click();
-    for _ in 0..3 {
+    // (The rows load first, the file comes after.)
+    for _ in 0..500 {
         h.step();
+        if dir.join("orders_3.csv").exists() && h.state().rt[&id].results[0].cursor.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
+    h.step();
     let third = std::fs::read_to_string(dir.join("orders_3.csv")).unwrap();
     assert_eq!(third.lines().count(), 1001, "header + 1000 rows");
     // The columns as shown (moved above).

@@ -43,8 +43,12 @@ pub fn reorder(v: &mut ResultView) {
         let keys: Vec<(usize, bool, bool)> = v.sort.iter().map(|&(c, asc)| (c, asc, v.table.cols.get(c).is_some_and(|c| c.numeric))).collect();
         order.sort_by(|&a, &b| {
             for &(c, asc, numeric) in &keys {
-                let o = cmp_vals(rows[a].get(c).and_then(|v| v.as_deref()), rows[b].get(c).and_then(|v| v.as_deref()), numeric);
-                let o = if asc { o } else { o.reverse() };
+                let (x, y) = (rows[a].get(c).and_then(|v| v.as_deref()), rows[b].get(c).and_then(|v| v.as_deref()));
+                // NULLs last, either way.
+                let o = match (x, y) {
+                    (Some(_), Some(_)) if !asc => cmp_vals(x, y, numeric).reverse(),
+                    _ => cmp_vals(x, y, numeric),
+                };
                 if o.is_ne() {
                     return o;
                 }
