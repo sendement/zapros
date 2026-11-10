@@ -429,6 +429,7 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         ui.checkbox(&mut p.bold_keywords, t("Ключевые слова жирным", "Bold keywords"));
         ui.checkbox(&mut p.italic_comments, t("Комментарии курсивом", "Italic comments"));
         ui.checkbox(&mut p.rainbow, t("Скобки цветом по глубине", "Brackets coloured by depth"));
+        ui.checkbox(&mut p.bands, t("Радужные полосы под отступами (скобки, CASE, BEGIN…END, IF, LOOP, SELECT / FROM / WHERE…)", "Rainbow bands under indents (brackets, CASE, BEGIN…END, IF, LOOP, SELECT / FROM / WHERE…)"));
     });
 }
 

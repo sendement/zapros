@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 
 use crate::app::{App, ConnState, Node};
 use crate::config::{self, Connections, Session, Tab, Workspace};
@@ -480,4 +481,56 @@ fn package_parts_and_structure() {
     assert!(full.find("package shop_pkg").unwrap() < full.find("package body shop_pkg").unwrap());
     h.state_mut().tab_mut().join_parts();
     assert!(h.state().tab().other.is_none() && h.state().tab().text == full);
+}
+
+/// Presses and lets go a mouse button at `p`.
+fn click_at(h: &mut Harness<'static, App>, p: egui::Pos2, button: egui::PointerButton) {
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: p, button, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+}
+
+#[test]
+fn bands_and_context_menu() {
+    let (mut h, _g) = harness("menu", ORA_DYNAMIC, false);
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    h.state_mut().conns.list.push(ora);
+    h.state_mut().tab_mut().conn = Some("ora".into());
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    // Laid out, so the bands show under the blocks.
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    h.state_mut().ask = None;
+    settle(&mut h);
+    shot(&mut h, "bands");
+    // Select all, right click in the text: the menu; UPPER CASE.
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::A, egui::Modifiers::COMMAND);
+    h.step();
+    click_at(&mut h, egui::pos2(500.0, 160.0), egui::PointerButton::Secondary);
+    let (p, q) = h.state().rt.get(&h.state().tab().id).unwrap().ed.cursor.unwrap();
+    assert!(p.max(q) - p.min(q) > 500, "the selection stays: {p}..{q}");
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "context-menu");
+    h.get_by_label_contains("ВЕРХНИЙ РЕГИСТР").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    let text = h.state().tab().text.clone();
+    assert!(text.contains("CREATE OR REPLACE PROCEDURE PURGE_ORDERS"), "{text}");
+    // Right click elsewhere (no selection there): the caret moves there.
+    click_at(&mut h, egui::pos2(420.0, 127.0), egui::PointerButton::Primary);
+    click_at(&mut h, egui::pos2(700.0, 241.0), egui::PointerButton::Secondary);
+    h.step();
+    let rt = h.state().rt.get(&h.state().tab().id).unwrap();
+    let (p, q) = rt.ed.cursor.unwrap();
+    assert_eq!(p, q, "no selection after the right click");
+    assert!(crate::app::line_of(&text, p) > 3, "caret went to the clicked line: {p}");
 }

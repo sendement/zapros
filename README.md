@@ -62,7 +62,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Formatter** ("river" style, leading commas; keyword / function case
   configurable). PL/SQL units and `$$` bodies are left as written.
 - **Highlighting** with a palette per theme (colour pickers, bold keywords,
-  italic comments, brackets coloured by depth).
+  italic comments, brackets coloured by depth) and, as in listok, rainbow
+  bands under the indents: one per construct a line is nested in —
+  brackets, CASE…END, BEGIN / DECLARE / IS…END, IF, LOOP, and the clauses
+  SELECT / FROM / JOIN / WHERE / GROUP BY….
+- **Right-click menu** in the editor: run, explain, cut / copy / paste,
+  select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,
   filter, copy cell / row / row as JSON / all as TSV, save as CSV;
   messages with timings, `RAISE NOTICE` and `DBMS_OUTPUT`; the server's

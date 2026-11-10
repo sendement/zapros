@@ -13,6 +13,7 @@ use egui::{Color32, FontFamily, FontId, Key, Modifiers, Stroke};
 use crate::config::{Palette, Rgb, Settings};
 use crate::db::Relation;
 use crate::i18n::t;
+use crate::i18n::t as tr;
 use crate::sql::check::{Issue, Sev};
 use crate::sql::complete::{self, Hints};
 use crate::sql::lex::{self, Tk};
@@ -147,6 +148,9 @@ fn bracket_pair(text: &str, at: usize, d: Dialect) -> Option<(usize, usize)> {
     None
 }
 
+/// The bands' hues, as in listok (fixed: a desktop scheme may be one hue).
+const BAND_HUES: [f32; 6] = [45.0, 285.0, 205.0, 120.0, 330.0, 170.0];
+
 const RAINBOW_DARK: [Color32; 4] = [Color32::from_rgb(255, 215, 0), Color32::from_rgb(218, 112, 214), Color32::from_rgb(23, 159, 255), Color32::from_rgb(120, 200, 120)];
 const RAINBOW_LIGHT: [Color32; 4] = [Color32::from_rgb(175, 130, 0), Color32::from_rgb(160, 50, 160), Color32::from_rgb(0, 100, 200), Color32::from_rgb(30, 130, 60)];
 
@@ -211,7 +215,19 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         over.push((a..a + 1, 4));
         over.push((b..b + 1, 4));
     }
+    // Rainbow bands under the indents (listok's hues).
+    let bands: Vec<(Range<usize>, Color32)> = if pal.bands && text.len() < 2_000_000 {
+        let (s, v, alpha) = if cx.dark { (0.5, 0.97, 0.24) } else { (0.75, 0.62, 0.30) };
+        let hues: Vec<Color32> = BAND_HUES.iter().map(|&h| Color32::from(egui::ecolor::Hsva::new(h / 360.0, s, v, 1.0)).gamma_multiply(alpha)).collect();
+        crate::sql::bands::bands(text, cx.dialect).into_iter().map(|b| (b.range, hues[b.level % hues.len()])).collect()
+    } else {
+        Vec::new()
+    };
     let mut cuts: Vec<usize> = spans.iter().map(|t| t.range.start).collect();
+    for (r, _) in &bands {
+        cuts.push(r.start);
+        cuts.push(r.end);
+    }
     for (r, _) in &over {
         // (Ranges found before the last edit may end inside a letter.)
         cuts.push(floor(text, r.start));
@@ -224,6 +240,7 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
     job.wrap.max_width = f32::INFINITY;
     let pair_bg = if cx.dark { Color32::from_rgba_unmultiplied(120, 160, 255, 70) } else { Color32::from_rgba_unmultiplied(80, 120, 255, 60) };
     let mut ti = 0;
+    let mut bi = 0;
     for w in cuts.windows(2) {
         let (a, b) = (w[0], w[1]);
         if a >= b {
@@ -233,6 +250,12 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
             ti += 1;
         }
         let mut f = spans.get(ti).map(&fmt_of).unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
+        while bi < bands.len() && bands[bi].0.end <= a {
+            bi += 1;
+        }
+        if let Some((_, c)) = bands.get(bi).filter(|(r, _)| r.start <= a && b <= r.end) {
+            f.background = *c;
+        }
         for (r, kind) in &over {
             if r.start <= a && b <= r.end.max(r.start + 1) && r.start < text.len() {
                 match kind {
@@ -542,6 +565,10 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let before = text.clone();
+    // (egui moves the caret on any button's press: a right click inside the
+    // selection must keep it — the selection as of before the press.)
+    let right_press = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+    let sel_before = st.cursor;
     let output = ui
         .horizontal_top(|ui| {
             ui.add_space(gutter);
@@ -562,14 +589,12 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         out.changed = true;
     }
 
-    // Line numbers, the current statement's bar.
+    // Line numbers, error dots.
     let painter = ui.painter().clone();
     let weak = ui.visuals().weak_text_color();
     let strong = ui.visuals().strong_text_color();
     let cursor_b = output.cursor_range.map(|r| byte_of(text, r.primary.index.0)).or(cursor_now);
     let cur_line = cursor_b.map(|c| text[..floor(text, c)].matches('\n').count());
-    let (_, stmt) = around(st, text, cursor_b, cx);
-    let stmt_lines = stmt.map(|r| (text[..floor(text, r.start)].matches('\n').count(), text[..floor(text, r.end)].matches('\n').count()));
     let err_lines: std::collections::HashSet<usize> = cx.issues.iter().filter(|i| i.sev == Sev::Error).map(|i| text[..floor(text, i.range.start)].matches('\n').count()).collect();
     let clip = ui.clip_rect();
     let mut line = 0;
@@ -585,9 +610,6 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             let color = if Some(line) == cur_line { strong } else { weak };
             let x = output.galley_pos.x - 10.0;
             painter.text(egui::pos2(x, r.center().y), egui::Align2::RIGHT_CENTER, (line + 1).to_string(), FontId::monospace(font * 0.85), color);
-            if stmt_lines.is_some_and(|(a, b)| line >= a && line <= b) {
-                painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x + 3.0, r.top()), egui::pos2(x + 6.0, r.bottom())), 1.0, ui.visuals().selection.bg_fill);
-            }
             if err_lines.contains(&line) {
                 painter.circle_filled(egui::pos2(output.galley_pos.x - gutter + 7.0, r.center().y), 3.0, Color32::from_rgb(230, 70, 70));
             }
@@ -617,6 +639,94 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             });
         }
     }
+
+    // Right click: the caret goes there (unless inside the selection),
+    // then a menu of what can be done there.
+    let menu_sel = id.with("menu-sel");
+    if right_press && output.response.hovered() {
+        let (p, q) = sel_before.map(|(p, q)| (floor(text, p), floor(text, q))).unwrap_or((text.len(), text.len()));
+        let (lo, hi) = (p.min(q), p.max(q));
+        let at = ctx.input(|i| i.pointer.interact_pos()).map(|pos| byte_of(text, output.galley.cursor_from_pos(pos - output.galley_pos).index.0));
+        let keep = match at {
+            Some(at) if lo < hi && lo <= at && at <= hi => {
+                set_cursor(&ctx, id, text, p, q);
+                (lo, hi)
+            }
+            Some(at) => {
+                set_cursor(&ctx, id, text, at, at);
+                (at, at)
+            }
+            None => (lo, hi),
+        };
+        ctx.data_mut(|d| d.insert_temp(menu_sel, keep));
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
+    output.response.context_menu(|ui| {
+        ui.set_min_width(260.0);
+        let (a, b) = ctx.data(|d| d.get_temp::<(usize, usize)>(menu_sel)).unwrap_or((text.len(), text.len()));
+        let (a, b) = (floor(text, a), floor(text, b));
+        let has_sel = a < b;
+        let item = |ui: &mut egui::Ui, label: &str, keys: &str, enabled: bool| -> bool {
+            let r = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(keys));
+            if r.clicked() {
+                ui.close();
+            }
+            r.clicked()
+        };
+        if item(ui, &format!("▶  {}", tr("Выполнить запрос", "Run statement")), "Ctrl+Enter", true) {
+            out.actions.push(Action::RunStatement);
+        }
+        if item(ui, &format!("⏩  {}", tr("Выполнить скрипт", "Run script")), "F5", true) {
+            out.actions.push(Action::RunScript);
+        }
+        if item(ui, &format!("🔍  {}", tr("План запроса", "Explain plan")), "Ctrl+E", true) {
+            out.actions.push(Action::Explain);
+        }
+        ui.separator();
+        if item(ui, tr("Вырезать", "Cut"), "Ctrl+X", has_sel) {
+            ctx.copy_text(text[a..b].to_string());
+            text.replace_range(a..b, "");
+            set_cursor(&ctx, id, text, a, a);
+            out.changed = true;
+        }
+        if item(ui, tr("Копировать", "Copy"), "Ctrl+C", has_sel) {
+            ctx.copy_text(text[a..b].to_string());
+        }
+        if item(ui, tr("Вставить", "Paste"), "Ctrl+V", true) {
+            // The system's clipboard comes in as a paste to the editor.
+            ctx.memory_mut(|m| m.request_focus(id));
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        if item(ui, tr("Выделить всё", "Select all"), "Ctrl+A", !text.is_empty()) {
+            set_cursor(&ctx, id, text, text.len(), 0);
+        }
+        ui.separator();
+        if item(ui, &format!("✨  {}", tr("Форматировать", "Format")), "Ctrl+Shift+F", true) {
+            out.actions.push(Action::Format);
+        }
+        if item(ui, tr("Закомментировать строки", "Comment lines"), "Ctrl+/", true) {
+            let (s, e) = toggle_comment(text, a, b);
+            set_cursor(&ctx, id, text, e, s);
+            out.changed = true;
+        }
+        if item(ui, tr("Дублировать строку", "Duplicate line"), "Ctrl+D", true) {
+            let (s, e) = lines_of(text, a, b);
+            let block = text[s..e].to_string();
+            text.insert_str(e, &format!("\n{block}"));
+            let c = b + block.len() + 1;
+            set_cursor(&ctx, id, text, c, c);
+            out.changed = true;
+        }
+        ui.separator();
+        for (label, upper) in [(tr("ВЕРХНИЙ РЕГИСТР", "UPPER CASE"), true), (tr("нижний регистр", "lower case"), false)] {
+            if item(ui, label, "", has_sel) {
+                let s = if upper { text[a..b].to_uppercase() } else { text[a..b].to_lowercase() };
+                text.replace_range(a..b, &s);
+                set_cursor(&ctx, id, text, a + s.len(), a);
+                out.changed = true;
+            }
+        }
+    });
 
     // Hints.
     let cursor_b = output.cursor_range.map(|r| byte_of(text, r.primary.index.0));

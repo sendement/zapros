@@ -58,6 +58,8 @@ pub struct Palette {
     pub italic_comments: bool,
     /// Brackets coloured by depth.
     pub rainbow: bool,
+    /// Rainbow bands under the indents, one per construct a line is in.
+    pub bands: bool,
 }
 
 impl Palette {
@@ -76,6 +78,7 @@ impl Palette {
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,
+            bands: true,
         }
     }
 
@@ -94,6 +97,7 @@ impl Palette {
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,
+            bands: true,
         }
     }
 }

@@ -1,5 +1,6 @@
 //! SQL text: tokens, statements, checks, layout and hints, per dialect.
 
+pub mod bands;
 pub mod check;
 pub mod complete;
 pub mod embed;
