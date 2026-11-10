@@ -73,10 +73,12 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn of(v: &ResultView) -> Self {
+        // The columns as shown (moved by hand or not).
+        let cols: Vec<usize> = if v.cols.len() == v.table.cols.len() { v.cols.clone() } else { (0..v.table.cols.len()).collect() };
         Self {
-            cols: v.table.cols.iter().map(|c| c.name.clone()).collect(),
-            numeric: v.table.cols.iter().map(|c| c.numeric).collect(),
-            rows: v.order.iter().filter_map(|&r| v.table.rows.get(r).cloned()).collect(),
+            cols: cols.iter().map(|&c| v.table.cols[c].name.clone()).collect(),
+            numeric: cols.iter().map(|&c| v.table.cols[c].numeric).collect(),
+            rows: v.order.iter().filter_map(|&r| v.table.rows.get(r)).map(|row| cols.iter().map(|&c| row.get(c).cloned().flatten()).collect()).collect(),
         }
     }
 }

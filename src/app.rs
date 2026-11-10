@@ -64,7 +64,16 @@ pub struct ResultView {
     pub took: Duration,
     /// Rows in the order shown.
     pub order: Vec<usize>,
-    pub sort: Option<(usize, bool)>,
+    /// Sorted by these columns, first first (ascending: true).
+    pub sort: Vec<(usize, bool)>,
+    /// The columns in the order shown.
+    pub cols: Vec<usize>,
+    /// Columns picked (by their header).
+    pub picked: std::collections::BTreeSet<usize>,
+    /// Totals asked for, shown under the table: column → (what, value).
+    pub totals: std::collections::BTreeMap<usize, (crate::results::Agg, String)>,
+    /// Rows changed since the totals were worked out.
+    pub totals_stale: bool,
     pub sel: Option<(usize, usize)>,
     pub filter: String,
     /// Its cursor's still open on the server: (run, connection).
@@ -78,7 +87,20 @@ pub struct ResultView {
 impl ResultView {
     pub fn new(sql: String, table: Table, took: Duration, cursor: Option<(u64, String)>) -> Self {
         let order = (0..table.rows.len()).collect();
-        Self { title: head(&sql, 28), sql, table, took, order, cursor, ..Default::default() }
+        let cols = (0..table.cols.len()).collect();
+        Self { title: head(&sql, 28), sql, table, took, order, cols, cursor, ..Default::default() }
+    }
+
+    /// Its columns' names, as a key for the order they're shown in.
+    pub fn shape(&self) -> String {
+        self.table.cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join("\u{1}")
+    }
+
+    /// Shows the columns in the order kept for this shape, if any.
+    pub fn arrange(&mut self, kept: &HashMap<String, Vec<usize>>) {
+        if let Some(o) = kept.get(&self.shape()).filter(|o| o.len() == self.table.cols.len()) {
+            self.cols = o.clone();
+        }
     }
 }
 
@@ -123,6 +145,9 @@ pub struct TabRt {
     pub log: Vec<LogLine>,
     /// What the server printed (DBMS_OUTPUT, RAISE NOTICE…).
     pub output: Vec<LogLine>,
+    /// Column orders set by hand, by the columns' names (kept for the next
+    /// runs giving the same columns).
+    pub col_orders: HashMap<String, Vec<usize>>,
     pub run: Option<Running>,
     pub issues: Vec<Issue>,
     pub check_key: u64,
@@ -819,7 +844,9 @@ impl App {
                     if let Some(tab) = self.runs.get(&run).cloned() {
                         let rt = self.rt.entry(tab.clone()).or_default();
                         rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {} ({}) · {}", table.rows.len(), t("строк", "rows"), t("есть ещё — догружаются по запросу", "more to load on demand"), fmt_took(took)), at: Some(at) });
-                        rt.results.push(ResultView::new(sql, table, took, Some((run, conn))));
+                        let mut v = ResultView::new(sql, table, took, Some((run, conn)));
+                        v.arrange(&rt.col_orders);
+                        rt.results.push(v);
                         if rt.shown == Pane::Messages {
                             rt.shown = Pane::Result(rt.results.len() - 1);
                         }
@@ -840,7 +867,8 @@ impl App {
                         let from = v.table.rows.len();
                         v.table.rows.extend(rows);
                         v.table.more = more;
-                        if v.sort.is_some() || !v.filter.is_empty() {
+                        v.totals_stale = true;
+                        if !v.sort.is_empty() || !v.filter.is_empty() {
                             crate::results::reorder(v);
                         } else {
                             v.order.extend(from..v.table.rows.len());
@@ -866,7 +894,9 @@ impl App {
                             Ok(Outcome::Rows(table)) => {
                                 let more = if table.more { format!(" ({})", t("есть ещё", "more exist")) } else { String::new() };
                                 rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {}{more} · {ms}", table.rows.len(), t("строк", "rows")), at: Some(at) });
-                                rt.results.push(ResultView::new(sql, table, took, None));
+                                let mut v = ResultView::new(sql, table, took, None);
+                                v.arrange(&rt.col_orders);
+                                rt.results.push(v);
                                 if rt.shown == Pane::Messages {
                                     rt.shown = Pane::Result(rt.results.len() - 1);
                                 }

@@ -632,18 +632,57 @@ fn results_in_batches_export_and_totals() {
         h.step();
     }
     assert!(h.state().rt[&id].results[0].cursor.is_none(), "all in: the cursor's closed");
-    // The totals of a column, in its header's menu.
-    let sums = crate::results::totals(&h.state().rt[&id].results[0], 1);
-    let total: f64 = (1..=3000).map(|x: u64| ((x * 37) % 1000) as f64 + 0.5).sum();
-    assert!(sums.iter().any(|(n, v)| *n == "Сумма" && v.parse::<f64>().unwrap() == total), "{sums:?}");
-    assert!(sums.iter().any(|(n, v)| *n == "Максимум" && v == "999.5"), "{sums:?}");
+    // Totals only when asked: the header's menu has the actions, the value
+    // shows in a row under the table.
     h.get_by_label("total").click_secondary();
     for _ in 0..3 {
         h.step();
     }
-    shot(&mut h, "totals");
-    h.key_press(egui::Key::Escape);
+    assert!(h.query_by_label_contains("Сумма:").is_none(), "no values in the menu");
+    h.get_by_label_contains("Итоги").hover();
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "totals-menu");
+    h.get_by_label("Сумма").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    let total: f64 = (1..=3000).map(|x: u64| ((x * 37) % 1000) as f64 + 0.5).sum();
+    let got = h.state().rt[&id].results[0].totals.get(&1).map(|t| t.1.clone());
+    assert_eq!(got.and_then(|v| v.parse::<f64>().ok()), Some(total));
+    // Sorted by note, then by total going down.
+    {
+        let v = &mut h.state_mut().rt.get_mut(&id).unwrap().results[0];
+        v.sort = vec![(2, true), (1, false)];
+        crate::results::reorder(v);
+    }
+    let v = &h.state().rt[&id].results[0];
+    let first: Vec<(Option<String>, f64)> = v.order.iter().take(3).map(|&r| (v.table.rows[r][2].clone(), v.table.rows[r][1].as_deref().unwrap().parse().unwrap())).collect();
+    assert_eq!(first[0].0.as_deref(), Some("gift"));
+    assert!(first[0].1 >= first[1].1 && first[1].1 >= first[2].1, "{first:?}");
+    // Two columns picked and moved to the front.
+    h.get_by_label("note").click();
     h.step();
+    h.get_by_label("total").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    assert_eq!(h.state().rt[&id].results[0].picked.len(), 2);
+    h.get_by_label("note").click_secondary();
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_label_contains("В начало").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().rt[&id].results[0].cols, vec![1, 2, 0]);
+    shot(&mut h, "columns");
+    // Run again: same columns, same order.
+    focus_editor(&mut h, 5);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    assert_eq!(h.state().rt[&id].results[0].cols, vec![1, 2, 0], "the order's kept for the same columns");
+    h.state_mut().rt.get_mut(&id).unwrap().results[0].sort.clear();
     // Saved as CSV, 1000 rows a file.
     h.get_by_label_contains("Экспорт").click();
     for _ in 0..3 {
@@ -665,6 +704,7 @@ fn results_in_batches_export_and_totals() {
     }
     let third = std::fs::read_to_string(dir.join("orders_3.csv")).unwrap();
     assert_eq!(third.lines().count(), 1001, "header + 1000 rows");
-    assert!(third.starts_with("id,total,note\n2001,"), "{}", &third[..40]);
+    // The columns as shown (moved above).
+    assert!(third.starts_with("total,note,id\n37.5,,2001\n"), "{}", &third[..40]);
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -82,9 +82,14 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   last statement's cursor stays open, the bar above the table loads the next
   batch, all the rest, or stops (closing the cursor). Export to CSV / TSV /
   JSON / SQL INSERT / Markdown / HTML / XLSX, whole or split into files of
-  N rows, optionally loading every row first. A column header's right-click
-  menu gives its totals over the rows shown: count, NULLs, sum, min, max,
-  average. Messages (timings, errors; the server's error position is marked
+  N rows, optionally loading every row first. Totals on demand: a column header's
+  right-click menu has Σ Totals → sum / min / max / average / count, the
+  value shows in a row of its own under the table (right click there for
+  another or to remove it), worked out again only when the rows change.
+  Sorting by several columns (the header's arrow; Shift adds a level, the
+  menu too). Columns are picked by their header (Ctrl / Shift for several)
+  and moved by dragging or from the menu; the order is kept for the next
+  runs giving the same columns, and export follows it. Messages (timings, errors; the server's error position is marked
   in the script) and Output (`RAISE NOTICE`, `DBMS_OUTPUT`) are tabs of
   their own.
 - **Passwords** in the desktop keyring (Secret Service: GNOME Keyring,
