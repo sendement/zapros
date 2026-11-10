@@ -430,6 +430,7 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         ui.checkbox(&mut p.italic_comments, t("Комментарии курсивом", "Italic comments"));
         ui.checkbox(&mut p.rainbow, t("Скобки цветом по глубине", "Brackets coloured by depth"));
         ui.checkbox(&mut p.bands, t("Радужные полосы под отступами (скобки, CASE, BEGIN…END, IF, LOOP, SELECT / FROM / WHERE…)", "Rainbow bands under indents (brackets, CASE, BEGIN…END, IF, LOOP, SELECT / FROM / WHERE…)"));
+        ui.checkbox(&mut p.frames, t("Рамка вокруг блока под кареткой и под мышью", "A frame round the block at the caret and under the pointer"));
     });
 }
 
@@ -515,6 +516,10 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     case_pick(ui, &mut s.format.functions, "ff");
                 });
                 ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
+                ui.add_enabled_ui(s.format.embedded, |ui| {
+                    ui.checkbox(&mut s.format.split_strings, t("Разбивать строку с запросом на несколько строк", "Split a string holding a statement over several lines"))
+                        .on_hover_text(t("Выключено: строка остаётся как была, меняется только регистр ключевых слов в ней", "Off: the string stays as it was, only its keywords' case changes"));
+                });
                 ui.label(RichText::new(t("Стиль «река»: ключевые слова выровнены по правому краю SELECT, запятые в начале строки. Сами PL/SQL-блоки и тела в $$ не перекладываются, но запросы в строках внутри них (EXECUTE IMMEDIATE, EXECUTE, format()) раскладываются: склейка через || — по куску на строку, кусок запроса — только регистр.", "\"River\" style: clause words end where SELECT does, leading commas. PL/SQL blocks and $$ bodies keep their layout, but statements in strings inside them (EXECUTE IMMEDIATE, EXECUTE, format()) are laid out: a || chain gets a piece per line, a piece of a statement only its case.")).weak().small());
                 ui.separator();
                 ui.label(RichText::new(t("Пример", "Preview")).strong());

@@ -60,6 +60,9 @@ pub struct Palette {
     pub rainbow: bool,
     /// Rainbow bands under the indents, one per construct a line is in.
     pub bands: bool,
+    /// A frame round the block (bracket, CASE, BEGIN…END…) at the caret and
+    /// under the pointer.
+    pub frames: bool,
 }
 
 impl Palette {
@@ -79,6 +82,7 @@ impl Palette {
             italic_comments: true,
             rainbow: true,
             bands: true,
+            frames: true,
         }
     }
 
@@ -98,6 +102,7 @@ impl Palette {
             italic_comments: true,
             rainbow: true,
             bands: true,
+            frames: true,
         }
     }
 }

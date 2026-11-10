@@ -595,11 +595,14 @@ pub struct Options {
     pub functions: Case,
     /// SQL in strings (dynamic SQL, $$ bodies) laid out too.
     pub embedded: bool,
+    /// SQL in a string may be laid out over several lines (else only its
+    /// keywords' case changes, the string stays as it was).
+    pub split_strings: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true }
     }
 }
 

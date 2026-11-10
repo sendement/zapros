@@ -555,4 +555,15 @@ fn bands_at_scale_and_in_strings() {
     let line = |b: &crate::sql::bands::Band| ORA_STRINGS[..b.range.start].matches('\n').count();
     // The string's lines (8…13) have the inner SELECT's bands.
     assert!(bands.iter().any(|b| line(b) == 9 && b.level > 1), "{bands:?}");
+    // Frames: the caret in the IF, the pointer over the FOR loop's bracket.
+    let id = h.state().tab().id.clone();
+    h.state_mut().rt.get_mut(&id).unwrap().ed.goto = Some(ORA_STRINGS.find("using").unwrap());
+    for _ in 0..3 {
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(560.0 / 1.2, 255.0 / 1.2)));
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "frames");
 }

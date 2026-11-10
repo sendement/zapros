@@ -748,7 +748,7 @@ fn format_level(src: &str, d: Dialect, o: super::fmt::Options, col0: usize, leve
             continue;
         }
         let col = column(src, r.range.start, col0);
-        match (r.statement && r.clean).then(|| format_region(src, &r, d, o, col)).flatten() {
+        match (r.statement && r.clean && o.split_strings).then(|| format_region(src, &r, d, o, col)).flatten() {
             Some(new) => out.replace_range(r.range.clone(), &new),
             None => {
                 let mut piece = src.to_string();
@@ -841,6 +841,14 @@ mod tests {
         assert!(out.ends_with("]';"), "{out}");
         assert!(out.contains("'y'"), "{out}");
         assert!(out.lines().count() > 1, "{out}");
+    }
+
+    #[test]
+    fn strings_kept_whole_when_asked() {
+        let src = "begin\n  execute immediate q'[select a, b from t where x = 'y' and z = 1]';\nend;";
+        let o = super::super::fmt::Options { split_strings: false, ..Default::default() };
+        let out = format_strings(src, Dialect::Oracle, o, 0);
+        assert_eq!(out, "begin\n  execute immediate q'[SELECT a, b FROM t WHERE x = 'y' AND z = 1]';\nend;");
     }
 
     #[test]

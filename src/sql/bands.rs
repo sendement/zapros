@@ -43,8 +43,9 @@ enum Ev {
     Open(usize),
     Close,
     Case(usize),
-    /// BEGIN / IF / LOOP: the line's indent; DECLARE (its BEGIN goes on).
-    Block(usize, bool),
+    /// BEGIN / IF / LOOP: the line's indent; DECLARE (its BEGIN goes on);
+    /// the byte it starts at (FOR's of FOR … LOOP).
+    Block(usize, bool, usize),
     Begin(usize),
     /// END; END IF / END LOOP (true: only a block).
     End(bool),
@@ -70,6 +71,8 @@ enum Kind {
 /// level of the next clause inside it; `decl`: DECLARE waiting for BEGIN.
 #[derive(Clone, Copy, Debug)]
 struct Open {
+    /// The byte it starts at.
+    at: usize,
     col: usize,
     kind: Kind,
     level: usize,
@@ -82,13 +85,31 @@ struct Open {
 #[derive(Clone, Default)]
 struct Stack {
     open: Vec<Open>,
+    /// The byte of what's being applied.
+    pos: usize,
+    /// Note what ends in `closed` (not when only looking ahead).
+    rec: bool,
+    closed: Vec<Block>,
     /// The next top-level clause's level.
     next: usize,
 }
 
 impl Stack {
     fn push(&mut self, col: usize, kind: Kind, level: usize, decl: bool) {
-        self.open.push(Open { col, kind, level, next: level + 1, decl });
+        self.open.push(Open { at: self.pos, col, kind, level, next: level + 1, decl });
+    }
+
+    /// Ends the constructs from `n` on (at `pos`; noted when `rec`).
+    fn cut(&mut self, n: usize) {
+        if self.rec {
+            for o in self.open.drain(n..) {
+                if matches!(o.kind, Kind::Bracket | Kind::Case | Kind::Block) {
+                    self.closed.push(Block { range: o.at..self.pos, col: o.col, level: o.level });
+                }
+            }
+        } else {
+            self.open.truncate(n);
+        }
     }
 
     fn inner(&self) -> usize {
@@ -100,7 +121,7 @@ impl Stack {
     fn pop_to(&mut self, kinds: &[Kind]) {
         if let Some(n) = self.open.iter().rposition(|s| kinds.contains(&s.kind) || matches!(s.kind, Kind::Bracket | Kind::Fence)) {
             if kinds.contains(&self.open[n].kind) {
-                self.open.truncate(n);
+                self.cut(n);
             }
         }
     }
@@ -108,7 +129,7 @@ impl Stack {
     /// Clause tails at or right of `col` end.
     fn hit(&mut self, col: usize) {
         while self.open.last().is_some_and(|s| s.kind == Kind::Clause && s.col >= col) {
-            self.open.pop();
+            self.cut(self.open.len() - 1);
         }
     }
 
@@ -117,10 +138,13 @@ impl Stack {
         match e {
             Ev::Open(col) if open => self.push(col, Kind::Bracket, self.inner(), false),
             Ev::Case(col) if open => self.push(col, Kind::Case, self.inner(), false),
-            Ev::Block(col, decl) => {
+            Ev::Block(col, decl, from) => {
                 self.hit(col);
                 if open {
                     self.push(col, Kind::Block, self.inner(), decl);
+                    if let Some(o) = self.open.last_mut() {
+                        o.at = from;
+                    }
                 }
             }
             Ev::Begin(col) => {
@@ -140,7 +164,7 @@ impl Stack {
                 // END closes the last CASE or block, clause tails with it.
                 if let Some(n) = self.open.iter().rposition(|s| matches!(s.kind, Kind::Case | Kind::Block | Kind::Bracket | Kind::Fence)) {
                     if matches!(self.open[n].kind, Kind::Case | Kind::Block) {
-                        self.open.truncate(n);
+                        self.cut(n);
                     }
                 }
             }
@@ -160,11 +184,11 @@ impl Stack {
             Ev::Clause(_, false) => self.hit(0),
             Ev::Enter if open => {
                 let level = self.inner();
-                self.open.push(Open { col: 0, kind: Kind::Fence, level, next: level, decl: false });
+                self.open.push(Open { at: self.pos, col: 0, kind: Kind::Fence, level, next: level, decl: false });
             }
             Ev::Leave => {
                 if let Some(n) = self.open.iter().rposition(|s| s.kind == Kind::Fence) {
-                    self.open.truncate(n);
+                    self.cut(n);
                 }
             }
             _ => {}
@@ -252,7 +276,7 @@ fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<
     // declarations like DECLARE: (the header line's indent, bracket depth).
     let mut header: Option<(usize, i32)> = None;
     // FOR / WHILE … LOOP: the loop starts on FOR's line.
-    let mut head: Option<(usize, i32)> = None;
+    let mut head: Option<(usize, i32, usize)> = None;
     let mut brackets = 0i32;
     let mut k = 0;
     while k < nt.len() {
@@ -287,7 +311,7 @@ fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<
                     // (Not PostgreSQL's AS $$: its body is a string.)
                     "IS" | "AS" if header.is_some_and(|h| h.1 == brackets) && !nt.get(k + 1).is_some_and(|x| x.kind == Tk::Str) => {
                         let (col, _) = header.take().unwrap();
-                        Some((at, Ev::Block(col, true)))
+                        Some((at, Ev::Block(col, true, at)))
                     }
                     "CASE" => Some((at, Ev::Case(g.col(at)))),
                     "END" => {
@@ -305,16 +329,16 @@ fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<
                         None
                     }
                     "BEGIN" => Some((at, Ev::Begin(g.line_indent(at)))),
-                    "DECLARE" => Some((at, Ev::Block(g.line_indent(at), true))),
+                    "DECLARE" => Some((at, Ev::Block(g.line_indent(at), true, at))),
                     // IF NOT EXISTS isn't a block.
-                    "IF" if !matches!(up(k + 1).as_str(), "EXISTS" | "NOT") => Some((at, Ev::Block(g.line_indent(at), false))),
+                    "IF" if !matches!(up(k + 1).as_str(), "EXISTS" | "NOT") => Some((at, Ev::Block(g.line_indent(at), false, at))),
                     "FOR" | "WHILE" if head.is_none() => {
-                        head = Some((g.line_indent(at), brackets));
+                        head = Some((g.line_indent(at), brackets, at));
                         None
                     }
                     "LOOP" => {
-                        let col = head.take().filter(|h| h.1 == brackets).map_or(g.line_indent(at), |h| h.0);
-                        Some((at, Ev::Block(col, false)))
+                        let (col, from) = head.take().filter(|h| h.1 == brackets).map_or((g.line_indent(at), at), |h| (h.0, h.2));
+                        Some((at, Ev::Block(col, false, from)))
                     }
                     "SELECT" | "FROM" | "WHERE" | "HAVING" => Some((at, Ev::Clause(g.col(at), true))),
                     "BY" if k > 0 && same_line(k - 1) && matches!(up(k - 1).as_str(), "GROUP" | "ORDER" | "CONNECT") => map(nt[k - 1].start).map(|from| (from, Ev::Clause(g.col(from), true))),
@@ -375,8 +399,23 @@ fn byte_at(line: &str, col: usize) -> usize {
     line.len()
 }
 
+/// A bracket, CASE or block: from its start to its end's first byte, its
+/// band's column and colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Block {
+    pub range: Range<usize>,
+    pub col: usize,
+    pub level: usize,
+}
+
 /// The bands of the whole text, line by line, in order.
+#[cfg(test)]
 pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
+    analyse(code, d).0
+}
+
+/// The bands, and the brackets / CASEs / blocks (by where they start).
+pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
     let starts: Vec<usize> = std::iter::once(0).chain(code.match_indices('\n').map(|(i, _)| i + 1)).collect();
     let n = starts.len();
     let mut g = Gather { code, starts, events: Vec::new(), quiet: vec![false; n], parts: Vec::new() };
@@ -385,7 +424,7 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
     // (A string's end before what follows it right there.)
     events.sort_by_key(|e| (e.0, e.1 != Ev::Leave));
     parts.sort_unstable();
-    let mut st = Stack::default();
+    let mut st = Stack { rec: true, ..Default::default() };
     let mut e = 0;
     let mut out = Vec::new();
     for (li, &ls) in starts.iter().enumerate() {
@@ -405,6 +444,7 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
             first = f;
         }
         while e < events.len() && events[e].0 < first {
+            st.pos = events[e].0;
             st.apply(events[e].1, true);
             e += 1;
         }
@@ -416,9 +456,10 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
             None => indent(l),
         };
         // Text at or left of a clause's column: its tail ends there.
+        st.pos = ls.saturating_sub(1);
         st.hit(w);
         // What the line starts with closes before it (") x", "END", "FROM t").
-        let mut here = st.clone();
+        let mut here = Stack { open: st.open.clone(), next: st.next, pos: st.pos, rec: false, closed: Vec::new() };
         for ev in events[e..].iter().take_while(|ev| ev.0 == first) {
             here.apply(ev.1, false);
         }
@@ -452,7 +493,15 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
             }
         }
     }
-    out
+    for &(at, ev) in &events[e..] {
+        st.pos = at;
+        st.apply(ev, true);
+    }
+    st.pos = code.len();
+    st.cut(0);
+    let mut blocks = st.closed;
+    blocks.sort_by_key(|b| b.range.start);
+    (out, blocks)
 }
 
 #[cfg(test)]
@@ -542,5 +591,10 @@ mod tests {
         let src = "begin\n  for r in (select id\n              from t) loop\n    null;\n  end loop;\nend;";
         let c = cols(src, Dialect::Oracle);
         assert_eq!(c[3], vec![(0, 2, 0), (2, 4, 1)], "{c:?}");
+        // The loop's block from FOR to END LOOP.
+        let (_, blocks) = analyse(src, Dialect::Oracle);
+        let at = |w: &str| src.find(w).unwrap();
+        assert!(blocks.contains(&Block { range: at("for")..at("end loop"), col: 2, level: 1 }), "{blocks:?}");
+        assert!(blocks.iter().any(|b| b.range.start == at("begin") && b.range.end == src.rfind("end;").unwrap()), "{blocks:?}");
     }
 }

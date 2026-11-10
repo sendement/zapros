@@ -58,14 +58,18 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   or `'…'` literal over several lines, a `||` chain one piece per line with
   the quotes under each other — and only re-cases keywords in a piece of a
   statement (`v_sql := v_sql || ' and …'`); anything it can't redo token
-  for token is left alone.
+  for token is left alone. With "split a string over several lines" off in
+  the formatter's settings, strings keep their lines and only get the
+  keywords' case.
 - **Formatter** ("river" style, leading commas; keyword / function case
   configurable). PL/SQL units and `$$` bodies are left as written.
 - **Highlighting** with a palette per theme (colour pickers, bold keywords,
   italic comments, brackets coloured by depth) and, as in listok, rainbow
   bands under the indents: one per construct a line is nested in —
   brackets, CASE…END, BEGIN / DECLARE / IS…END, IF, LOOP, and the clauses
-  SELECT / FROM / JOIN / WHERE / GROUP BY….
+  SELECT / FROM / JOIN / WHERE / GROUP BY…, inside SQL strings and `$$`
+  bodies too. The block (bracket, CASE, BEGIN…END, IF, LOOP) at the caret
+  gets a frame in its band's colour, the one under the pointer a fainter one.
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,

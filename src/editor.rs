@@ -42,6 +42,8 @@ pub struct Popup {
 pub struct EditorState {
     pub popup: Option<Popup>,
     job: Option<(u64, LayoutJob)>,
+    /// The text's brackets, CASEs and blocks, as of `job`.
+    blocks: Vec<crate::sql::bands::Block>,
     /// Cursor (bytes) as of the last frame: (primary, secondary).
     pub cursor: Option<(usize, usize)>,
     /// Put the cursor here (bytes) next frame and focus.
@@ -162,8 +164,19 @@ fn warn_color(dark: bool) -> Color32 {
     if dark { Color32::from_rgb(230, 170, 40) } else { Color32::from_rgb(200, 120, 0) }
 }
 
+/// The bands' colours, full strength.
+fn band_hues(dark: bool) -> Vec<Color32> {
+    let (s, v) = if dark { (0.5, 0.97) } else { (0.75, 0.62) };
+    BAND_HUES.iter().map(|&h| Color32::from(egui::ecolor::Hsva::new(h / 360.0, s, v, 1.0))).collect()
+}
+
 /// The text laid out with colours.
 pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> LayoutJob {
+    layout_blocks(text, cx, pair, font, mono_bold).0
+}
+
+/// The text laid out with colours, and its blocks (for the frames).
+fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> (LayoutJob, Vec<crate::sql::bands::Block>) {
     use crate::sql::embed::Class;
     let pal: &Palette = if cx.dark { &cx.settings.dark } else { &cx.settings.light };
     // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
@@ -219,10 +232,11 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         over.push((b..b + 1, 4));
     }
     // Rainbow bands under the indents (listok's hues).
-    let bands: Vec<(Range<usize>, Color32)> = if pal.bands && text.len() < 2_000_000 {
-        let (s, v, alpha) = if cx.dark { (0.5, 0.97, 0.24) } else { (0.75, 0.62, 0.30) };
-        let hues: Vec<Color32> = BAND_HUES.iter().map(|&h| Color32::from(egui::ecolor::Hsva::new(h / 360.0, s, v, 1.0)).gamma_multiply(alpha)).collect();
-        crate::sql::bands::bands(text, cx.dialect).into_iter().map(|b| (b.range, hues[b.level % hues.len()])).collect()
+    let (found, blocks) = if (pal.bands || pal.frames) && text.len() < 2_000_000 { crate::sql::bands::analyse(text, cx.dialect) } else { Default::default() };
+    let bands: Vec<(Range<usize>, Color32)> = if pal.bands {
+        let alpha = if cx.dark { 0.24 } else { 0.30 };
+        let hues: Vec<Color32> = band_hues(cx.dark).into_iter().map(|c| c.gamma_multiply(alpha)).collect();
+        found.into_iter().map(|b| (b.range, hues[b.level % hues.len()])).collect()
     } else {
         Vec::new()
     };
@@ -281,7 +295,7 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         }
         job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: f });
     }
-    job
+    (job, if pal.frames { blocks } else { Vec::new() })
 }
 
 /// Replaces `r` with `with` and puts the cursor after it (or at "$0").
@@ -561,8 +575,9 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let job = match &st.job {
             Some((kk, j)) if *kk == k => j.clone(),
             _ => {
-                let j = layout(s, cx, pair, font, mono_bold);
+                let (j, blocks) = layout_blocks(s, cx, pair, font, mono_bold);
                 st.job = Some((k, j.clone()));
+                st.blocks = blocks;
                 j
             }
         };
@@ -621,6 +636,42 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         new_line = row.ends_with_newline;
         if new_line {
             line += 1;
+        }
+    }
+
+    // Frames round the block at the caret and the one under the pointer.
+    if !st.blocks.is_empty() {
+        let hover = output.response.hover_pos().map(|pos| byte_of(text, output.galley.cursor_from_pos(pos - output.galley_pos).index.0));
+        let line_of = |b: usize| text.as_bytes()[..b].iter().filter(|&&c| c == b'\n').count();
+        // The innermost one over lines that holds `at`.
+        let inner = |at: usize| {
+            st.blocks.iter().filter(|b| b.range.start <= at && at <= b.range.end && text.get(b.range.clone()).is_some_and(|t| t.contains('\n'))).max_by_key(|b| b.range.start)
+        };
+        let caret = cursor_b.and_then(|c| inner(c));
+        let under = hover.and_then(|h| inner(h)).filter(|b| Some(*b) != caret);
+        let hues = band_hues(cx.dark);
+        let rows = &output.galley.rows;
+        for (b, strong) in [(under, false), (caret, true)] {
+            let Some(b) = b else { continue };
+            let (l0, l1) = (line_of(b.range.start), line_of(b.range.end));
+            if l1 >= rows.len() {
+                continue;
+            }
+            let at = output.galley_pos.to_vec2();
+            let left = output.galley_pos.x + b.col as f32 * char_w - 3.0;
+            let right = rows[l0..=l1].iter().map(|r| r.rect().right()).fold(0.0f32, f32::max) + at.x + 4.0;
+            let top = rows[l0].rect().top() + at.y;
+            let mut bottom = rows[l1].rect().bottom() + at.y;
+            if bottom - rows[l1].rect().top() - at.y < 1.0 {
+                bottom += row_h;
+            }
+            let rect = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right.max(left + 4.0 * char_w), bottom));
+            if !rect.intersects(clip) {
+                continue;
+            }
+            let c = hues[b.level % hues.len()];
+            let stroke = if strong { Stroke::new(1.5, c.gamma_multiply(0.85)) } else { Stroke::new(1.0, c.gamma_multiply(0.45)) };
+            painter.rect_stroke(rect, crate::ui::RADIUS, stroke, egui::StrokeKind::Middle);
         }
     }
 
