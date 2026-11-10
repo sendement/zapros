@@ -44,6 +44,8 @@ pub struct EditorState {
     job: Option<(u64, LayoutJob)>,
     /// The text's brackets, CASEs and blocks, as of `job`.
     blocks: Vec<crate::sql::bands::Block>,
+    /// (layout key, block start) → the x its lines' text starts at.
+    frame_x: std::collections::HashMap<(u64, usize), f32>,
     /// Cursor (bytes) as of the last frame: (primary, secondary).
     pub cursor: Option<(usize, usize)>,
     /// Put the cursor here (bytes) next frame and focus.
@@ -578,6 +580,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 let (j, blocks) = layout_blocks(s, cx, pair, font, mono_bold);
                 st.job = Some((k, j.clone()));
                 st.blocks = blocks;
+                st.frame_x.clear();
                 j
             }
         };
@@ -671,7 +674,14 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 }
                 w += if ch == '\t' { 4 } else { 1 };
             }
-            let x = output.galley.pos_from_cursor(CCursor::new(char_of(text, ls + byte))).min.x;
+            let mut x = output.galley.pos_from_cursor(CCursor::new(char_of(text, ls + byte))).min.x;
+            // Lines inside further left than that (its text under "IS ("):
+            // the frame takes them in. (Once per text and block.)
+            let key = (st.job.as_ref().map_or(0, |j| j.0), b.range.start);
+            let inside = *st.frame_x.entry(key).or_insert_with(|| {
+                rows[l0 + 1..=l1].iter().filter_map(|r| r.glyphs.iter().find(|g| !g.chr.is_whitespace()).map(|g| g.pos.x)).fold(f32::INFINITY, f32::min)
+            });
+            x = x.min(inside);
             let left = output.galley_pos.x + x - 3.0;
             let right = rows[l0..=l1].iter().map(|r| r.rect().right()).fold(0.0f32, f32::max) + at.x + 4.0;
             let top = rows[l0].rect().top() + at.y;

@@ -259,7 +259,7 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     let plus_w = ROW_H - 6.0;
     let gap = 4.0;
     let lo = sheet.left() + TABS_FROM;
-    let hi = sheet.right() - SHEET_R - FILLET - plus_w - gap;
+    let hi = sheet.right() - SHEET_R - FILLET - plus_w - 6.0 - gap;
     let painter0 = ui.painter().clone();
     let extras: Vec<f32> = (0..n).map(|i| 30.0 + painter0.layout_no_wrap(counts[i].clone(), small.clone(), v.text_color()).size().x + if running[i] { 18.0 } else { 0.0 }).collect();
     let extra = |i: usize| extras[i];
@@ -362,11 +362,11 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     painter.add(egui::Shape::closed_line(outline(sheet, tab), Stroke::new(1.5, color)));
     painter.extend(active_text);
     // "+": a new workspace.
-    let plus = Rect::from_min_size(Pos2::new(x, row.top() + 4.0 + (row.height() - 4.0 - plus_w) / 2.0), Vec2::splat(plus_w));
+    // Like a not-chosen tab: rounded on top, standing on the sheet.
+    let plus = Rect::from_min_max(Pos2::new(x, row.top() + 4.0), Pos2::new(x + plus_w + 6.0, sheet.top() - 1.0));
     let r = ui.interact(plus, ui.id().with("ws-new"), egui::Sense::click());
-    if r.hovered() {
-        painter.rect_filled(plus, RADIUS, v.widgets.hovered.weak_bg_fill);
-    }
+    let k = if r.hovered() { 1.0 } else { 0.6 };
+    painter.rect_filled(plus, egui::CornerRadius { nw: TAB_R as u8, ne: TAB_R as u8, sw: 0, se: 0 }, v.widgets.inactive.weak_bg_fill.gamma_multiply(k));
     painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
     if r.on_hover_text(t("Новое рабочее пространство", "New workspace")).clicked() {
         let color = COLORS[app.session.workspaces.len() % COLORS.len()];
@@ -410,6 +410,11 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                 let n = app.ws().tabs.len();
                 let mut close = None;
                 let mut drag: Option<(usize, usize)> = None;
+                // (The "+" as tall as the tabs.)
+                let mut tab_h = 24.0f32;
+                // Not chosen: the same rounded box, a quiet edge.
+                let idle_fill = v.widgets.inactive.weak_bg_fill.gamma_multiply(0.55);
+                let idle_stroke = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
                 for i in 0..n {
                     let tab = &app.ws().tabs[i];
                     let active = i == app.ws().active;
@@ -422,13 +427,13 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                     let (fill, stroke) = if active {
                         (color.gamma_multiply(if v.dark_mode { 0.30 } else { 0.18 }), Stroke::new(1.0, color))
                     } else if hovered {
-                        (v.widgets.hovered.weak_bg_fill, Stroke::new(1.0, v.widgets.hovered.weak_bg_fill))
+                        (v.widgets.hovered.weak_bg_fill, Stroke::new(1.0, v.widgets.hovered.bg_stroke.color))
                     } else {
-                        (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.55), Stroke::new(1.0, Color32::TRANSPARENT))
+                        (idle_fill, idle_stroke)
                     };
                     let path = tab.path.clone();
                     let title = tab_title(tab);
-                    let fr = egui::Frame::NONE.fill(fill).corner_radius(RADIUS).inner_margin(egui::Margin { left: 9, right: 5, top: 4, bottom: 4 }).stroke(stroke);
+                    let fr = egui::Frame::NONE.fill(fill).corner_radius(RADIUS).inner_margin(egui::Margin { left: 9, right: 5, top: 2, bottom: 2 }).stroke(stroke);
                     let shown = fr
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -452,6 +457,7 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                             })
                             .inner
                         });
+                    tab_h = shown.response.rect.height();
                     let now_hovered = ui.rect_contains_pointer(shown.response.rect);
                     if now_hovered != hovered {
                         ui.ctx().data_mut(|d| d.insert_temp(hover_id, now_hovered));
@@ -547,7 +553,11 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                         }
                     });
                 }
-                if ui.add(egui::Button::new(" + ").frame(false)).on_hover_text(t("Новый скрипт (Ctrl+T)", "New script (Ctrl+T)")).clicked() {
+                let (plus, r) = ui.allocate_exact_size(Vec2::splat(tab_h), egui::Sense::click());
+                let (fill, stroke) = if r.hovered() { (v.widgets.hovered.weak_bg_fill, Stroke::new(1.0, v.widgets.hovered.bg_stroke.color)) } else { (idle_fill, idle_stroke) };
+                ui.painter().rect(plus.shrink(0.5), RADIUS, fill, stroke, egui::StrokeKind::Inside);
+                ui.painter().text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(16.0), v.text_color());
+                if r.on_hover_text(t("Новый скрипт (Ctrl+T)", "New script (Ctrl+T)")).clicked() {
                     app.new_tab(None, String::new(), None);
                 }
                 if let Some((a, b)) = drag {

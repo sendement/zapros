@@ -467,7 +467,9 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
         let at = |col: usize| if into.is_some() { byte_at(l, col) } else { byte_at_col(l, col) };
         for (n, c) in o.iter().enumerate() {
             let a = c.col;
-            let b = o.get(n + 1).map_or(usize::MAX, |b| b.col).min(w);
+            // To where the next one starts (one right of a later one, as
+            // "IS (" with its text under IS, hides behind it).
+            let b = o[n + 1..].iter().map(|b| b.col).min().unwrap_or(usize::MAX).min(w);
             if a >= b {
                 continue;
             }
@@ -584,6 +586,19 @@ mod tests {
         let src = "begin\n  v := 'select case when a then 1 end from t';\n  x := 1;\nend;";
         let c = cols(src, Dialect::Oracle);
         assert_eq!(c[2], vec![(0, 2, 0)], "{c:?}");
+    }
+
+    #[test]
+    fn bands_never_overlap() {
+        // The bracket's text left of where its construct starts.
+        let src = "declare\n  cursor c is (\n    select a\n         , b\n      from dual\n  );\nbegin\n  null;\nend;";
+        let c = cols(src, Dialect::Oracle);
+        for line in &c {
+            for w in line.windows(2) {
+                assert!(w[0].1 <= w[1].0, "{c:?}");
+            }
+        }
+        assert_eq!(c[3], vec![(0, 4, 0), (4, 9, 2)], "{c:?}");
     }
 
     #[test]
