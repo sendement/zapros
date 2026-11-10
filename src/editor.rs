@@ -201,6 +201,9 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
         if sp.level > 0 {
             f.background = wash(sp.level);
         }
+        // Backgrounds that meet edge to edge: egui's 1px grow would make
+        // them overlap (darker seams, at 1.2× too).
+        f.expand_bg = 0.0;
         f
     };
     // Overlays: problems, the server's error, the bracket pair.
@@ -250,6 +253,7 @@ pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mon
             ti += 1;
         }
         let mut f = spans.get(ti).map(&fmt_of).unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
+        f.expand_bg = 0.0;
         while bi < bands.len() && bands[bi].0.end <= a {
             bi += 1;
         }

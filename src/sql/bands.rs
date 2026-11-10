@@ -10,6 +10,7 @@
 use std::ops::Range;
 
 use super::Dialect;
+use super::embed::{self, Part};
 use super::lex::{self, Tk};
 
 /// A band: bytes of a line's indent, and its colour's level.
@@ -50,6 +51,9 @@ enum Ev {
     /// A clause word: its column, and whether it opens a band (UNION only
     /// ends them).
     Clause(usize, bool),
+    /// SQL in a string starts / ends.
+    Enter,
+    Leave,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -58,6 +62,8 @@ enum Kind {
     Case,
     Block,
     Clause,
+    /// SQL in a string: no band; what's outside it isn't closed from in it.
+    Fence,
 }
 
 /// An open construct: its column, kind and colour's level; `next`: the
@@ -86,13 +92,13 @@ impl Stack {
     }
 
     fn inner(&self) -> usize {
-        self.open.last().map_or(0, |o| o.level + 1)
+        self.open.iter().rev().find(|o| o.kind != Kind::Fence).map_or(0, |o| o.level + 1)
     }
 
     /// Ends the constructs back to the last of `kinds` (not past a bracket,
     /// nor — for a block's END — past a block).
     fn pop_to(&mut self, kinds: &[Kind]) {
-        if let Some(n) = self.open.iter().rposition(|s| kinds.contains(&s.kind) || s.kind == Kind::Bracket) {
+        if let Some(n) = self.open.iter().rposition(|s| kinds.contains(&s.kind) || matches!(s.kind, Kind::Bracket | Kind::Fence)) {
             if kinds.contains(&self.open[n].kind) {
                 self.open.truncate(n);
             }
@@ -132,8 +138,8 @@ impl Stack {
             Ev::End(true) => self.pop_to(&[Kind::Block]),
             Ev::End(false) => {
                 // END closes the last CASE or block, clause tails with it.
-                if let Some(n) = self.open.iter().rposition(|s| matches!(s.kind, Kind::Case | Kind::Block | Kind::Bracket)) {
-                    if self.open[n].kind != Kind::Bracket {
+                if let Some(n) = self.open.iter().rposition(|s| matches!(s.kind, Kind::Case | Kind::Block | Kind::Bracket | Kind::Fence)) {
+                    if matches!(self.open[n].kind, Kind::Case | Kind::Block) {
                         self.open.truncate(n);
                     }
                 }
@@ -152,6 +158,15 @@ impl Stack {
                 }
             }
             Ev::Clause(_, false) => self.hit(0),
+            Ev::Enter if open => {
+                let level = self.inner();
+                self.open.push(Open { col: 0, kind: Kind::Fence, level, next: level, decl: false });
+            }
+            Ev::Leave => {
+                if let Some(n) = self.open.iter().rposition(|s| s.kind == Kind::Fence) {
+                    self.open.truncate(n);
+                }
+            }
             _ => {}
         }
     }
@@ -179,83 +194,130 @@ fn opener_col(before: &str) -> usize {
     }
 }
 
-/// The bands of the whole text, line by line, in order.
-pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
-    let starts: Vec<usize> = std::iter::once(0).chain(code.match_indices('\n').map(|(i, _)| i + 1)).collect();
-    let line_of = |at: usize| starts.partition_point(|&s| s <= at) - 1;
-    let col = |at: usize| code[starts[line_of(at)]..at].chars().count();
-    let toks = lex::lex(code, d);
-    // Lines that start inside a string or comment have no bands.
-    let mut quiet = vec![false; starts.len()];
-    for t in toks.iter().filter(|t| matches!(t.kind, Tk::Str | Tk::BlockComment | Tk::Quoted)) {
-        for (li, s) in starts.iter().enumerate().skip(line_of(t.start) + 1) {
-            if *s >= t.end {
+/// How deep strings in strings are followed.
+const MAX_DEPTH: usize = 4;
+
+/// What one pass over the script gathers: events at source bytes, lines
+/// that start inside a string or comment, and where SQL strings' parts
+/// start (their quote, text, and text's first char past blanks).
+struct Gather<'a> {
+    code: &'a str,
+    starts: Vec<usize>,
+    events: Vec<(usize, Ev)>,
+    quiet: Vec<bool>,
+    parts: Vec<(usize, usize, usize)>,
+}
+
+impl Gather<'_> {
+    fn line_of(&self, at: usize) -> usize {
+        self.starts.partition_point(|&s| s <= at) - 1
+    }
+
+    fn col(&self, at: usize) -> usize {
+        self.code[self.starts[self.line_of(at)]..at].chars().count()
+    }
+
+    fn line_indent(&self, at: usize) -> usize {
+        indent(&self.code[self.starts[self.line_of(at)]..])
+    }
+
+    /// Lines after the one with `a`, up to `b`, start inside: no bands.
+    fn hush(&mut self, a: usize, b: usize) {
+        for li in self.line_of(a) + 1..self.starts.len() {
+            if self.starts[li] >= b {
                 break;
             }
-            quiet[li] = true;
+            self.quiet[li] = true;
         }
     }
-    // The events in order, at the first char of their construct.
-    let mut events: Vec<(usize, Ev)> = Vec::new();
+}
+
+/// The events of `text` (the script, or the SQL in its strings: `map`
+/// takes its bytes to the script's), and of the SQL in its strings.
+fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<usize>, depth: usize) {
+    let toks = lex::lex(text, d);
+    let regions = if depth < MAX_DEPTH { embed::regions(text, &toks, d) } else { Vec::new() };
+    let sql_part = |t: &lex::Tok| regions.iter().any(|r| r.parts.iter().any(|p| matches!(p, Part::Text { tok, .. } if tok.start == t.start)));
+    for t in toks.iter().filter(|t| matches!(t.kind, Tk::Str | Tk::BlockComment | Tk::Quoted)) {
+        if t.kind == Tk::Str && sql_part(t) {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (map(t.start), map(t.end.saturating_sub(1)).map(|b| b + 1)) {
+            g.hush(a, b);
+        }
+    }
     let nt: Vec<_> = toks.iter().filter(|t| !t.trivia()).collect();
-    let up = |k: usize| nt.get(k).filter(|t| matches!(t.kind, Tk::Word | Tk::Keyword)).map(|t| t.text(code).to_ascii_uppercase()).unwrap_or_default();
-    let line_indent = |at: usize| {
-        let s = starts[line_of(at)];
-        indent(&code[s..])
-    };
+    let up = |k: usize| nt.get(k).filter(|t| matches!(t.kind, Tk::Word | Tk::Keyword)).map(|t| t.text(text).to_ascii_uppercase()).unwrap_or_default();
     // A subprogram's (or package's) header seen: its IS / AS opens its
     // declarations like DECLARE: (the header line's indent, bracket depth).
     let mut header: Option<(usize, i32)> = None;
-    let mut depth = 0i32;
+    // FOR / WHILE … LOOP: the loop starts on FOR's line.
+    let mut head: Option<(usize, i32)> = None;
+    let mut brackets = 0i32;
     let mut k = 0;
     while k < nt.len() {
         let t = nt[k];
-        let at = t.start;
+        let Some(at) = map(t.start) else {
+            k += 1;
+            continue;
+        };
         match t.kind {
-            Tk::Open if t.text(code) == "(" => {
-                depth += 1;
-                events.push((at, Ev::Open(opener_col(&code[starts[line_of(at)]..at]))));
+            Tk::Open if t.text(text) == "(" => {
+                brackets += 1;
+                let ls = g.starts[g.line_of(at)];
+                g.events.push((at, Ev::Open(opener_col(&g.code[ls..at]))));
             }
-            Tk::Close if t.text(code) == ")" => {
-                depth -= 1;
-                events.push((at, Ev::Close));
+            Tk::Close if t.text(text) == ")" => {
+                brackets -= 1;
+                g.events.push((at, Ev::Close));
             }
-            Tk::Semi => header = None,
+            Tk::Semi => {
+                header = None;
+                head = None;
+            }
             Tk::Word | Tk::Keyword => {
                 let word = up(k);
                 // Words before it on its line (LEFT JOIN, GROUP BY).
-                let same_line = |j: usize| j < k && line_of(nt[j].start) == line_of(at);
-                match word.as_str() {
-                    "PROCEDURE" | "FUNCTION" | "PACKAGE" | "BODY" if header.is_none() => header = Some((line_indent(at), depth)),
-                    // (Not PostgreSQL's AS $$: its body is a string.)
-                    "IS" | "AS" if header.is_some_and(|h| h.1 == depth) && !nt.get(k + 1).is_some_and(|x| x.kind == Tk::Str) => {
-                        let (col, _) = header.take().unwrap();
-                        events.push((at, Ev::Block(col, true)));
+                let same_line = |j: usize| j < k && map(nt[j].start).is_some_and(|s| g.line_of(s) == g.line_of(at));
+                let ev = match word.as_str() {
+                    "PROCEDURE" | "FUNCTION" | "PACKAGE" | "BODY" if header.is_none() => {
+                        header = Some((g.line_indent(at), brackets));
+                        None
                     }
-                    "CASE" => events.push((at, Ev::Case(col(at)))),
+                    // (Not PostgreSQL's AS $$: its body is a string.)
+                    "IS" | "AS" if header.is_some_and(|h| h.1 == brackets) && !nt.get(k + 1).is_some_and(|x| x.kind == Tk::Str) => {
+                        let (col, _) = header.take().unwrap();
+                        Some((at, Ev::Block(col, true)))
+                    }
+                    "CASE" => Some((at, Ev::Case(g.col(at)))),
                     "END" => {
                         let next = up(k + 1);
                         if matches!(next.as_str(), "IF" | "LOOP") {
-                            events.push((at, Ev::End(true)));
+                            g.events.push((at, Ev::End(true)));
                             k += 2;
                             continue;
                         }
-                        events.push((at, Ev::End(false)));
+                        g.events.push((at, Ev::End(false)));
                         if next == "CASE" {
                             k += 2;
                             continue;
                         }
+                        None
                     }
-                    "BEGIN" => events.push((at, Ev::Begin(line_indent(at)))),
-                    "DECLARE" => events.push((at, Ev::Block(line_indent(at), true))),
+                    "BEGIN" => Some((at, Ev::Begin(g.line_indent(at)))),
+                    "DECLARE" => Some((at, Ev::Block(g.line_indent(at), true))),
                     // IF NOT EXISTS isn't a block.
-                    "IF" if !matches!(up(k + 1).as_str(), "EXISTS" | "NOT") => events.push((at, Ev::Block(line_indent(at), false))),
-                    "LOOP" => events.push((at, Ev::Block(line_indent(at), false))),
-                    "SELECT" | "FROM" | "WHERE" | "HAVING" => events.push((at, Ev::Clause(col(at), true))),
-                    "BY" if k > 0 && same_line(k - 1) && matches!(up(k - 1).as_str(), "GROUP" | "ORDER" | "CONNECT") => {
-                        let from = nt[k - 1].start;
-                        events.push((from, Ev::Clause(col(from), true)));
+                    "IF" if !matches!(up(k + 1).as_str(), "EXISTS" | "NOT") => Some((at, Ev::Block(g.line_indent(at), false))),
+                    "FOR" | "WHILE" if head.is_none() => {
+                        head = Some((g.line_indent(at), brackets));
+                        None
                     }
+                    "LOOP" => {
+                        let col = head.take().filter(|h| h.1 == brackets).map_or(g.line_indent(at), |h| h.0);
+                        Some((at, Ev::Block(col, false)))
+                    }
+                    "SELECT" | "FROM" | "WHERE" | "HAVING" => Some((at, Ev::Clause(g.col(at), true))),
+                    "BY" if k > 0 && same_line(k - 1) && matches!(up(k - 1).as_str(), "GROUP" | "ORDER" | "CONNECT") => map(nt[k - 1].start).map(|from| (from, Ev::Clause(g.col(from), true))),
                     "JOIN" => {
                         // From LEFT / INNER / FULL OUTER… before it.
                         let mods = ["LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL"];
@@ -263,25 +325,85 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
                         while j > 0 && same_line(j - 1) && mods.contains(&up(j - 1).as_str()) {
                             j -= 1;
                         }
-                        let from = nt[j].start;
-                        events.push((from, Ev::Clause(col(from), true)));
+                        map(nt[j].start).map(|from| (from, Ev::Clause(g.col(from), true)))
                     }
-                    "UNION" | "INTERSECT" | "EXCEPT" | "MINUS" | "LIMIT" | "OFFSET" | "FETCH" | "INTO" | "VALUES" | "SET" | "WITH" | "START" | "RETURNING" | "WINDOW" | "QUALIFY" => events.push((at, Ev::Clause(0, false))),
-                    _ => {}
-                }
+                    "UNION" | "INTERSECT" | "EXCEPT" | "MINUS" | "LIMIT" | "OFFSET" | "FETCH" | "INTO" | "VALUES" | "SET" | "WITH" | "START" | "RETURNING" | "WINDOW" | "QUALIFY" => Some((at, Ev::Clause(0, false))),
+                    _ => None,
+                };
+                g.events.extend(ev);
             }
             _ => {}
         }
         k += 1;
     }
-    events.sort_by_key(|e| e.0);
+    // The SQL in strings: its constructs live inside a fence the string's
+    // end takes down.
+    for r in &regions {
+        let (Some(a), Some(b)) = (map(r.range.start), map(r.range.end.saturating_sub(1)).map(|b| b + 1)) else {
+            continue;
+        };
+        g.events.push((a, Ev::Enter));
+        g.events.push((b, Ev::Leave));
+        for p in &r.parts {
+            if let Part::Text { tok, content, .. } = p {
+                let first = content.start + (text[content.clone()].len() - text[content.clone()].trim_start_matches([' ', '\t']).len());
+                if first < content.end && !text[content.start..first].contains('\n') {
+                    if let (Some(q), Some(c), Some(f)) = (map(tok.start), map(content.start), map(first)) {
+                        g.parts.push((q, c, f));
+                    }
+                }
+            }
+        }
+        let v = embed::virtual_text(text, r);
+        let inner = |p: usize| {
+            let i = v.map.partition_point(|&(vs, _, len)| vs + len <= p);
+            v.map.get(i).filter(|&&(vs, _, _)| vs <= p).and_then(|&(vs, ss, _)| map(ss + p - vs))
+        };
+        gather(g, &v.text, d, &inner, depth + 1);
+    }
+}
+
+/// The byte of the line at column `col` (tabs to 4).
+fn byte_at(line: &str, col: usize) -> usize {
+    let mut at = 0;
+    for (i, c) in line.char_indices() {
+        if at >= col {
+            return i;
+        }
+        at += if c == '\t' { 4 } else { 1 };
+    }
+    line.len()
+}
+
+/// The bands of the whole text, line by line, in order.
+pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
+    let starts: Vec<usize> = std::iter::once(0).chain(code.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let n = starts.len();
+    let mut g = Gather { code, starts, events: Vec::new(), quiet: vec![false; n], parts: Vec::new() };
+    gather(&mut g, code, d, &Some, 0);
+    let Gather { starts, mut events, quiet, mut parts, .. } = g;
+    // (A string's end before what follows it right there.)
+    events.sort_by_key(|e| (e.0, e.1 != Ev::Leave));
+    parts.sort_unstable();
     let mut st = Stack::default();
     let mut e = 0;
     let mut out = Vec::new();
     for (li, &ls) in starts.iter().enumerate() {
         let le = starts.get(li + 1).map_or(code.len(), |&n| n - 1);
         let l = &code[ls..le];
-        let first = ls + (l.len() - l.trim_start().len());
+        let mut first = ls + (l.len() - l.trim_start().len());
+        // A line that starts a SQL string's part ('…, || '…): its indent
+        // goes on into the string.
+        let mut lead = first;
+        if code[lead..le].starts_with("||") {
+            lead += 2;
+            lead += code[lead..le].len() - code[lead..le].trim_start().len();
+        }
+        let part = parts.binary_search_by_key(&lead, |p| p.0).ok().map(|i| parts[i]).filter(|p| p.2 < le);
+        let into = part.map(|p| p.2);
+        if let Some(f) = into {
+            first = f;
+        }
         while e < events.len() && events[e].0 < first {
             st.apply(events[e].1, true);
             e += 1;
@@ -289,7 +411,10 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
         if l.trim().is_empty() || quiet[li] {
             continue;
         }
-        let w = indent(l);
+        let w = match into {
+            Some(f) => code[ls..f].chars().map(|c| if c == '\t' { 4 } else { 1 }).sum(),
+            None => indent(l),
+        };
         // Text at or left of a clause's column: its tail ends there.
         st.hit(w);
         // What the line starts with closes before it (") x", "END", "FROM t").
@@ -297,12 +422,33 @@ pub fn bands(code: &str, d: Dialect) -> Vec<Band> {
         for ev in events[e..].iter().take_while(|ev| ev.0 == first) {
             here.apply(ev.1, false);
         }
-        let o = &here.open;
+        let o: Vec<&Open> = here.open.iter().filter(|o| o.kind != Kind::Fence).collect();
+        let at = |col: usize| if into.is_some() { byte_at(l, col) } else { byte_at_col(l, col) };
         for (n, c) in o.iter().enumerate() {
             let a = c.col;
             let b = o.get(n + 1).map_or(usize::MAX, |b| b.col).min(w);
-            if a < b {
-                out.push(Band { range: ls + byte_at_col(l, a)..ls + byte_at_col(l, b), level: c.level });
+            if a >= b {
+                continue;
+            }
+            let (a, b) = (at(a), at(b));
+            if into.is_none() {
+                out.push(Band { range: ls + a..ls + b, level: c.level });
+                continue;
+            }
+            // Only on the indent and the blanks inside the quote: not over
+            // the || and the quote.
+            let (lead, text) = (l.len() - l.trim_start().len(), part.map_or(0, |p| p.1 - ls));
+            let mut run: Option<usize> = None;
+            for (i, ch) in l[a..b].char_indices().map(|(i, ch)| (a + i, ch)).chain(std::iter::once((b, 'x'))) {
+                let blank = (ch == ' ' || ch == '\t') && (i < lead || i >= text);
+                match (blank, run) {
+                    (true, None) => run = Some(i),
+                    (false, Some(r)) => {
+                        out.push(Band { range: ls + r..ls + i, level: c.level });
+                        run = None;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -366,5 +512,35 @@ mod tests {
         let src = "select 'a\n    b' from t\n  where x = 1";
         let c = cols(src, Dialect::Postgres);
         assert!(c[1].is_empty());
+    }
+
+    #[test]
+    fn sql_in_strings() {
+        // A multi-line string: its lines get the SQL's bands.
+        let src = "begin\n  execute immediate 'select a\n                       from t\n                      where x = 1';\nend;";
+        let c = cols(src, Dialect::Oracle);
+        assert_eq!(c[2], vec![(0, 21, 0), (21, 23, 1)], "{c:?}");
+        assert_eq!(c[3], vec![(0, 21, 0), (21, 22, 1)], "{c:?}");
+        // A $$ body is code with bands.
+        let src = "create function f() returns int as $$\nbegin\n  if x then\n    return 1;\n  end if;\nend;\n$$ language plpgsql;\nselect 1;";
+        let c = cols(src, Dialect::Postgres);
+        assert_eq!(c[3], vec![(0, 2, 0), (2, 4, 1)], "{c:?}");
+        assert!(c[7].is_empty(), "{c:?}");
+        // Glued with ||: the blanks inside the quote, not the || itself.
+        let src = "begin\n  v := 'select a '\n    || 'from t '\n    || 'where x = 1 '\n    || '  and y = 2';\nend;";
+        let c = cols(src, Dialect::Oracle);
+        assert_eq!(c[2], vec![(0, 4, 0)], "{c:?}");
+        assert_eq!(c[4], vec![(0, 4, 0), (8, 10, 3)], "{c:?}");
+        // A string's unmatched END doesn't close the block it's in.
+        let src = "begin\n  v := 'select case when a then 1 end from t';\n  x := 1;\nend;";
+        let c = cols(src, Dialect::Oracle);
+        assert_eq!(c[2], vec![(0, 2, 0)], "{c:?}");
+    }
+
+    #[test]
+    fn loop_on_a_later_line() {
+        let src = "begin\n  for r in (select id\n              from t) loop\n    null;\n  end loop;\nend;";
+        let c = cols(src, Dialect::Oracle);
+        assert_eq!(c[3], vec![(0, 2, 0), (2, 4, 1)], "{c:?}");
     }
 }

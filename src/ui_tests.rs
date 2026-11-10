@@ -41,6 +41,10 @@ pub const SCRIPT: &str = "-- Top customers\nselect c.name, count(o.id) as orders
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn harness(name: &str, script: &str, pg: bool) -> (Harness<'static, App>, std::sync::MutexGuard<'static, ()>) {
+    harness_at(name, script, pg, 1.0)
+}
+
+fn harness_at(name: &str, script: &str, pg: bool, scale: f32) -> (Harness<'static, App>, std::sync::MutexGuard<'static, ()>) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let d = dir(name);
     unsafe {
@@ -74,7 +78,7 @@ fn harness(name: &str, script: &str, pg: bool) -> (Harness<'static, App>, std::s
         ..Default::default()
     };
     config::save(&d.join("data/session.json"), &session).unwrap();
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).with_step_dt(1.0 / 60.0).wgpu().build_eframe(|cc| {
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).with_pixels_per_point(scale).with_step_dt(1.0 / 60.0).wgpu().build_eframe(|cc| {
         let mut app = App::new(cc);
         app.settings.russian = Some(true);
         crate::i18n::set_ru(true);
@@ -533,4 +537,22 @@ fn bands_and_context_menu() {
     let (p, q) = rt.ed.cursor.unwrap();
     assert_eq!(p, q, "no selection after the right click");
     assert!(crate::app::line_of(&text, p) > 3, "caret went to the clicked line: {p}");
+}
+
+pub const ORA_STRINGS: &str = "create or replace procedure report(p_days number) is\n  v_sql varchar2(4000);\nbegin\n  for r in (select id\n              from orders\n             where status = 'new') loop\n    if r.id > 0 then\n      execute immediate 'select count(*)\n                           from orders o\n                           join customers c\n                             on c.id = o.customer_id\n                          where o.id = :1\n                            and c.segment in (select s\n                                                from segments)'\n        using r.id;\n    end if;\n  end loop;\n  v_sql := 'select o.id '\n        || '  from orders o '\n        || ' where o.created_at < sysdate - ' || p_days\n        || '   and o.status = ''new''';\nend;\n/\n";
+
+#[test]
+fn bands_at_scale_and_in_strings() {
+    let (mut h, _g) = harness_at("bands12", ORA_STRINGS, false, 1.2);
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    h.state_mut().conns.list.push(ora);
+    h.state_mut().tab_mut().conn = Some("ora".into());
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    shot(&mut h, "bands-1.2");
+    let bands = crate::sql::bands::bands(ORA_STRINGS, crate::sql::Dialect::Oracle);
+    let line = |b: &crate::sql::bands::Band| ORA_STRINGS[..b.range.start].matches('\n').count();
+    // The string's lines (8…13) have the inner SELECT's bands.
+    assert!(bands.iter().any(|b| line(b) == 9 && b.level > 1), "{bands:?}");
 }
