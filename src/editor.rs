@@ -26,6 +26,8 @@ pub enum Action {
     Format,
     Cancel,
     Save,
+    Commit,
+    Rollback,
 }
 
 pub struct Popup {
@@ -335,6 +337,12 @@ fn shift_lines(text: &mut String, a: usize, b: usize, tab: usize, out: bool) -> 
 fn shortcuts(i: &mut egui::InputState) -> Vec<Action> {
     let mut v = Vec::new();
     let cmd = Modifiers::COMMAND;
+    if i.consume_key(cmd | Modifiers::ALT, Key::Enter) {
+        v.push(Action::Commit);
+    }
+    if i.consume_key(cmd | Modifiers::ALT, Key::Backspace) {
+        v.push(Action::Rollback);
+    }
     if i.consume_key(cmd | Modifiers::SHIFT, Key::Enter) || i.consume_key(Modifiers::NONE, Key::F5) {
         v.push(Action::RunScript);
     }
@@ -569,8 +577,13 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let clip = ui.clip_rect();
     let mut line = 0;
     let mut new_line = true;
+    // (An empty text's row has no height: a line's worth.)
+    let row_h = painter.layout_no_wrap("0".into(), FontId::monospace(font), weak).size().y;
     for row in &output.galley.rows {
-        let r = row.rect().translate(output.galley_pos.to_vec2());
+        let mut r = row.rect().translate(output.galley_pos.to_vec2());
+        if r.height() < 1.0 {
+            r.max.y = r.min.y + row_h;
+        }
         if new_line && r.bottom() >= clip.top() && r.top() <= clip.bottom() {
             let color = if Some(line) == cur_line { strong } else { weak };
             let x = output.galley_pos.x - 10.0;

@@ -117,5 +117,30 @@ impl Session for Lite {
     fn version(&mut self) -> String {
         format!("SQLite {}", rusqlite::version())
     }
+
+    fn tx_before(&mut self, sql: &str) -> Res<()> {
+        let plain = tx_stmt(sql) == TxStmt::Other && !matches!(verb(sql).as_str(), "vacuum" | "attach" | "detach" | "pragma");
+        if plain && self.conn.is_autocommit() {
+            self.conn.execute_batch("BEGIN").map_err(fail)?;
+        }
+        Ok(())
+    }
+
+    fn set_auto(&mut self, on: bool) {
+        if on && !self.conn.is_autocommit() {
+            self.conn.execute_batch("COMMIT").ok();
+        }
+    }
+
+    fn finish(&mut self, commit: bool) -> Res<()> {
+        if !self.conn.is_autocommit() {
+            self.conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" }).map_err(fail)?;
+        }
+        Ok(())
+    }
+
+    fn pending(&mut self) -> bool {
+        !self.conn.is_autocommit()
+    }
 }
 

@@ -32,6 +32,7 @@ pub fn all(app: &mut App, ctx: &egui::Context) {
     conn_edit(app, ctx);
     password(app, ctx);
     confirm(app, ctx);
+    tx_ask(app, ctx);
     settings(app, ctx);
     workspace(app, ctx);
     small(app, ctx);
@@ -136,6 +137,9 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
             ui.end_row();
             ui.label(t("Только чтение", "Read only"));
             ui.checkbox(&mut s.read_only, t("запретить изменения (на стороне сервера)", "forbid changes (server side)"));
+            if s.kind.transactions() {
+                ui.checkbox(&mut s.auto_commit, t("автокоммит (иначе фиксировать вручную)", "auto-commit (else commit by hand)"));
+            }
             ui.end_row();
             ui.label(t("Цвет", "Colour"));
             ui.horizontal(|ui| {
@@ -220,7 +224,9 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
         }
         app.save_conns();
         // Running ones start over with the new settings.
-        if app.live.contains_key(&id) {
+        if app.live.get(&id).is_some_and(|l| l.pending) {
+            app.toast(t("Есть незафиксированные изменения — новые настройки вступят в силу после переподключения", "Uncommitted changes: the new settings apply after reconnecting"));
+        } else if app.live.contains_key(&id) {
             app.disconnect(&id);
             if !ed.password.is_empty() || spec.save_password || spec.kind == Kind::Sqlite {
                 let p = if spec.save_password { String::new() } else { ed.password.clone() };
@@ -328,6 +334,40 @@ fn confirm(app: &mut App, ctx: &egui::Context) {
         }
         Some(false) => {}
         None => app.confirm = Some(c),
+    }
+}
+
+/// Uncommitted changes would be dropped (or committed unseen): which?
+fn tx_ask(app: &mut App, ctx: &egui::Context) {
+    let Some((conns, then)) = app.tx_ask.clone() else { return };
+    let mut done = None;
+    egui::Modal::new(egui::Id::new("tx-ask")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading(t("Незафиксированные изменения", "Uncommitted changes"));
+        let names: Vec<String> = conns.iter().filter_map(|c| app.spec(c)).map(|s| s.title()).collect();
+        ui.label(format!(
+            "{}: {}",
+            t("В открытой транзакции есть изменения", "An open transaction holds changes"),
+            names.join(", ")
+        ));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(format!("✔ {}", t("Зафиксировать", "Commit"))).strong()).clicked() {
+                done = Some(Some(true));
+            }
+            if ui.button(format!("⟲ {}", t("Откатить", "Roll back"))).clicked() {
+                done = Some(Some(false));
+            }
+            if ui.button(t("Отмена", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                done = Some(None);
+            }
+        });
+    });
+    if let Some(answer) = done {
+        app.tx_ask = None;
+        if let Some(commit) = answer {
+            app.tx_answer(ctx, conns, then, commit);
+        }
     }
 }
 
@@ -668,6 +708,8 @@ fn small(app: &mut App, ctx: &egui::Context) {
                     ("Ctrl+Shift+Enter, F5", t("выполнить весь скрипт", "run the whole script")),
                     ("Ctrl+E, F7", t("план запроса", "explain plan")),
                     ("Shift+Esc", t("остановить запрос", "stop the query")),
+                    ("Ctrl+Alt+Enter", t("зафиксировать транзакцию (без автокоммита)", "commit (auto-commit off)")),
+                    ("Ctrl+Alt+Backspace", t("откатить транзакцию", "roll back")),
                     ("Ctrl+Shift+F", t("форматировать", "format")),
                     ("Ctrl+Space", t("подсказки", "hints")),
                     ("Ctrl+/", t("закомментировать строки", "comment lines")),

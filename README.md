@@ -10,8 +10,19 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   request, ClickHouse `KILL QUERY`, Oracle break, SQLite interrupt), and one
   the server won't stop can be abandoned (its session is made anew).
 - **Two rows of tabs.** Workspaces (named, coloured, each with its own
-  default connection) and, under them, the workspace's scripts. Tabs and
-  their text live in the session and come back on start.
+  default connection) are tabs over a sheet whose outline, in the
+  workspace's colour, runs on from the active tab; on the sheet, the
+  workspace's scripts, the editor and the results. Tabs and their text
+  live in the session and come back on start. The side panel runs the
+  full height, its top row holding the panel switch (objects / files) and
+  the menus as icons.
+- **Transactions** (PostgreSQL, Oracle, SQLite): auto-commit per
+  connection, switchable from the toolbar. With it off, changes gather
+  until Commit or Roll back; the toolbar and status line show when some
+  are pending, and switching auto-commit on, disconnecting or closing the
+  window asks what to do with them. In PostgreSQL each statement runs under
+  a savepoint, so one that fails is undone alone and the transaction goes
+  on. ClickHouse has no transactions: the controls hide.
 - **Object tree** per connection: schemas / databases, tables, views,
   materialized views, functions, procedures, packages, sequences, triggers,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,
@@ -48,6 +59,7 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 | Ctrl+Shift+Enter, F5 | run the whole script |
 | Ctrl+E, F7 | explain plan |
 | Shift+Esc | stop |
+| Ctrl+Alt+Enter · Ctrl+Alt+Backspace | commit · roll back |
 | Ctrl+Shift+F | format |
 | Ctrl+Space | hints |
 | Ctrl+/ · Ctrl+D | comment lines · duplicate line |

@@ -11,6 +11,9 @@ use super::*;
 pub struct Ora {
     conn: Arc<Connection>,
     meta_ready: bool,
+    /// Commit after each statement (ODPI's own autocommit stays off: the
+    /// connection is shared with the canceller and can't be changed).
+    auto: bool,
 }
 
 fn fail(e: oracle::Error) -> Failure {
@@ -61,12 +64,12 @@ impl Ora {
             }
             f
         })?;
-        conn.set_autocommit(true);
+        conn.set_autocommit(false);
         conn.execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[]).ok();
         if spec.read_only {
             conn.execute("SET TRANSACTION READ ONLY", &[]).ok();
         }
-        Ok(Self { conn: Arc::new(conn), meta_ready: false })
+        Ok(Self { conn: Arc::new(conn), meta_ready: false, auto: true })
     }
 
     fn rows(&self, sql: &str, params: &[&dyn oracle::sql_type::ToSql]) -> Res<Vec<Vec<String>>> {
@@ -77,6 +80,59 @@ impl Ora {
             out.push((0..r.sql_values().len()).map(|i| r.get::<usize, Option<String>>(i).ok().flatten().unwrap_or_default()).collect());
         }
         Ok(out)
+    }
+
+    fn run_one(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+        let sql = tidy(sql);
+        let mut st = self.conn.statement(&sql).fetch_array_size(500).build().map_err(fail)?;
+        let r = if st.is_query() {
+            let rs = st.query(&[]).map_err(fail)?;
+            let cols: Vec<Col> = rs
+                .column_info()
+                .iter()
+                .map(|c| {
+                    let ty = c.oracle_type().to_string();
+                    Col { name: c.name().to_string(), numeric: is_numeric_type(&ty), ty }
+                })
+                .collect();
+            let mut t = Table { cols, ..Default::default() };
+            for row in rs {
+                if t.rows.len() >= limit {
+                    t.more = true;
+                    break;
+                }
+                let row = row.map_err(fail)?;
+                t.rows.push(
+                    (0..row.sql_values().len())
+                        .map(|i| match row.get::<usize, Option<String>>(i) {
+                            Ok(v) => v,
+                            Err(_) => Some(format!("<{}>", row.column_info()[i].oracle_type())),
+                        })
+                        .collect(),
+                );
+            }
+            Ok(Outcome::Rows(t))
+        } else {
+            st.execute(&[]).map_err(fail)?;
+            let n = match st.statement_type() {
+                StatementType::Insert | StatementType::Update | StatementType::Delete | StatementType::Merge => st.row_count().ok(),
+                _ => None,
+            };
+            Ok(Outcome::Done(n))
+        };
+        self.output(notes);
+        // CREATE PROCEDURE … with errors: Oracle only warns; show them.
+        if r.is_ok() && matches!(st.statement_type(), StatementType::Create | StatementType::Alter) {
+            if let Some((owner, ty, name)) = created_unit(&sql) {
+                let q = "SELECT line || ':' || position || ' ' || text FROM all_errors WHERE attribute = 'ERROR' AND owner = NVL(:1, USER) AND type = :2 AND name = :3 ORDER BY sequence";
+                if let Ok(errs) = self.rows(q, &[&owner, &ty, &name]) {
+                    if !errs.is_empty() {
+                        return Err(Failure::new(format!("{ty} {name}: compiled with errors\n{}", errs.into_iter().map(|e| e.join(" ")).collect::<Vec<_>>().join("\n"))));
+                    }
+                }
+            }
+        }
+        r
     }
 
     fn output(&self, notes: &mut dyn FnMut(String)) {
@@ -135,56 +191,26 @@ fn tidy(sql: &str) -> String {
 
 impl Session for Ora {
     fn run(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
-        let sql = tidy(sql);
-        let mut st = self.conn.statement(&sql).fetch_array_size(500).build().map_err(fail)?;
-        let r = if st.is_query() {
-            let rs = st.query(&[]).map_err(fail)?;
-            let cols: Vec<Col> = rs
-                .column_info()
-                .iter()
-                .map(|c| {
-                    let ty = c.oracle_type().to_string();
-                    Col { name: c.name().to_string(), numeric: is_numeric_type(&ty), ty }
-                })
-                .collect();
-            let mut t = Table { cols, ..Default::default() };
-            for row in rs {
-                if t.rows.len() >= limit {
-                    t.more = true;
-                    break;
-                }
-                let row = row.map_err(fail)?;
-                t.rows.push(
-                    (0..row.sql_values().len())
-                        .map(|i| match row.get::<usize, Option<String>>(i) {
-                            Ok(v) => v,
-                            Err(_) => Some(format!("<{}>", row.column_info()[i].oracle_type())),
-                        })
-                        .collect(),
-                );
-            }
-            Ok(Outcome::Rows(t))
-        } else {
-            st.execute(&[]).map_err(fail)?;
-            let n = match st.statement_type() {
-                StatementType::Insert | StatementType::Update | StatementType::Delete | StatementType::Merge => st.row_count().ok(),
-                _ => None,
-            };
-            Ok(Outcome::Done(n))
-        };
-        self.output(notes);
-        // CREATE PROCEDURE … with errors: Oracle only warns; show them.
-        if r.is_ok() && matches!(st.statement_type(), StatementType::Create | StatementType::Alter) {
-            if let Some((owner, ty, name)) = created_unit(&sql) {
-                let q = "SELECT line || ':' || position || ' ' || text FROM all_errors WHERE attribute = 'ERROR' AND owner = NVL(:1, USER) AND type = :2 AND name = :3 ORDER BY sequence";
-                if let Ok(errs) = self.rows(q, &[&owner, &ty, &name]) {
-                    if !errs.is_empty() {
-                        return Err(Failure::new(format!("{ty} {name}: compiled with errors\n{}", errs.into_iter().map(|e| e.join(" ")).collect::<Vec<_>>().join("\n"))));
-                    }
-                }
-            }
+        let r = self.run_one(sql, limit, notes);
+        if self.auto && r.is_ok() {
+            self.conn.commit().map_err(fail)?;
         }
         r
+    }
+
+    fn set_auto(&mut self, on: bool) {
+        if on && !self.auto {
+            self.conn.commit().ok();
+        }
+        self.auto = on;
+    }
+
+    fn finish(&mut self, commit: bool) -> Res<()> {
+        if commit { self.conn.commit() } else { self.conn.rollback() }.map_err(fail)
+    }
+
+    fn pending(&mut self) -> bool {
+        self.rows("select dbms_transaction.local_transaction_id from dual", &[]).is_ok_and(|r| r.first().and_then(|r| r.first()).is_some_and(|v| !v.is_empty()))
     }
 
     fn children(&mut self, path: &[String]) -> Res<Vec<Obj>> {

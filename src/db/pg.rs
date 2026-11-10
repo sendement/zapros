@@ -14,6 +14,19 @@ pub struct Pg {
     client: Client,
     notes: std::sync::mpsc::Receiver<String>,
     tls: Option<postgres_native_tls::MakeTlsConnector>,
+    /// By hand: a transaction is open (BEGIN sent, no COMMIT since).
+    in_tx: bool,
+    /// A savepoint before the statement running, so its failure undoes it
+    /// alone and the transaction goes on.
+    sp: bool,
+}
+
+/// Statements PostgreSQL won't run inside a transaction.
+fn outside_tx(sql: &str) -> bool {
+    let w = crate::sql::first_words(sql, 2);
+    let w: Vec<&str> = w.iter().map(|s| s.as_str()).collect();
+    matches!(w.as_slice(), ["vacuum", ..] | ["create" | "drop", "database" | "tablespace"] | ["alter", "system"])
+        || sql.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|x| x == "concurrently")
 }
 
 fn fail(e: tokio_postgres::Error, sql: &str) -> Failure {
@@ -73,7 +86,7 @@ impl Pg {
                 (client, Some(tls))
             }
         };
-        let mut s = Self { rt, client, notes, tls };
+        let mut s = Self { rt, client, notes, tls, in_tx: false, sp: false };
         if spec.read_only {
             s.simple("SET default_transaction_read_only = on").ok();
         }
@@ -425,6 +438,58 @@ impl Session for Pg {
 
     fn alive(&mut self) -> bool {
         !self.client.is_closed()
+    }
+
+    fn tx_before(&mut self, sql: &str) -> Res<()> {
+        self.sp = false;
+        match tx_stmt(sql) {
+            TxStmt::Begin | TxStmt::End | TxStmt::Savepoint => return Ok(()),
+            TxStmt::Other => {}
+        }
+        if outside_tx(sql) {
+            return Ok(());
+        }
+        if !self.in_tx {
+            self.simple("BEGIN")?;
+            self.in_tx = true;
+        }
+        self.simple("SAVEPOINT zapros_stmt")?;
+        self.sp = true;
+        Ok(())
+    }
+
+    fn tx_after(&mut self, sql: &str, ok: bool) {
+        match tx_stmt(sql) {
+            TxStmt::Begin if ok => self.in_tx = true,
+            TxStmt::End if ok => self.in_tx = false,
+            _ => {}
+        }
+        if std::mem::take(&mut self.sp) {
+            if !ok {
+                self.simple("ROLLBACK TO SAVEPOINT zapros_stmt").ok();
+            }
+            self.simple("RELEASE SAVEPOINT zapros_stmt").ok();
+        }
+    }
+
+    fn set_auto(&mut self, on: bool) {
+        // (Asked for only with nothing uncommitted.)
+        if on && self.in_tx {
+            self.simple("COMMIT").ok();
+            self.in_tx = false;
+        }
+    }
+
+    fn finish(&mut self, commit: bool) -> Res<()> {
+        self.simple(if commit { "COMMIT" } else { "ROLLBACK" })?;
+        self.in_tx = false;
+        Ok(())
+    }
+
+    fn pending(&mut self) -> bool {
+        // Changes made: a transaction id given (a failed transaction
+        // can't be asked, and it waits for a rollback all the same).
+        self.in_tx && self.one("select (txid_current_if_assigned() is not null)::text", &[]).map_or(true, |v| v == "true")
     }
 }
 

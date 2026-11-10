@@ -273,3 +273,70 @@ fn big_script_stays_quick() {
     eprintln!("per typed frame: {per:?} ({} KB)", script.len() / 1024);
     assert!(per < std::time::Duration::from_millis(400), "{per:?}");
 }
+
+#[test]
+fn transactions_by_hand() {
+    let script = "update orders set note = 'kept' where id = 1;\nselect note from orders where id = 1;\n";
+    let (mut h, _g) = harness("tx", script, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    settle(&mut h);
+    h.state_mut().tx("lite", crate::db::TxOp::Auto(false));
+    settle(&mut h);
+    focus_editor(&mut h, 3);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let l = &h.state().live["lite"];
+    assert!(!l.auto && l.pending, "auto {} pending {}", l.auto, l.pending);
+    shot(&mut h, "tx-pending");
+    // Rolled back: the change is gone, nothing pending.
+    key(&mut h, egui::Key::Backspace, egui::Modifiers::COMMAND | egui::Modifiers::ALT);
+    settle(&mut h);
+    assert!(!h.state().live["lite"].pending);
+    focus_editor(&mut h, 50);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let rt = h.state().rt.get(&h.state().tab().id).unwrap();
+    assert_eq!(rt.results.last().unwrap().table.rows[0][0], None);
+    // Committed this time; switching auto-commit back on asks nothing.
+    focus_editor(&mut h, 3);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND | egui::Modifiers::ALT);
+    settle(&mut h);
+    assert!(!h.state().live["lite"].pending);
+    // Pending again: turning auto-commit on asks first.
+    focus_editor(&mut h, 3);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    h.state_mut().tx("lite", crate::db::TxOp::Auto(true));
+    h.step();
+    assert!(h.state().tx_ask.is_some());
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "tx-ask");
+    let ctx = h.ctx.clone();
+    h.state_mut().tx_ask = None;
+    h.state_mut().tx_answer(&ctx, vec!["lite".into()], crate::app::TxThen::AutoOn, true);
+    settle(&mut h);
+    let l = &h.state().live["lite"];
+    assert!(l.auto && !l.pending);
+    let db = rusqlite::Connection::open(&l.spec.database).unwrap();
+    let note: Option<String> = db.query_row("select note from orders where id = 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(note.as_deref(), Some("kept"));
+}
+
+#[test]
+fn light_theme_sheet() {
+    let (mut h, _g) = harness("light", SCRIPT, false);
+    if std::env::var_os("ZAPROS_DARK").is_none() {
+        h.state_mut().settings.theme = crate::config::ThemePref::Light;
+    }
+    h.state_mut().session.active = 1;
+    settle(&mut h);
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "light");
+}

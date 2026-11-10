@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::config::{self, Connections, Session, Settings, Tab, ThemePref, Workspace};
-use crate::db::{Event, Kind, Obj, Outcome, Relation, Req, Spec, Stmt, Table, What, Worker};
+use crate::db::{Event, Kind, Obj, Outcome, Relation, Req, Spec, Stmt, Table, TxOp, What, Worker};
 use crate::editor::{self, Action, EditorState};
 use crate::i18n::t;
 use crate::sql::check::{self, Issue, Known, Sev};
@@ -35,6 +35,19 @@ pub struct Live {
     pub known: Arc<Known>,
     pub rels_version: u64,
     pub rels_loading: bool,
+    /// Each statement committed on its own (else by the Commit button).
+    pub auto: bool,
+    /// An open transaction holds changes not committed.
+    pub pending: bool,
+}
+
+/// After the user says what becomes of uncommitted changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxThen {
+    AutoOn,
+    Disconnect,
+    Reconnect,
+    Quit,
 }
 
 pub enum Node {
@@ -125,6 +138,11 @@ pub struct App {
     pub conn_edit: Option<crate::dialogs::ConnEdit>,
     pub ask: Option<PasswordAsk>,
     pub confirm: Option<Confirm>,
+    /// Uncommitted changes on these connections: commit or roll back, then…
+    pub tx_ask: Option<(Vec<String>, TxThen)>,
+    /// Closing once the commits asked for are done (since when).
+    pub quitting: Option<Instant>,
+    force_close: bool,
     pub settings_open: bool,
     pub ws_edit: Option<usize>,
     pub tab_rename: Option<(String, String)>,
@@ -196,6 +214,9 @@ impl App {
             conn_edit: None,
             ask: None,
             confirm: None,
+            tx_ask: None,
+            quitting: None,
+            force_close: false,
             settings_open: false,
             ws_edit: None,
             tab_rename: None,
@@ -294,8 +315,76 @@ impl App {
         let meta = Worker::spawn(spec.clone(), password.clone(), self.tx.clone(), ctx.clone());
         meta.send(Req::Connect);
         let id = spec.id.clone();
+        let id_ = id.clone();
         self.tree.retain(|(c, _), _| *c != id);
-        self.live.insert(id, Live { spec, password, query, meta, state: ConnState::Connecting, version: String::new(), rels: Arc::default(), known: Arc::default(), rels_version: 0, rels_loading: false });
+        self.live.insert(id, Live { spec, password, query, meta, state: ConnState::Connecting, version: String::new(), rels: Arc::default(), known: Arc::default(), rels_version: 0, rels_loading: false, auto: true, pending: false });
+        if let Some(l) = self.live.get_mut(&id_) {
+            l.auto = l.spec.auto_commit || !l.spec.kind.transactions();
+        }
+    }
+
+    /// Commit, roll back, or switch auto-commit; asks first when switching
+    /// it on would commit changes unseen.
+    pub fn tx(&mut self, conn: &str, op: TxOp) {
+        let Some(l) = self.live.get_mut(conn) else { return };
+        if op == TxOp::Auto(true) && l.pending {
+            self.tx_ask = Some((vec![conn.to_string()], TxThen::AutoOn));
+            return;
+        }
+        if let TxOp::Auto(on) = op {
+            l.auto = on;
+        }
+        l.query.send(Req::Tx(op));
+    }
+
+    /// Commit / Roll back for the current tab's connection (by hand only).
+    pub fn commit_current(&mut self, commit: bool) {
+        let ws = self.ws().clone();
+        let Some(c) = self.tab_conn(&ws, self.tab()) else { return };
+        match self.live.get(&c) {
+            Some(l) if !l.auto => self.tx(&c, if commit { TxOp::Commit } else { TxOp::Rollback }),
+            Some(_) => self.toast(t("Автокоммит включён — фиксировать нечего", "Auto-commit is on: nothing to commit")),
+            None => {}
+        }
+    }
+
+    /// Disconnecting or reconnecting drops what isn't committed: asks.
+    pub fn leave(&mut self, ctx: &egui::Context, conn: &str, then: TxThen) {
+        if self.live.get(conn).is_some_and(|l| l.pending) {
+            self.tx_ask = Some((vec![conn.to_string()], then));
+        } else if then == TxThen::Reconnect {
+            self.reconnect(ctx, conn);
+        } else {
+            self.disconnect(conn);
+        }
+    }
+
+    /// The answer to `tx_ask`: Some(commit?) or None (cancel).
+    pub fn tx_answer(&mut self, ctx: &egui::Context, conns: Vec<String>, then: TxThen, commit: bool) {
+        let op = if commit { TxOp::Commit } else { TxOp::Rollback };
+        for c in &conns {
+            if let Some(l) = self.live.get(c) {
+                l.query.send(Req::Tx(op));
+            }
+        }
+        for c in &conns {
+            match then {
+                // (The worker does them in order: the commit first.)
+                TxThen::AutoOn => {
+                    if let Some(l) = self.live.get_mut(c) {
+                        l.auto = true;
+                        l.pending = false;
+                        l.query.send(Req::Tx(TxOp::Auto(true)));
+                    }
+                }
+                TxThen::Disconnect => self.disconnect(c),
+                TxThen::Reconnect => self.reconnect(ctx, c),
+                TxThen::Quit => {}
+            }
+        }
+        if then == TxThen::Quit {
+            self.quitting = Some(Instant::now());
+        }
     }
 
     pub fn disconnect(&mut self, conn: &str) {
@@ -598,9 +687,33 @@ impl App {
                 }
                 What::Lost(m) => {
                     let conn = ev.conn.clone();
-                    self.toast(format!("{}: {m}", t("Связь потеряна, переподключусь при следующем запросе", "Link lost, will reconnect on the next request")));
-                    if let Some(l) = self.live.get_mut(&conn) {
-                        l.state = ConnState::Failed(m);
+                    let dropped = !from_meta && std::mem::take(&mut l.pending);
+                    l.state = ConnState::Failed(m.clone());
+                    let mut text = format!("{}: {m}", t("Связь потеряна, переподключусь при следующем запросе", "Link lost, will reconnect on the next request"));
+                    if dropped {
+                        text += &format!("\n{}", t("Незафиксированные изменения потеряны.", "Uncommitted changes are lost."));
+                    }
+                    let _ = conn;
+                    self.toast(text);
+                }
+                What::Tx { auto, pending } => {
+                    if !from_meta {
+                        l.auto = auto;
+                        l.pending = pending;
+                    }
+                }
+                What::TxDone { op, result } => {
+                    let name = l.spec.title();
+                    match result {
+                        Ok(()) => match op {
+                            TxOp::Commit => self.toast(format!("{name}: {}", t("изменения зафиксированы", "changes committed"))),
+                            TxOp::Rollback => self.toast(format!("{name}: {}", t("изменения откачены", "changes rolled back"))),
+                            TxOp::Auto(_) => {}
+                        },
+                        Err(m) => {
+                            self.quitting = None;
+                            self.toast(format!("{name}: {m}"));
+                        }
                     }
                 }
                 What::Started { run, index: _, at, sql } => {
@@ -771,6 +884,30 @@ impl App {
         }
     }
 
+    /// The window closing with changes uncommitted: asks first; once the
+    /// commits are through (or 10 s gone), closes.
+    fn closing(&mut self, ctx: &egui::Context) {
+        if let Some(since) = self.quitting {
+            let busy = self.live.values().any(|l| l.pending || l.query.busy_since().is_some());
+            if !busy || since.elapsed() > Duration::from_secs(10) {
+                self.quitting = None;
+                self.save_session();
+                self.force_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.force_close {
+            let pending: Vec<String> = self.live.iter().filter(|(_, l)| l.pending).map(|(c, _)| c.clone()).collect();
+            if !pending.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.tx_ask = Some((pending, TxThen::Quit));
+            }
+        }
+    }
+
     fn global_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         let (new, close, next, prev) = ctx.input_mut(|i| {
@@ -830,9 +967,9 @@ impl eframe::App for App {
         if self.rt.values().any(|r| r.check_due.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
-        crate::ui::top(self, ui);
-        crate::ui::status(self, ui);
+        self.closing(&ctx);
         crate::side::panel(self, ui);
+        crate::ui::status(self, ui);
         let actions = crate::ui::center(self, ui);
         for a in actions {
             match a {
@@ -840,6 +977,8 @@ impl eframe::App for App {
                 Action::RunScript => self.run(&ctx, true, false),
                 Action::Explain => self.run(&ctx, false, true),
                 Action::Format => self.format(),
+                Action::Commit => self.commit_current(true),
+                Action::Rollback => self.commit_current(false),
                 Action::Cancel => self.cancel(),
                 Action::Save => {
                     let (wi, ti) = (self.session.active, self.ws().active);

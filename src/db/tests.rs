@@ -151,3 +151,65 @@ fn sqlite() {
     assert!(src.to_lowercase().contains("create view tv"), "{src:?}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// One statement as the worker runs it by hand (before / run / after).
+fn step(s: &mut dyn Session, sql: &str) -> Res<Outcome> {
+    let r = s.tx_before(sql).and_then(|_| s.run(sql, 100, &mut |_| {}));
+    s.tx_after(sql, r.is_ok());
+    r
+}
+
+fn count(s: &mut dyn Session, sql: &str) -> String {
+    rows(s.run(sql, 10, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap_or_default()
+}
+
+/// Manual mode: changes wait for commit, roll back on request, a failed
+/// statement doesn't spoil the rest; another session sees only commits.
+fn by_hand(sp: &Spec, pw: &str, table: &str, create: &str, drop: &str) {
+    let mut s = open(sp, pw).unwrap();
+    let mut other = open(sp, pw).unwrap();
+    s.run(drop, 10, &mut |_| {}).ok();
+    s.run(create, 10, &mut |_| {}).unwrap();
+    s.set_auto(false);
+    assert!(!s.pending());
+    step(&mut *s, &format!("insert into {table} values (1)")).unwrap();
+    assert!(s.pending());
+    assert_eq!(count(&mut *other, &format!("select count(*) from {table}")), "0");
+    s.finish(false).unwrap();
+    assert!(!s.pending());
+    assert_eq!(count(&mut *s, &format!("select count(*) from {table}")), "0");
+    step(&mut *s, &format!("insert into {table} values (2)")).unwrap();
+    assert!(step(&mut *s, &format!("insert into {table} values ('not a number')")).is_err());
+    step(&mut *s, &format!("insert into {table} values (3)")).unwrap();
+    assert!(s.pending());
+    s.finish(true).unwrap();
+    assert!(!s.pending());
+    assert_eq!(count(&mut *other, &format!("select count(*) from {table}")), "2");
+    // Back to auto: each statement is seen at once.
+    s.set_auto(true);
+    s.run(&format!("insert into {table} values (4)"), 10, &mut |_| {}).unwrap();
+    assert_eq!(count(&mut *other, &format!("select count(*) from {table}")), "3");
+    s.run(drop, 10, &mut |_| {}).ok();
+}
+
+#[test]
+fn postgres_transactions() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) else { return };
+    by_hand(&sp, &pw, "zapros_tx", "create table zapros_tx (n int)", "drop table if exists zapros_tx");
+}
+
+#[test]
+fn oracle_transactions() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) else { return };
+    by_hand(&sp, &pw, "zapros_tx", "create table zapros_tx (n number)", "drop table zapros_tx");
+}
+
+#[test]
+fn sqlite_transactions() {
+    let d = std::env::temp_dir().join(format!("zapros-tx-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&d);
+    let sp = Spec { kind: Kind::Sqlite, database: d.to_string_lossy().into_owned(), ..Default::default() };
+    // (SQLite takes 'not a number' into an int column: its own check.)
+    by_hand(&sp, "", "zapros_tx", "create table zapros_tx (n int check (typeof(n) = 'integer'))", "drop table if exists zapros_tx");
+    let _ = std::fs::remove_file(&d);
+}

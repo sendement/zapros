@@ -32,18 +32,11 @@ pub fn folder_label(key: &str) -> &'static str {
 }
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
-    let r = egui::Panel::left("side").resizable(true).default_size(app.session.side_width).size_range(180.0..=700.0).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!app.session.side_files, format!("🗄 {}", t("База", "Database"))).clicked() {
-                app.session.side_files = false;
-                app.touch();
-            }
-            if ui.selectable_label(app.session.side_files, format!("📁 {}", t("Проект", "Project"))).clicked() {
-                app.session.side_files = true;
-                app.touch();
-            }
-        });
-        ui.separator();
+    // Full height, its top row (icons) level with the workspace tabs.
+    let frame = egui::Frame::NONE.fill(crate::ui::chrome(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
+    let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
+        crate::ui::icon_bar(app, ui);
+        ui.add_space(6.0);
         if app.session.side_files { files(app, ui) } else { databases(app, ui) }
     });
     let w = r.response.rect.width();
@@ -136,11 +129,11 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
                     ui.close();
                 }
                 if on && ui.button(t("Переподключиться", "Reconnect")).clicked() {
-                    app.reconnect(&ctx, &spec.id);
+                    app.leave(&ctx, &spec.id, crate::app::TxThen::Reconnect);
                     ui.close();
                 }
                 if on && ui.button(t("Отключиться", "Disconnect")).clicked() {
-                    app.disconnect(&spec.id);
+                    app.leave(&ctx, &spec.id, crate::app::TxThen::Disconnect);
                     ui.close();
                 }
                 if on && ui.button(t("Обновить дерево и подсказки", "Refresh tree and hints")).clicked() {

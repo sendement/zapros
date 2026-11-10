@@ -47,6 +47,11 @@ impl Kind {
         }
     }
 
+    /// Whether its scripts can be committed or rolled back.
+    pub fn transactions(self) -> bool {
+        self != Kind::ClickHouse
+    }
+
     pub fn dialect(self) -> crate::sql::Dialect {
         match self {
             Kind::Postgres => crate::sql::Dialect::Postgres,
@@ -78,6 +83,8 @@ pub struct Spec {
     pub connect_timeout: u64,
     pub read_only: bool,
     pub color: Option<[u8; 3]>,
+    /// Each statement committed on its own; off: commit / rollback by hand.
+    pub auto_commit: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -104,6 +111,7 @@ impl Default for Spec {
             connect_timeout: 10,
             read_only: false,
             color: None,
+            auto_commit: true,
         }
     }
 }
@@ -296,6 +304,52 @@ pub trait Session: Send {
     fn alive(&mut self) -> bool {
         true
     }
+    /// By-hand transactions: called before each statement (opens the
+    /// transaction, a savepoint…) and after it.
+    fn tx_before(&mut self, _sql: &str) -> Res<()> {
+        Ok(())
+    }
+    fn tx_after(&mut self, _sql: &str, _ok: bool) {}
+    /// Each statement committed on its own, or not.
+    fn set_auto(&mut self, _on: bool) {}
+    /// Commits (or rolls back) the open transaction.
+    fn finish(&mut self, _commit: bool) -> Res<()> {
+        Err(Failure::new("transactions aren't supported"))
+    }
+    /// Whether a transaction holds what isn't committed yet.
+    fn pending(&mut self) -> bool {
+        false
+    }
+}
+
+/// How a statement touches the transaction it runs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxStmt {
+    /// Opens one (BEGIN, START TRANSACTION).
+    Begin,
+    /// Ends it (COMMIT, ROLLBACK, END…).
+    End,
+    /// Savepoints of its own.
+    Savepoint,
+    Other,
+}
+
+pub fn verb(sql: &str) -> String {
+    crate::sql::first_word(sql).to_lowercase()
+}
+
+pub fn tx_stmt(sql: &str) -> TxStmt {
+    let w = crate::sql::first_words(sql, 2);
+    let (a, b) = (w.first().map_or("", |s| s.as_str()), w.get(1).map_or("", |s| s.as_str()));
+    match a {
+        "begin" | "start" => TxStmt::Begin,
+        "commit" | "end" | "abort" => TxStmt::End,
+        "rollback" if b == "to" => TxStmt::Savepoint,
+        "rollback" => TxStmt::End,
+        "prepare" if b == "transaction" => TxStmt::End,
+        "savepoint" | "release" => TxStmt::Savepoint,
+        _ => TxStmt::Other,
+    }
 }
 
 pub type Canceller = Arc<dyn Fn() + Send + Sync>;
@@ -321,7 +375,16 @@ pub enum Req {
     Children { path: Vec<String> },
     Source { path: Vec<String>, kind: ObjKind, open_as: String },
     Relations { schemas: Vec<String> },
+    Tx(TxOp),
     Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxOp {
+    Commit,
+    Rollback,
+    /// Auto-commit on / off.
+    Auto(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -353,6 +416,9 @@ pub enum What {
     Children { path: Vec<String>, items: Result<Vec<Obj>, String> },
     Source { path: Vec<String>, open_as: String, text: Result<String, String> },
     Relations(Result<Vec<Relation>, String>),
+    /// Where the transaction stands (after a run or a commit).
+    Tx { auto: bool, pending: bool },
+    TxDone { op: TxOp, result: Result<(), String> },
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -415,6 +481,7 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
         ctx.request_repaint();
     };
     let mut session: Option<Box<dyn Session>> = None;
+    let auto = std::cell::Cell::new(spec.auto_commit || !spec.kind.transactions());
     // Makes the session when there's none; tells when it can't.
     let ensure = |session: &mut Option<Box<dyn Session>>| -> bool {
         if session.as_mut().is_some_and(|s| s.alive()) {
@@ -423,6 +490,7 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
         tell(What::Connecting);
         match open(&spec, &password) {
             Ok(mut s) => {
+                s.set_auto(auto.get());
                 *cancel.lock().unwrap() = Some(s.canceller());
                 tell(What::Connected { version: s.version() });
                 *session = Some(s);
@@ -455,8 +523,14 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                         let t = Instant::now();
                         let s = session.as_mut().unwrap();
                         let mut note = |text: String| tell(What::Note { run, text });
-                        let outcome = s.run(&st.sql, limit, &mut note);
+                        let outcome = match if auto.get() { Ok(()) } else { s.tx_before(&st.sql) } {
+                            Ok(()) => s.run(&st.sql, limit, &mut note),
+                            Err(e) => Err(e),
+                        };
                         let failed = outcome.is_err();
+                        if !auto.get() && !outcome.as_ref().is_err_and(|f| f.lost) {
+                            s.tx_after(&st.sql, !failed);
+                        }
                         if let Err(f) = &outcome {
                             if f.lost {
                                 session = None;
@@ -470,7 +544,32 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                         }
                     }
                 }
+                if !auto.get() && let Some(s) = session.as_mut() {
+                    tell(What::Tx { auto: false, pending: s.pending() });
+                }
                 tell(What::Finished { run, cancelled });
+            }
+            Req::Tx(op) => {
+                let result = match op {
+                    TxOp::Auto(on) => {
+                        auto.set(on);
+                        if let Some(s) = session.as_mut() {
+                            s.set_auto(on);
+                        }
+                        Ok(())
+                    }
+                    _ => match session.as_mut() {
+                        Some(s) => s.finish(op == TxOp::Commit),
+                        // No session: nothing was open.
+                        None => Ok(()),
+                    },
+                };
+                if result.as_ref().is_err_and(|f| f.lost) {
+                    session = None;
+                }
+                let pending = session.as_mut().is_some_and(|s| s.pending());
+                tell(What::TxDone { op, result: result.map_err(|f| f.message) });
+                tell(What::Tx { auto: auto.get(), pending });
             }
             Req::Children { path } => {
                 let items = if ensure(&mut session) { session.as_mut().unwrap().children(&path) } else { Err(Failure::new("no connection")) };

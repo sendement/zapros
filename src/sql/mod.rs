@@ -144,6 +144,12 @@ pub fn first_word(sql: &str) -> &str {
     t.iter().find(|t| !t.trivia()).filter(|t| matches!(t.kind, Tk::Keyword | Tk::Word)).map_or("", |t| t.text(sql))
 }
 
+/// The first `n` words of a statement, lower case (comments skipped).
+pub fn first_words(sql: &str, n: usize) -> Vec<String> {
+    let t = lex::lex(sql, Dialect::Generic);
+    lead_words(sql, &t, n).into_iter().map(|w| w.to_lowercase()).collect()
+}
+
 /// Words a statement starts with, upper-cased (comments skipped).
 fn lead_words(src: &str, toks: &[Tok], n: usize) -> Vec<String> {
     toks.iter().filter(|t| !t.trivia()).take(n).map(|t| t.text(src).to_ascii_uppercase()).collect()
