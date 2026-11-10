@@ -56,6 +56,7 @@ pub enum Node {
     Failed(String),
 }
 
+#[derive(Default)]
 pub struct ResultView {
     pub title: String,
     pub sql: String,
@@ -66,6 +67,29 @@ pub struct ResultView {
     pub sort: Option<(usize, bool)>,
     pub sel: Option<(usize, usize)>,
     pub filter: String,
+    /// Its cursor's still open on the server: (run, connection).
+    pub cursor: Option<(u64, String)>,
+    /// More rows asked for, not here yet (true: to the end).
+    pub loading: Option<bool>,
+    /// Saved once every row's in.
+    pub export_after: Option<crate::export::Export>,
+}
+
+impl ResultView {
+    pub fn new(sql: String, table: Table, took: Duration, cursor: Option<(u64, String)>) -> Self {
+        let order = (0..table.rows.len()).collect();
+        Self { title: head(&sql, 28), sql, table, took, order, cursor, ..Default::default() }
+    }
+}
+
+/// What the results area shows.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Pane {
+    #[default]
+    Messages,
+    /// DBMS_OUTPUT, RAISE NOTICE…
+    Output,
+    Result(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,9 +119,10 @@ pub struct Running {
 pub struct TabRt {
     pub ed: EditorState,
     pub results: Vec<ResultView>,
-    /// The result shown; None: the messages.
-    pub shown: Option<usize>,
+    pub shown: Pane,
     pub log: Vec<LogLine>,
+    /// What the server printed (DBMS_OUTPUT, RAISE NOTICE…).
+    pub output: Vec<LogLine>,
     pub run: Option<Running>,
     pub issues: Vec<Issue>,
     pub check_key: u64,
@@ -133,6 +158,8 @@ pub struct App {
     rx: Receiver<Event>,
     pub rt: HashMap<String, TabRt>,
     pub runs: HashMap<u64, String>,
+    /// Open cursors: run → tab.
+    pub cursors: HashMap<u64, String>,
     next_run: u64,
     pub tree: HashMap<(String, Vec<String>), Node>,
     pub open_nodes: HashSet<(String, Vec<String>)>,
@@ -156,6 +183,8 @@ pub struct App {
     pub save_as: Option<(String, String)>,
     pub project_input: Option<String>,
     pub toast: Option<(String, Instant)>,
+    /// The save-a-result window: (tab, result, what).
+    pub export: Option<(String, usize, crate::export::Export)>,
     dirty: bool,
     last_save: Instant,
     pub results_max: bool,
@@ -212,6 +241,7 @@ impl App {
             rx,
             rt: HashMap::new(),
             runs: HashMap::new(),
+            cursors: HashMap::new(),
             next_run: 1,
             tree: HashMap::new(),
             open_nodes: HashSet::new(),
@@ -232,6 +262,7 @@ impl App {
             save_as: None,
             project_input: None,
             toast: None,
+            export: None,
             dirty: false,
             last_save: Instant::now(),
             results_max: false,
@@ -617,18 +648,50 @@ impl App {
         let run = self.next_run;
         self.next_run += 1;
         self.runs.insert(run, tab_id.clone());
-        let limit = self.spec(conn).map(|s| s.row_limit).filter(|&n| n > 0).unwrap_or(self.settings.row_limit).max(1);
+        let limit = self.batch(conn);
         let rt = self.rt.entry(tab_id).or_default();
         rt.results.clear();
-        rt.shown = None;
+        rt.shown = Pane::Messages;
         rt.server_err = None;
         rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now() });
         let l = &self.live[conn];
         l.query.send(Req::Run { run, stmts, limit, go_on: self.settings.continue_on_error });
     }
 
+    /// Rows a batch takes.
+    pub fn batch(&self, conn: &str) -> usize {
+        self.spec(conn).map(|s| s.row_limit).filter(|&n| n > 0).unwrap_or(self.settings.row_limit).max(1)
+    }
+
+    /// More rows of a result whose cursor's open (`all`: to the end).
+    pub fn fetch_more(&mut self, tab: &str, i: usize, all: bool) {
+        let Some((run, conn)) = self.rt.get(tab).and_then(|r| r.results.get(i)).and_then(|v| v.cursor.clone()) else { return };
+        let n = self.batch(&conn);
+        let Some(l) = self.live.get(&conn) else { return };
+        l.query.send(Req::More { run, n, all });
+        if let Some(v) = self.rt.get_mut(tab).and_then(|r| r.results.get_mut(i)) {
+            v.loading = Some(all);
+        }
+    }
+
+    /// The result's cursor closes (what's loaded stays).
+    pub fn fetch_stop(&mut self, tab: &str, i: usize) {
+        let Some((_, conn)) = self.rt.get(tab).and_then(|r| r.results.get(i)).and_then(|v| v.cursor.clone()) else { return };
+        if let Some(l) = self.live.get(&conn) {
+            l.query.send(Req::StopFetch);
+        }
+    }
+
     pub fn cancel(&mut self) {
         let id = self.tab().id.clone();
+        // Nothing running: rows being loaded stop.
+        if self.rt.get(&id).is_some_and(|r| r.run.is_none()) {
+            let loading: Vec<usize> = self.rt[&id].results.iter().enumerate().filter(|(_, v)| v.loading.is_some()).map(|(i, _)| i).collect();
+            for i in loading {
+                self.fetch_stop(&id, i);
+            }
+            return;
+        }
         if let Some(r) = self.rt.get(&id).and_then(|r| r.run.as_ref()) {
             if let Some(l) = self.live.get(&r.conn) {
                 l.query.cancel();
@@ -699,7 +762,7 @@ impl App {
                         if rt.run.as_ref().is_some_and(|r| r.conn == conn) && !from_meta {
                             rt.run = None;
                             rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: format!("{}: {m}", t("Нет подключения", "Not connected")), at: None });
-                            rt.shown = None;
+                            rt.shown = Pane::Messages;
                         }
                     }
                     if from_meta && auth_failed(&m) && self.ask.is_none() {
@@ -748,7 +811,51 @@ impl App {
                 }
                 What::Note { run, text } => {
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
-                        rt.log.push(LogLine { when: now(), kind: LogKind::Note, text, at: None });
+                        rt.output.push(LogLine { when: now(), kind: LogKind::Note, text, at: None });
+                    }
+                }
+                What::Page { run, at, sql, table, took } => {
+                    let conn = ev.conn.clone();
+                    if let Some(tab) = self.runs.get(&run).cloned() {
+                        let rt = self.rt.entry(tab.clone()).or_default();
+                        rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {} ({}) · {}", table.rows.len(), t("строк", "rows"), t("есть ещё — догружаются по запросу", "more to load on demand"), fmt_took(took)), at: Some(at) });
+                        rt.results.push(ResultView::new(sql, table, took, Some((run, conn))));
+                        if rt.shown == Pane::Messages {
+                            rt.shown = Pane::Result(rt.results.len() - 1);
+                        }
+                        self.cursors.insert(run, tab);
+                    }
+                }
+                What::Rows { run, rows, more, open, error } => {
+                    let Some(tab) = self.cursors.get(&run).cloned() else { continue };
+                    if !open {
+                        self.cursors.remove(&run);
+                    }
+                    let Some(rt) = self.rt.get_mut(&tab) else { continue };
+                    if let Some(e) = error {
+                        rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: e, at: None });
+                    }
+                    let mut done_export = None;
+                    if let Some(v) = rt.results.iter_mut().find(|v| v.cursor.as_ref().is_some_and(|c| c.0 == run)) {
+                        let from = v.table.rows.len();
+                        v.table.rows.extend(rows);
+                        v.table.more = more;
+                        if v.sort.is_some() || !v.filter.is_empty() {
+                            crate::results::reorder(v);
+                        } else {
+                            v.order.extend(from..v.table.rows.len());
+                        }
+                        if !open {
+                            v.cursor = None;
+                            v.loading = None;
+                            done_export = v.export_after.take().map(|e| (e, crate::export::Snapshot::of(v)));
+                        } else if v.loading == Some(false) {
+                            v.loading = None;
+                        }
+                    }
+                    if let Some((e, snap)) = done_export {
+                        let msg = crate::export::save(&e, &snap);
+                        self.toast(msg);
                     }
                 }
                 What::Result { run, index: _, at, sql, outcome, took } => {
@@ -759,10 +866,9 @@ impl App {
                             Ok(Outcome::Rows(table)) => {
                                 let more = if table.more { format!(" ({})", t("есть ещё", "more exist")) } else { String::new() };
                                 rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {}{more} · {ms}", table.rows.len(), t("строк", "rows")), at: Some(at) });
-                                let order = (0..table.rows.len()).collect();
-                                rt.results.push(ResultView { title: head(&sql, 28), sql, table, took, order, sort: None, sel: None, filter: String::new() });
-                                if rt.shown.is_none() {
-                                    rt.shown = Some(rt.results.len() - 1);
+                                rt.results.push(ResultView::new(sql, table, took, None));
+                                if rt.shown == Pane::Messages {
+                                    rt.shown = Pane::Result(rt.results.len() - 1);
                                 }
                             }
                             Ok(Outcome::Done(n)) => {
@@ -780,7 +886,7 @@ impl App {
                                     rt.server_err = Some((at..at + sql.len().min(1), f.message.clone()));
                                 }
                                 rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: f.message, at: pos.or(Some(at)) });
-                                rt.shown = None;
+                                rt.shown = Pane::Messages;
                             }
                         }
                     }

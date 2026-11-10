@@ -196,7 +196,7 @@ fn returns_rows(sql: &str) -> bool {
 }
 
 impl Session for Pg {
-    fn run(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         // The columns' types, when the statement can be described.
         let types: Option<Vec<String>> = if returns_rows(sql) {
             self.rt.block_on(self.client.prepare(sql)).ok().map(|st| st.columns().iter().map(|c| c.type_().name().to_string()).collect())
@@ -228,15 +228,16 @@ impl Session for Pg {
                     }
                     SimpleQueryMessage::Row(r) => {
                         let Some(t) = table.as_mut() else { continue };
-                        if t.rows.len() >= limit {
-                            if !cut {
-                                t.more = true;
-                                cut = true;
-                                match &tls {
-                                    Some(tls) => cancel.cancel_query(tls.clone()).await.ok(),
-                                    None => cancel.cancel_query(tokio_postgres::NoTls).await.ok(),
-                                };
-                            }
+                        if cut {
+                            continue;
+                        }
+                        if !fetch.room(t) {
+                            // Enough: the server stops it.
+                            cut = true;
+                            match &tls {
+                                Some(tls) => cancel.cancel_query(tls.clone()).await.ok(),
+                                None => cancel.cancel_query(tokio_postgres::NoTls).await.ok(),
+                            };
                             continue;
                         }
                         t.rows.push((0..r.len()).map(|i| r.get(i).map(str::to_string)).collect());

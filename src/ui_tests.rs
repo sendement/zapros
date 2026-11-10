@@ -254,11 +254,17 @@ fn postgres_tree_and_notices() {
     settle(&mut h);
     let rt = h.state().rt.get(&h.state().tab().id).unwrap();
     let log: Vec<String> = rt.log.iter().map(|l| l.text.clone()).collect();
-    assert!(log.iter().any(|l| l.contains("hello from plpgsql")), "{log:?}");
+    // The NOTICE in the output tab (not among the messages).
+    assert!(rt.output.iter().any(|l| l.text.contains("hello from plpgsql")), "{:?}", rt.output.iter().map(|l| &l.text).collect::<Vec<_>>());
+    assert!(!log.iter().any(|l| l.starts_with("NOTICE") || l == "hello from plpgsql"), "{log:?}");
     assert_eq!(rt.results.len(), 2, "{log:?}");
     shot(&mut h, "pg");
+    let id0 = h.state().tab().id.clone();
+    h.state_mut().rt.get_mut(&id0).unwrap().shown = crate::app::Pane::Output;
+    settle(&mut h);
+    shot(&mut h, "pg-output");
     let id = h.state().tab().id.clone();
-    h.state_mut().rt.get_mut(&id).unwrap().shown = None;
+    h.state_mut().rt.get_mut(&id).unwrap().shown = crate::app::Pane::Messages;
     settle(&mut h);
     shot(&mut h, "pg-messages");
 }
@@ -594,4 +600,71 @@ fn frame_follows_the_text() {
         h.step();
     }
     shot(&mut h, "frame-hint");
+}
+
+#[test]
+fn results_in_batches_export_and_totals() {
+    let (mut h, _g) = harness("batches", "select id, total, note from orders order by id;\n", false);
+    focus_editor(&mut h, 5);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let loaded = |h: &Harness<'static, App>| h.state().rt[&id].results[0].table.rows.len();
+    assert_eq!(loaded(&h), 500);
+    assert!(h.state().rt[&id].results[0].cursor.is_some(), "the cursor stays open");
+    shot(&mut h, "batches");
+    // One more batch, then all the rest.
+    h.get_by_label_contains("Ещё").click();
+    let wait = |h: &mut Harness<'static, App>, n: usize| {
+        for _ in 0..500 {
+            h.step();
+            if h.state().rt[&id].results[0].table.rows.len() == n && h.state().rt[&id].results[0].loading.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("rows: {}", h.state().rt[&id].results[0].table.rows.len());
+    };
+    wait(&mut h, 1000);
+    h.get_by_label_contains("Все").click();
+    wait(&mut h, 3000);
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.state().rt[&id].results[0].cursor.is_none(), "all in: the cursor's closed");
+    // The totals of a column, in its header's menu.
+    let sums = crate::results::totals(&h.state().rt[&id].results[0], 1);
+    let total: f64 = (1..=3000).map(|x: u64| ((x * 37) % 1000) as f64 + 0.5).sum();
+    assert!(sums.iter().any(|(n, v)| *n == "Сумма" && v.parse::<f64>().unwrap() == total), "{sums:?}");
+    assert!(sums.iter().any(|(n, v)| *n == "Максимум" && v == "999.5"), "{sums:?}");
+    h.get_by_label("total").click_secondary();
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "totals");
+    h.key_press(egui::Key::Escape);
+    h.step();
+    // Saved as CSV, 1000 rows a file.
+    h.get_by_label_contains("Экспорт").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    let dir = std::env::temp_dir().join(format!("zapros-export-ui-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    if let Some((_, _, e)) = h.state_mut().export.as_mut() {
+        e.path = dir.join("orders.csv");
+        e.split = 1000;
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "export");
+    h.get_by_label_contains("Сохранить").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    let third = std::fs::read_to_string(dir.join("orders_3.csv")).unwrap();
+    assert_eq!(third.lines().count(), 1001, "header + 1000 rows");
+    assert!(third.starts_with("id,total,note\n2001,"), "{}", &third[..40]);
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -157,7 +157,7 @@ impl Ch {
 }
 
 impl Session for Ch {
-    fn run(&mut self, sql: &str, limit: usize, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         let sql = sql.trim().trim_end_matches(';').trim_end();
         let qid = format!("zapros-{}", new_id());
         let ours = returns_rows(sql) && !has_format(sql);
@@ -200,8 +200,7 @@ impl Session for Ch {
                 ..Default::default()
             };
             while let Some(r) = next()? {
-                if t.rows.len() >= limit {
-                    t.more = true;
+                if !fetch.room(&mut t) {
                     break;
                 }
                 t.rows.push(r.iter().map(value).collect());

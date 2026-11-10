@@ -8,6 +8,10 @@ use super::*;
 
 pub struct Lite {
     conn: Connection,
+    /// The last statement only read.
+    read_only: bool,
+    /// The open transaction changed something.
+    dirty: bool,
 }
 
 fn fail(e: rusqlite::Error) -> Failure {
@@ -34,7 +38,7 @@ impl Lite {
         let flags = if spec.read_only { OpenFlags::SQLITE_OPEN_READ_ONLY } else { OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE } | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = Connection::open_with_flags(path, flags).map_err(fail)?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
-        Ok(Self { conn })
+        Ok(Self { conn, read_only: true, dirty: false })
     }
 
     fn rows(&self, sql: &str, params: &[&str]) -> Res<Vec<Vec<String>>> {
@@ -50,8 +54,9 @@ impl Lite {
 }
 
 impl Session for Lite {
-    fn run(&mut self, sql: &str, limit: usize, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         let mut st = self.conn.prepare(sql).map_err(fail)?;
+        self.read_only = st.readonly();
         let n = st.column_count();
         if n == 0 {
             let changed = st.execute([]).map_err(fail)?;
@@ -62,8 +67,7 @@ impl Session for Lite {
         let mut t = Table { cols, ..Default::default() };
         let mut rows = st.query([]).map_err(fail)?;
         while let Some(r) = rows.next().map_err(fail)? {
-            if t.rows.len() >= limit {
-                t.more = true;
+            if !fetch.room(&mut t) {
                 break;
             }
             t.rows.push((0..n).map(|i| r.get_ref(i).ok().and_then(text)).collect());
@@ -126,6 +130,20 @@ impl Session for Lite {
         Ok(())
     }
 
+    fn tx_after(&mut self, sql: &str, ok: bool) {
+        if tx_stmt(sql) == TxStmt::End {
+            self.dirty = false;
+        }
+        // Changed something, or a BEGIN of the script's own: kept open.
+        if ok && (!self.read_only && tx_stmt(sql) == TxStmt::Other || tx_stmt(sql) == TxStmt::Begin) {
+            self.dirty = true;
+        }
+        // Only read: the transaction ends (no lock held on the file).
+        if !self.dirty && !self.conn.is_autocommit() {
+            self.conn.execute_batch("COMMIT").ok();
+        }
+    }
+
     fn set_auto(&mut self, on: bool) {
         if on && !self.conn.is_autocommit() {
             self.conn.execute_batch("COMMIT").ok();
@@ -136,11 +154,12 @@ impl Session for Lite {
         if !self.conn.is_autocommit() {
             self.conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" }).map_err(fail)?;
         }
+        self.dirty = false;
         Ok(())
     }
 
     fn pending(&mut self) -> bool {
-        !self.conn.is_autocommit()
+        !self.conn.is_autocommit() && self.dirty
     }
 }
 

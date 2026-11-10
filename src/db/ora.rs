@@ -82,7 +82,7 @@ impl Ora {
         Ok(out)
     }
 
-    fn run_one(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+    fn run_one(&mut self, sql: &str, fetch: &mut Fetch, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         let sql = tidy(sql);
         let mut st = self.conn.statement(&sql).fetch_array_size(500).build().map_err(fail)?;
         let r = if st.is_query() {
@@ -97,8 +97,7 @@ impl Ora {
                 .collect();
             let mut t = Table { cols, ..Default::default() };
             for row in rs {
-                if t.rows.len() >= limit {
-                    t.more = true;
+                if !fetch.room(&mut t) {
                     break;
                 }
                 let row = row.map_err(fail)?;
@@ -190,8 +189,8 @@ fn tidy(sql: &str) -> String {
 }
 
 impl Session for Ora {
-    fn run(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
-        let r = self.run_one(sql, limit, notes);
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+        let r = self.run_one(sql, fetch, notes);
         if self.auto && r.is_ok() {
             self.conn.commit().map_err(fail)?;
         }

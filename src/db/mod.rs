@@ -111,7 +111,7 @@ impl Default for Spec {
             connect_timeout: 10,
             read_only: false,
             color: None,
-            auto_commit: true,
+            auto_commit: false,
         }
     }
 }
@@ -299,10 +299,48 @@ pub fn qualify(mut rels: Vec<Relation>, visible: &[String]) -> Vec<Relation> {
     rels
 }
 
+/// How rows are taken: a batch, then `more` is asked what next (it may
+/// take the rows out, hand them on, wait…): how many more, 0 to stop.
+pub struct Fetch<'a> {
+    want: usize,
+    more: Box<dyn FnMut(&mut Table) -> usize + 'a>,
+}
+
+impl<'a> Fetch<'a> {
+    pub fn new(first: usize, more: impl FnMut(&mut Table) -> usize + 'a) -> Self {
+        Self { want: first.max(1), more: Box::new(more) }
+    }
+
+    /// At most `n` rows.
+    pub fn limit(n: usize) -> Fetch<'static> {
+        Fetch::new(n, |_| 0)
+    }
+
+    /// Before a row that's there is taken: false — stop here (the table
+    /// says there's more).
+    pub fn room(&mut self, t: &mut Table) -> bool {
+        if t.rows.len() < self.want {
+            return true;
+        }
+        let n = (self.more)(t);
+        if n == 0 {
+            t.more = true;
+            return false;
+        }
+        self.want = t.rows.len() + n;
+        true
+    }
+}
+
 /// Talks to one server; lives on its worker's thread.
 pub trait Session: Send {
+    /// Runs one statement, taking rows as `fetch` says.
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, notes: &mut dyn FnMut(String)) -> Res<Outcome>;
     /// Runs one statement, taking at most `limit` rows.
-    fn run(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome>;
+    #[allow(dead_code)]
+    fn run_limit(&mut self, sql: &str, limit: usize, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+        self.run(sql, &mut Fetch::limit(limit), notes)
+    }
     /// What's under a node of the tree.
     fn children(&mut self, path: &[String]) -> Res<Vec<Obj>>;
     /// An object's source (CREATE …).
@@ -382,7 +420,13 @@ pub enum Req {
     Connect,
     /// A script's statements, one after another; stops at the first
     /// failure unless `go_on`.
+    /// `limit`: rows in a batch; the last statement's cursor stays open
+    /// after it, for `More` / `StopFetch`.
     Run { run: u64, stmts: Vec<Stmt>, limit: usize, go_on: bool },
+    /// The open cursor: `n` more rows (`all`: batch after batch to the end).
+    More { run: u64, n: usize, all: bool },
+    /// The open cursor closes.
+    StopFetch,
     Children { path: Vec<String> },
     Source { path: Vec<String>, kind: ObjKind, open_as: String },
     Relations { schemas: Vec<String> },
@@ -424,6 +468,12 @@ pub enum What {
     Note { run: u64, text: String },
     Result { run: u64, index: usize, at: usize, sql: String, outcome: Result<Outcome, Failure>, took: Duration },
     Finished { run: u64, cancelled: bool },
+    /// The first batch of a result whose cursor stays open (the run counts
+    /// as finished after it).
+    Page { run: u64, at: usize, sql: String, table: Table, took: Duration },
+    /// More rows of it; `open`: the cursor's still there (more can come);
+    /// `more`: rows were left when it closed.
+    Rows { run: u64, rows: Vec<Vec<Option<String>>>, more: bool, open: bool, error: Option<String> },
     Children { path: Vec<String>, items: Result<Vec<Obj>, String> },
     Source { path: Vec<String>, open_as: String, text: Result<String, String> },
     Relations(Result<Vec<Relation>, String>),
@@ -514,7 +564,10 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             }
         }
     };
-    while let Ok(req) = rx.recv() {
+    // A request that came while a cursor was open: next.
+    let mut stash: Option<Req> = None;
+    loop {
+        let Some(req) = stash.take().or_else(|| rx.recv().ok()) else { break };
         *busy.lock().unwrap() = Some(Instant::now());
         match req {
             Req::Close => break,
@@ -523,8 +576,10 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             }
             Req::Run { run, stmts, limit, go_on } => {
                 let mut cancelled = false;
+                let mut paged = false;
                 stop.store(false, Ordering::Relaxed);
                 if ensure(&mut session) {
+                    let last = stmts.len().saturating_sub(1);
                     for (index, st) in stmts.into_iter().enumerate() {
                         if stop.load(Ordering::Relaxed) {
                             cancelled = true;
@@ -534,10 +589,64 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                         let t = Instant::now();
                         let s = session.as_mut().unwrap();
                         let mut note = |text: String| tell(What::Note { run, text });
+                        // The last statement's cursor stays open after a
+                        // batch: the window asks for more (or anything
+                        // else ends it).
+                        let mut all = false;
+                        let (at, sql) = (st.at, st.sql.clone());
+                        let mut more = |tb: &mut Table| -> usize {
+                            if index != last || stash.is_some() {
+                                return 0;
+                            }
+                            if !paged {
+                                paged = true;
+                                for c in tb.cols.iter_mut() {
+                                    c.numeric = c.numeric || is_numeric_type(&c.ty);
+                                }
+                                tb.guess_numeric();
+                                let first = Table { cols: tb.cols.clone(), rows: std::mem::take(&mut tb.rows), more: true };
+                                tell(What::Page { run, at, sql: sql.clone(), table: first, took: t.elapsed() });
+                                tell(What::Finished { run, cancelled: false });
+                            } else {
+                                tell(What::Rows { run, rows: std::mem::take(&mut tb.rows), more: true, open: true, error: None });
+                            }
+                            if all {
+                                // Batch after batch, unless told otherwise.
+                                match rx.try_recv() {
+                                    Err(_) => return limit.max(5000),
+                                    Ok(Req::StopFetch) | Ok(Req::More { .. }) => {}
+                                    Ok(other) => stash = Some(other),
+                                }
+                                return 0;
+                            }
+                            *busy.lock().unwrap() = None;
+                            let n = loop {
+                                match rx.recv() {
+                                    Ok(Req::More { run: r, n, all: a }) if r == run => {
+                                        all = a;
+                                        break if a { limit.max(5000) } else { n.max(1) };
+                                    }
+                                    Ok(Req::More { .. }) => continue,
+                                    Ok(Req::StopFetch) => break 0,
+                                    Ok(other) => {
+                                        stash = Some(other);
+                                        break 0;
+                                    }
+                                    Err(_) => {
+                                        stash = Some(Req::Close);
+                                        break 0;
+                                    }
+                                }
+                            };
+                            *busy.lock().unwrap() = Some(Instant::now());
+                            n
+                        };
+                        let mut fetch = Fetch::new(limit, &mut more);
                         let outcome = match if auto.get() { Ok(()) } else { s.tx_before(&st.sql) } {
-                            Ok(()) => s.run(&st.sql, limit, &mut note),
+                            Ok(()) => s.run(&st.sql, &mut fetch, &mut note),
                             Err(e) => Err(e),
                         };
+                        drop(fetch);
                         let failed = outcome.is_err();
                         if !auto.get() && !outcome.as_ref().is_err_and(|f| f.lost) {
                             s.tx_after(&st.sql, !failed);
@@ -549,6 +658,15 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                             }
                             cancelled = stop.load(Ordering::Relaxed) || is_cancel_message(&f.message);
                         }
+                        if paged {
+                            // The rest of a paged result, and its cursor's end.
+                            match outcome {
+                                Ok(Outcome::Rows(tb)) => tell(What::Rows { run, rows: tb.rows, more: tb.more, open: false, error: None }),
+                                Ok(_) => tell(What::Rows { run, rows: Vec::new(), more: false, open: false, error: None }),
+                                Err(f) => tell(What::Rows { run, rows: Vec::new(), more: true, open: false, error: Some(f.message) }),
+                            }
+                            break;
+                        }
                         tell(What::Result { run, index, at: st.at, sql: st.sql, outcome, took: t.elapsed() });
                         if failed && (!go_on || session.is_none() || cancelled) {
                             break;
@@ -558,8 +676,11 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 if !auto.get() && let Some(s) = session.as_mut() {
                     tell(What::Tx { auto: false, pending: s.pending() });
                 }
-                tell(What::Finished { run, cancelled });
+                if !paged {
+                    tell(What::Finished { run, cancelled });
+                }
             }
+            Req::More { .. } | Req::StopFetch => {}
             Req::Tx(op) => {
                 let result = match op {
                     TxOp::Auto(on) => {

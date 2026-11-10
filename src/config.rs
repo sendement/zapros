@@ -130,7 +130,7 @@ pub struct Settings {
     pub ui_scale: f32,
     pub font_size: f32,
     pub tab_width: usize,
-    /// Rows a result takes at most.
+    /// Rows a result loads in one batch (more on demand).
     pub row_limit: usize,
     /// An empty line ends a statement (for "run statement").
     pub blank_line_splits: bool,
@@ -164,7 +164,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             font_size: 14.0,
             tab_width: 4,
-            row_limit: 1000,
+            row_limit: 500,
             blank_line_splits: true,
             continue_on_error: false,
             check: true,

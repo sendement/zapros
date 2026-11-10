@@ -591,14 +591,14 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-const GREEN: Color32 = Color32::from_rgb(76, 175, 80);
-const TEAL: Color32 = Color32::from_rgb(38, 166, 154);
-const RED: Color32 = Color32::from_rgb(229, 57, 53);
-const BLUE: Color32 = Color32::from_rgb(66, 133, 244);
-const VIOLET: Color32 = Color32::from_rgb(171, 71, 188);
+pub const GREEN: Color32 = Color32::from_rgb(76, 175, 80);
+pub const TEAL: Color32 = Color32::from_rgb(38, 166, 154);
+pub const RED: Color32 = Color32::from_rgb(229, 57, 53);
+pub const BLUE: Color32 = Color32::from_rgb(66, 133, 244);
+pub const VIOLET: Color32 = Color32::from_rgb(171, 71, 188);
 
 /// A toolbar button in its colour: a wash of it, its edge, the icon in it.
-fn tinted(text: String, c: Color32) -> egui::Button<'static> {
+pub fn tinted(text: String, c: Color32) -> egui::Button<'static> {
     let (icon, rest) = text.split_once(' ').map_or((text.as_str(), None), |(a, b)| (a, Some(b)));
     let mut job = egui::text::LayoutJob::default();
     let font = egui::TextStyle::Button;

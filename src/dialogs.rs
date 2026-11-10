@@ -145,7 +145,7 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
                 num(ui, &mut s.connect_timeout, 1..=600);
                 ui.end_row();
             }
-            ui.label(t("Строк максимум", "Row limit"));
+            ui.label(t("Строк за раз", "Rows per batch"));
             ui.horizontal(|ui| {
                 num(ui, &mut s.row_limit, 0..=10_000_000);
                 ui.label(RichText::new(t("0 — как в настройках", "0: from settings")).weak().small());
@@ -481,7 +481,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.radio_value(&mut s.close_always, false, t("при наведении", "on hover"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label(t("Строк в результате максимум", "Rows per result at most"));
+                    ui.label(t("Строк за раз (порция загрузки результата)", "Rows per batch (a result loads in batches)"));
                     num(ui, &mut s.row_limit, 1..=10_000_000);
                 });
                 ui.checkbox(&mut s.continue_on_error, t("Продолжать скрипт после ошибки", "Go on with the script after an error"));

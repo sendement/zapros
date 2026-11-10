@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod dialogs;
 mod editor;
+mod export;
 mod fonts;
 mod i18n;
 mod outline_ui;

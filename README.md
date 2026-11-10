@@ -17,7 +17,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   full height, its top row holding the panel switch (objects / files) and
   the menus as icons.
 - **Transactions** (PostgreSQL, Oracle, SQLite): auto-commit per
-  connection, switchable from the toolbar. With it off, changes gather
+  connection (off by default), switchable from the toolbar. A SQLite
+  transaction that only read is ended at once. With it off, changes gather
   until Commit or Roll back; the toolbar and status line show when some
   are pending, and switching auto-commit on, disconnecting or closing the
   window asks what to do with them. In PostgreSQL each statement runs under
@@ -76,9 +77,16 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,
-  filter, copy cell / row / row as JSON / all as TSV, save as CSV;
-  messages with timings, `RAISE NOTICE` and `DBMS_OUTPUT`; the server's
-  error position is marked in the script.
+  filter, copy cell / row / row as JSON / all as TSV. Rows load in batches
+  (500 by default, "rows per batch" in the settings or per connection): the
+  last statement's cursor stays open, the bar above the table loads the next
+  batch, all the rest, or stops (closing the cursor). Export to CSV / TSV /
+  JSON / SQL INSERT / Markdown / HTML / XLSX, whole or split into files of
+  N rows, optionally loading every row first. A column header's right-click
+  menu gives its totals over the rows shown: count, NULLs, sum, min, max,
+  average. Messages (timings, errors; the server's error position is marked
+  in the script) and Output (`RAISE NOTICE`, `DBMS_OUTPUT`) are tabs of
+  their own.
 - **Passwords** in the desktop keyring (Secret Service: GNOME Keyring,
   KWallet); without one, in a ChaCha20-Poly1305 encrypted file (0600).
   Saving the password is optional: otherwise it's asked on connect.
