@@ -658,7 +658,21 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 continue;
             }
             let at = output.galley_pos.to_vec2();
-            let left = output.galley_pos.x + b.col as f32 * char_w - 3.0;
+            // Where its column is on its first line, as laid out (bold
+            // keywords, comments, other scripts may be wider).
+            let ls = text[..b.range.start].rfind('\n').map_or(0, |i| i + 1);
+            let line = &text[ls..];
+            let mut w = 0;
+            let mut byte = line.find('\n').unwrap_or(line.len());
+            for (i, ch) in line.char_indices() {
+                if w >= b.col || ch == '\n' {
+                    byte = i;
+                    break;
+                }
+                w += if ch == '\t' { 4 } else { 1 };
+            }
+            let x = output.galley.pos_from_cursor(CCursor::new(char_of(text, ls + byte))).min.x;
+            let left = output.galley_pos.x + x - 3.0;
             let right = rows[l0..=l1].iter().map(|r| r.rect().right()).fold(0.0f32, f32::max) + at.x + 4.0;
             let top = rows[l0].rect().top() + at.y;
             let mut bottom = rows[l1].rect().bottom() + at.y;

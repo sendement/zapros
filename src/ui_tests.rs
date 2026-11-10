@@ -567,3 +567,17 @@ fn bands_at_scale_and_in_strings() {
     }
     shot(&mut h, "frames");
 }
+
+#[test]
+fn frame_follows_the_text() {
+    let src = "select /*+ полный скан, parallel(4) */ *\n  from orders o\n where o.id in (select /*+ хинт */ id\n                  from customers\n                 where active = 1)";
+    let (mut h, _g) = harness_at("frame-hint", src, false, 1.2);
+    h.state_mut().ask = None;
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    h.state_mut().rt.get_mut(&id).unwrap().ed.goto = Some(src.find("customers").unwrap());
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "frame-hint");
+}
