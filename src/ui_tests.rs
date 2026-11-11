@@ -826,7 +826,12 @@ fn wide_table_scrolls_sideways() {
     settle(&mut h);
     let id = h.state().tab().id.clone();
     assert_eq!(h.state().rt[&id].results[0].table.cols.len(), 15);
-    h.state_mut().rt.get_mut(&id).unwrap().results[0].sel = Some((4, 2));
+    {
+        let v = &mut h.state_mut().rt.get_mut(&id).unwrap().results[0];
+        v.sel = Some((4, 2));
+        v.picked = [2usize, 3].into();
+        v.rows_picked = [1usize, 2].into();
+    }
     for _ in 0..2 {
         h.step();
     }

@@ -70,6 +70,8 @@ pub struct ResultView {
     pub cols: Vec<usize>,
     /// Columns picked (by their header).
     pub picked: std::collections::BTreeSet<usize>,
+    /// Rows picked (by their number).
+    pub rows_picked: std::collections::BTreeSet<usize>,
     /// Totals asked for, shown under the table: column → (what, value).
     pub totals: std::collections::BTreeMap<usize, (crate::results::Agg, String)>,
     /// Rows changed since the totals were worked out.

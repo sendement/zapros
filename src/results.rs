@@ -4,6 +4,7 @@
 //! copy a cell / row / all, save as CSV.
 
 use egui::{Align, Color32, Layout, RichText};
+use egui::emath::GuiRounding as _;
 use egui_extras::{Column, TableBuilder};
 
 use crate::app::{App, LogKind, Pane, ResultView};
@@ -437,10 +438,18 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let mut sel = v.sel;
     let mut copy: Option<String> = None;
     let mut filter_to: Option<String> = None;
-    let sel_bg = ui.visuals().selection.stroke.color;
-    let sel_fill = ui.visuals().selection.bg_fill.gamma_multiply(0.55);
-    let null_bg = if ui.visuals().dark_mode { egui::Color32::from_rgba_unmultiplied(140, 120, 200, 20) } else { egui::Color32::from_rgba_unmultiplied(120, 100, 190, 20) };
-    let picked_bg = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
+    // Grey picks: a picked column only shades what's under it (the stripes
+    // show through); a picked row one grey; the chosen cell a deeper one.
+    let dark = ui.visuals().dark_mode;
+    let sel_fill = if dark { egui::Color32::from_rgb(84, 84, 92) } else { egui::Color32::from_rgb(192, 192, 200) };
+    let sel_bg = if dark { egui::Color32::from_rgb(135, 135, 145) } else { egui::Color32::from_rgb(140, 140, 150) };
+    let row_fill = if dark { egui::Color32::from_rgb(58, 58, 64) } else { egui::Color32::from_rgb(214, 214, 220) };
+    let null_bg = if dark { egui::Color32::from_rgba_unmultiplied(140, 120, 200, 20) } else { egui::Color32::from_rgba_unmultiplied(120, 100, 190, 20) };
+    let picked_bg = if dark { egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14) } else { egui::Color32::from_rgba_unmultiplied(0, 0, 0, 14) };
+    // A cell's background reaches halfway into the gaps (as egui's stripes do).
+    let half = ui.spacing().item_spacing * 0.5;
+    let rows_picked = v.rows_picked.clone();
+    let mut row_click: Option<(usize, egui::Modifiers)> = None;
     let null_color = ui.visuals().weak_text_color();
     let footer_h = if v.totals.is_empty() { 0.0 } else { 24.0 };
     let mut heads: Vec<egui::Rect> = vec![egui::Rect::NOTHING; v.cols.len()];
@@ -461,6 +470,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             egui::ScrollArea::horizontal().id_salt(("res-h", tab, i)).auto_shrink([false, false]).show(ui, |ui| {
             // (A little room inside the rounded edge.)
             egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 3 }).show(ui, |ui| {
+            // A picked row's colour (egui fills it gapless).
+            ui.visuals_mut().selection.bg_fill = row_fill;
             let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
             for w in &widths {
                 tb = tb.column(Column::initial(*w).at_least(30.0).clip(true));
@@ -473,7 +484,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     let col = &cols[c];
                     let (rect, _) = h.col(|ui| {
                         if picked.contains(&c) {
-                            ui.painter().rect_filled(ui.max_rect().expand2(egui::vec2(4.0, 2.0)), 0.0, picked_bg);
+                            let cell = ui.max_rect().expand2(half).round_ui();
+                            let mut p = ui.painter().clone();
+                            p.set_clip_rect(cell.intersect(ui.clip_rect().expand2(half)));
+                            p.rect_filled(cell, 0.0, picked_bg);
                         }
                         // The sort's arrow, with its level when there are several.
                         let level = sort.iter().position(|s| s.0 == c);
@@ -580,23 +594,43 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             .body(|body| {
                 body.rows(20.0, order.len(), |mut row| {
                     let ri = order[row.index()];
-                    row.col(|ui| {
+                    row.set_selected(rows_picked.contains(&ri));
+                    let (_, num) = row.col(|ui| {
                         ui.label(RichText::new((ri + 1).to_string()).weak().small());
+                    });
+                    let num = num.interact(egui::Sense::click()).on_hover_text(t("Щелчок — выделить строку (Ctrl, Shift — несколько)", "Click: pick the row (Ctrl, Shift: several)"));
+                    if num.clicked() {
+                        row_click = Some((ri, num.ctx.input(|i| i.modifiers)));
+                    }
+                    num.context_menu(|ui| {
+                        let these: Vec<usize> = if rows_picked.contains(&ri) { order.iter().copied().filter(|r| rows_picked.contains(r)).collect() } else { vec![ri] };
+                        if ui.button(if these.len() > 1 { t("Копировать строки", "Copy rows") } else { t("Копировать строку", "Copy row") }).clicked() {
+                            copy = Some(these.iter().map(|&r| view.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
+                            ui.close();
+                        }
+                        if ui.button(t("Копировать как JSON", "Copy as JSON")).clicked() {
+                            let arr: Vec<serde_json::Value> = these.iter().map(|&r| serde_json::Value::Object(view.iter().map(|&x| (cols[x].name.clone(), rows[r][x].clone().map_or(serde_json::Value::Null, serde_json::Value::String))).collect())).collect();
+                            copy = Some(serde_json::to_string_pretty(&arr).unwrap_or_default());
+                            ui.close();
+                        }
                     });
                     for &c in &view {
                         let col = &cols[c];
                         let (_, resp) = row.col(|ui| {
-                            let cell = ui.max_rect().expand2(egui::vec2(4.0, 2.0));
-                            if picked.contains(&c) {
-                                ui.painter().rect_filled(cell, 0.0, picked_bg);
-                            }
+                            // Gapless, like the stripes: halfway into the gaps.
+                            let cell = ui.max_rect().expand2(half).round_ui();
+                            let mut p = ui.painter().clone();
+                            p.set_clip_rect(cell.intersect(ui.clip_rect().expand2(half)));
                             let val = rows[ri].get(c).and_then(|x| x.as_ref());
                             // NULL on a shade of its own; the chosen cell filled.
                             if val.is_none() {
-                                ui.painter().rect_filled(cell.shrink(1.0), 0.0, null_bg);
+                                p.rect_filled(cell, 0.0, null_bg);
+                            }
+                            if picked.contains(&c) {
+                                p.rect_filled(cell, 0.0, picked_bg);
                             }
                             if sel == Some((ri, c)) {
-                                ui.painter().rect(cell.shrink(1.0), 2.0, sel_fill, egui::Stroke::new(1.5, sel_bg), egui::StrokeKind::Inside);
+                                p.rect(cell, 0.0, sel_fill, egui::Stroke::new(1.0, sel_bg), egui::StrokeKind::Inside);
                             }
                             let layout = if col.numeric { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
                             ui.with_layout(layout, |ui| match val {
@@ -748,6 +782,22 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     if let Some((c, m)) = pick {
         pick_column(v, c, m);
     }
+    if let Some((r, m)) = row_click {
+        if m.command || m.ctrl {
+            if !v.rows_picked.remove(&r) {
+                v.rows_picked.insert(r);
+            }
+        } else if m.shift && !v.rows_picked.is_empty() {
+            let pos = |x: usize| v.order.iter().position(|&y| y == x).unwrap_or(0);
+            let first = v.rows_picked.iter().map(|&x| pos(x)).min().unwrap_or(0);
+            let (a, b) = (first.min(pos(r)), first.max(pos(r)));
+            v.rows_picked = v.order[a..=b].iter().copied().collect();
+        } else if v.rows_picked.len() == 1 && v.rows_picked.contains(&r) {
+            v.rows_picked.clear();
+        } else {
+            v.rows_picked = [r].into();
+        }
+    }
     if let Some((group, a)) = agg_set {
         for c in group {
             let val = total(v, c, a);
@@ -778,10 +828,14 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     if let Some(s) = copy {
         ctx.copy_text(s);
     }
-    // Ctrl+C on a chosen cell (when no text field has focus).
-    if let Some((r, c)) = v.sel {
-        let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+    // Ctrl+C (when no text field has focus): the picked rows, else the
+    // chosen cell.
+    let typing = ctx.memory(|m| m.focused().is_some());
+    if !typing && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+        if !v.rows_picked.is_empty() {
+            let text = v.order.iter().filter(|r| v.rows_picked.contains(r)).map(|&r| v.cols.iter().map(|&x| tsv_cell(&v.table.rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n");
+            ctx.copy_text(text);
+        } else if let Some((r, c)) = v.sel {
             ctx.copy_text(v.table.rows[r][c].clone().unwrap_or_default());
         }
     }
