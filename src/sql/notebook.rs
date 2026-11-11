@@ -228,6 +228,10 @@ impl Known {
 /// A statement made ready to run: the CTEs from above it uses (and the
 /// ones those use) put into its WITH; a WITH alone shows its last CTE.
 pub fn glue(sql: &str, known: &Known, d: Dialect) -> String {
+    // PL/SQL blocks go as they are (their END; included).
+    if super::is_plsql_block(sql.trim(), d) {
+        return sql.to_string();
+    }
     let sql_t = sql.trim().trim_end_matches(';').trim_end();
     let own = parse_with(sql_t, d);
     let (own_ctes, main, recursive) = match &own {
@@ -255,7 +259,7 @@ pub fn glue(sql: &str, known: &Known, d: Dialect) -> String {
         main
     };
     if want.is_empty() && own.is_none() {
-        return sql_t.to_string();
+        return sql.to_string();
     }
     let mut defs: Vec<&str> = known.ctes.iter().filter(|c| want.contains(&c.name)).map(|c| c.text.as_str()).collect();
     defs.extend(own_ctes.iter().map(|c| c.text.as_str()));
@@ -285,11 +289,13 @@ pub fn export(cells: &[Piece], d: Dialect, standalone: bool) -> String {
                         // A WITH alone isn't a statement: it goes into the
                         // ones below.
                         if !only_with {
-                            stmts.push(format!("{};", glue(s, &known, d)));
+                            let g = glue(s.trim(), &known, d);
+                            stmts.push(if g.trim_end().ends_with(';') { g.trim_end().to_string() } else { format!("{};", g.trim_end()) });
                         }
                     } else {
-                        let s = s.trim().trim_end_matches(';').trim_end();
-                        stmts.push(if only_with { format!("{s}\n-- (WITH only: used by the statements below)") } else { format!("{s};") });
+                        let s = s.trim();
+                        let plain = s.trim_end_matches(';').trim_end();
+                        stmts.push(if only_with { format!("{plain}\n-- (WITH only: used by the statements below)") } else if s.ends_with(';') { s.to_string() } else { format!("{s};") });
                     }
                     known.learn(s.trim().trim_end_matches(';'), d);
                 }
@@ -332,9 +338,16 @@ mod tests {
         let g = glue("with top as (select * from big order by total desc limit 5) select * from top", &k, d);
         assert!(g.starts_with("WITH paid as") && g.contains("big as") && g.contains(",\ntop as (") && g.matches("WITH").count() == 1 && !g.to_lowercase().contains("with top"), "{g}");
         // Nothing used: left as it is.
-        assert_eq!(glue("select 1;", &k, d), "select 1");
+        assert_eq!(glue("select 1;", &k, d), "select 1;");
+        // PL/SQL keeps its END; even when a word matches a CTE.
+        let block = "begin\n  insert into log select * from paid;\nend;";
+        assert_eq!(glue(block, &k, Dialect::Oracle), block);
         // A WITH alone shows its last CTE.
         assert_eq!(glue("with x as (select 2)", &Known::default(), d), "WITH x as (select 2)\nSELECT * FROM x");
+        // Export of a PL/SQL cell: one END;, not two.
+        let cells = vec![Piece { kind: Kind::Sql, text: "begin\n  null;\nend;".into() }];
+        assert_eq!(export(&cells, Dialect::Oracle, true), "begin\n  null;\nend;\n");
+        assert_eq!(export(&cells, Dialect::Oracle, false), "begin\n  null;\nend;\n");
         // A name of its own isn't taken from above.
         let g = glue("with paid as (select 1) select * from paid", &k, d);
         assert_eq!(g.matches("paid as").count(), 1, "{g}");
