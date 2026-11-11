@@ -43,6 +43,9 @@ pub fn standard(s: &mut egui::Style) {
     s.spacing.menu_margin = egui::Margin::same(6);
     s.spacing.window_margin = egui::Margin::same(12);
     s.spacing.combo_width = 120.0;
+    // Scroll bars in room of their own (not over the text when they grow
+    // under the pointer).
+    s.spacing.scroll = egui::style::ScrollStyle { bar_width: 8.0, bar_inner_margin: 3.0, ..egui::style::ScrollStyle::solid() };
     let v = &mut s.visuals;
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = r;
@@ -362,7 +365,10 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
         foot(&painter, Pos2::new(tb.left(), top), Pos2::new(tb.left() - FILLET, top - FILLET), 90.0, 0.0, fill);
         foot(&painter, Pos2::new(tb.right(), top), Pos2::new(tb.right() + FILLET, top - FILLET), 180.0, 90.0, fill);
     }
-    painter.add(egui::Shape::closed_line(outline(sheet, tab), Stroke::new(1.5, color)));
+    // Thin; drawn twice so its rounded corners hold the colour.
+    for _ in 0..2 {
+        painter.add(egui::Shape::closed_line(outline(sheet, tab), Stroke::new(1.0, color)));
+    }
     painter.extend(active_text);
     // "+": a new workspace.
     // Like a not-chosen tab: rounded on top, standing on the sheet.

@@ -455,6 +455,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let table_rect = ui
         .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
             // (Its id follows the columns' order: widths go with them.)
+            // Wider than the room: it scrolls sideways (the header with it).
+            egui::ScrollArea::horizontal().id_salt(("res-h", tab, i)).auto_shrink([false, false]).show(ui, |ui| {
             // (A little room inside the rounded edge.)
             egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 3 }).show(ui, |ui| {
             let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
@@ -628,6 +630,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                         });
                     }
                 });
+            });
             });
             });
         })
