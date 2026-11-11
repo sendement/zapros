@@ -428,7 +428,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             (longest as f32 * char_w + 16.0).clamp(48.0, 420.0)
         })
         .collect();
-    let num_w = (v.table.rows.len().to_string().len() as f32 * char_w + 14.0).max(30.0);
+    // The numbers' column: narrow, in the small font.
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let small_w = ui.fonts_mut(|f| f.glyph_width(&small, '0'));
+    let num_w = (v.table.rows.len().to_string().len() as f32 * small_w + 8.0).max(18.0);
     // What the clicks ask, done after the table's drawn.
     let mut sort_click: Option<(usize, bool)> = None;
     let mut pick: Option<(usize, egui::Modifiers)> = None;
@@ -446,6 +449,17 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let row_fill = if dark { egui::Color32::from_rgb(58, 58, 64) } else { egui::Color32::from_rgb(214, 214, 220) };
     let null_bg = if dark { egui::Color32::from_rgba_unmultiplied(140, 120, 200, 20) } else { egui::Color32::from_rgba_unmultiplied(120, 100, 190, 20) };
     let picked_bg = if dark { egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14) } else { egui::Color32::from_rgba_unmultiplied(0, 0, 0, 14) };
+    // The chosen cell's row and its column's header: a shade lighter.
+    let cross_bg = if dark { egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22) } else { egui::Color32::from_rgba_unmultiplied(0, 0, 0, 20) };
+    let head_bg = if dark { egui::Color32::from_rgb(50, 50, 54) } else { egui::Color32::from_rgb(226, 226, 230) };
+    let head_sel = if dark { egui::Color32::from_rgb(74, 74, 82) } else { egui::Color32::from_rgb(204, 204, 212) };
+    let edge = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let sel_row = sel.map(|s| s.0);
+    let sel_col = sel.map(|s| s.1);
+    // The numbers stay put at the left when the table scrolls sideways:
+    // their cells are drawn (and clicked) over the table, after it.
+    let mut pins: Vec<(usize, egui::Rect, egui::Rect)> = Vec::new();
+    let mut hash_head = egui::Rect::NOTHING;
     // A cell's background reaches halfway into the gaps (as egui's stripes do).
     let half = ui.spacing().item_spacing * 0.5;
     let rows_picked = v.rows_picked.clone();
@@ -467,27 +481,36 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
         .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
             // (Its id follows the columns' order: widths go with them.)
             // Wider than the room: it scrolls sideways (the header with it).
+            // (No fade at the left edge: the pinned numbers are there.)
+            ui.spacing_mut().scroll.fade.strength = 0.0;
             egui::ScrollArea::horizontal().id_salt(("res-h", tab, i)).auto_shrink([false, false]).show(ui, |ui| {
             // (A little room inside the rounded edge.)
             egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 3 }).show(ui, |ui| {
             // A picked row's colour (egui fills it gapless).
             ui.visuals_mut().selection.bg_fill = row_fill;
+            ui.visuals_mut().selection.stroke.color = ui.visuals().strong_text_color();
+            let view_clip = ui.clip_rect();
             let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
             for w in &widths {
                 tb = tb.column(Column::initial(*w).at_least(30.0).clip(true));
             }
             tb.header(22.0, |mut h| {
                 h.col(|ui| {
-                    ui.label(RichText::new("#").weak());
+                    hash_head = ui.max_rect().expand2(half).round_ui();
                 });
                 for (k, &c) in view.iter().enumerate() {
                     let col = &cols[c];
                     let (rect, _) = h.col(|ui| {
-                        if picked.contains(&c) {
+                        if picked.contains(&c) || sel_col == Some(c) {
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
                             p.set_clip_rect(cell.intersect(ui.clip_rect().expand2(half)));
-                            p.rect_filled(cell, 0.0, picked_bg);
+                            if sel_col == Some(c) {
+                                p.rect_filled(cell, 0.0, head_sel);
+                            }
+                            if picked.contains(&c) {
+                                p.rect_filled(cell, 0.0, picked_bg);
+                            }
                         }
                         // The sort's arrow, with its level when there are several.
                         let level = sort.iter().position(|s| s.0 == c);
@@ -595,24 +618,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                 body.rows(20.0, order.len(), |mut row| {
                     let ri = order[row.index()];
                     row.set_selected(rows_picked.contains(&ri));
-                    let (_, num) = row.col(|ui| {
-                        ui.label(RichText::new((ri + 1).to_string()).weak().small());
-                    });
-                    let num = num.interact(egui::Sense::click()).on_hover_text(t("Щелчок — выделить строку (Ctrl, Shift — несколько)", "Click: pick the row (Ctrl, Shift: several)"));
-                    if num.clicked() {
-                        row_click = Some((ri, num.ctx.input(|i| i.modifiers)));
-                    }
-                    num.context_menu(|ui| {
-                        let these: Vec<usize> = if rows_picked.contains(&ri) { order.iter().copied().filter(|r| rows_picked.contains(r)).collect() } else { vec![ri] };
-                        if ui.button(if these.len() > 1 { t("Копировать строки", "Copy rows") } else { t("Копировать строку", "Copy row") }).clicked() {
-                            copy = Some(these.iter().map(|&r| view.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
-                            ui.close();
-                        }
-                        if ui.button(t("Копировать как JSON", "Copy as JSON")).clicked() {
-                            let arr: Vec<serde_json::Value> = these.iter().map(|&r| serde_json::Value::Object(view.iter().map(|&x| (cols[x].name.clone(), rows[r][x].clone().map_or(serde_json::Value::Null, serde_json::Value::String))).collect())).collect();
-                            copy = Some(serde_json::to_string_pretty(&arr).unwrap_or_default());
-                            ui.close();
-                        }
+                    row.col(|ui| {
+                        pins.push((ri, ui.max_rect().expand2(half).round_ui(), ui.clip_rect()));
                     });
                     for &c in &view {
                         let col = &cols[c];
@@ -628,6 +635,9 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             }
                             if picked.contains(&c) {
                                 p.rect_filled(cell, 0.0, picked_bg);
+                            }
+                            if sel_row == Some(ri) && !rows_picked.contains(&ri) {
+                                p.rect_filled(cell, 0.0, cross_bg);
                             }
                             if sel == Some((ri, c)) {
                                 p.rect(cell, 0.0, sel_fill, egui::Stroke::new(1.0, sel_bg), egui::StrokeKind::Inside);
@@ -672,6 +682,51 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     }
                 });
             });
+            // The numbers, pinned at the left edge of what's in view.
+            let shift = |r: egui::Rect| r.translate(egui::vec2((view_clip.left() - r.left()).max(0.0), 0.0));
+            if hash_head.is_positive() {
+                let r = shift(hash_head);
+                let p = ui.painter().with_clip_rect(view_clip.intersect(r));
+                p.rect_filled(r, 0.0, head_bg);
+                p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), ui.visuals().weak_text_color());
+                p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));
+            }
+            for (ri, cell, clip) in pins {
+                let r = shift(cell);
+                // (Only the body's top and bottom: sideways it's the view.)
+                let rows_clip = egui::Rect::from_x_y_ranges(view_clip.x_range(), clip.expand2(half).y_range());
+                let shown = r.intersect(rows_clip).intersect(view_clip);
+                if !shown.is_positive() {
+                    continue;
+                }
+                let p = ui.painter().with_clip_rect(shown);
+                let picked_row = rows_picked.contains(&ri);
+                let fill = if picked_row { sel_fill } else if sel_row == Some(ri) { head_sel } else { head_bg };
+                p.rect_filled(r, 0.0, fill);
+                let color = if picked_row || sel_row == Some(ri) { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+                p.text(egui::pos2(r.right() - 4.0, r.center().y), egui::Align2::RIGHT_CENTER, (ri + 1).to_string(), small.clone(), color);
+                p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));
+                let num = ui.interact(shown, ui.id().with(("row-num", tab, i, ri)), egui::Sense::click());
+                if num.hovered() && !picked_row {
+                    p.rect_filled(r, 0.0, picked_bg);
+                }
+                let num = num.on_hover_text(t("Щелчок — выделить строку (Ctrl, Shift — несколько)", "Click: pick the row (Ctrl, Shift: several)"));
+                if num.clicked() {
+                    row_click = Some((ri, num.ctx.input(|i| i.modifiers)));
+                }
+                num.context_menu(|ui| {
+                    let these: Vec<usize> = if rows_picked.contains(&ri) { order.iter().copied().filter(|r| rows_picked.contains(r)).collect() } else { vec![ri] };
+                    if ui.button(if these.len() > 1 { t("Копировать строки", "Copy rows") } else { t("Копировать строку", "Copy row") }).clicked() {
+                        copy = Some(these.iter().map(|&r| view.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
+                        ui.close();
+                    }
+                    if ui.button(t("Копировать как JSON", "Copy as JSON")).clicked() {
+                        let arr: Vec<serde_json::Value> = these.iter().map(|&r| serde_json::Value::Object(view.iter().map(|&x| (cols[x].name.clone(), rows[r][x].clone().map_or(serde_json::Value::Null, serde_json::Value::String))).collect())).collect();
+                        copy = Some(serde_json::to_string_pretty(&arr).unwrap_or_default());
+                        ui.close();
+                    }
+                });
+            }
             });
             });
         })
@@ -680,9 +735,6 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     // The header on a colour of its own; the table's corners rounded (the
     // rows' stripes cut by the panel's colour), a thin edge round it.
     {
-        let dark = ui.visuals().dark_mode;
-        // Grey, apart from the rows' shades.
-        let head_bg = if dark { egui::Color32::from_rgb(50, 50, 54) } else { egui::Color32::from_rgb(226, 226, 230) };
         let bottom = heads.iter().filter(|r| r.is_positive()).map(|r| r.bottom()).fold(table_rect.top() + 24.0, f32::max);
         let head = egui::Rect::from_min_max(table_rect.min, egui::pos2(table_rect.right(), bottom + 2.0));
         let r = 6u8;

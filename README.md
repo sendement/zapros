@@ -107,7 +107,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   Sorting by several columns (the header's arrow; Shift adds a level, the
   menu too). Columns are picked by their header (Ctrl / Shift for several)
   and moved by dragging or from the menu; the order is kept for the next
-  runs giving the same columns, and export follows it. Messages (timings, errors; the server's error position is marked
+  runs giving the same columns, and export follows it. A clicked cell
+  lights its row and its column's header, the cell itself deeper; rows are
+  picked by their number (Ctrl / Shift for several; Ctrl+C copies them).
+  The narrow number column stays pinned at the left when the table scrolls
+  sideways. NULLs sit on a shade of their own. Messages (timings, errors; the server's error position is marked
   in the script) and Output (`RAISE NOTICE`, `DBMS_OUTPUT`) are tabs of
   their own.
 - **Passwords** in the desktop keyring (Secret Service: GNOME Keyring,

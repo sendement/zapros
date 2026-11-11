@@ -852,4 +852,14 @@ fn wide_table_scrolls_sideways() {
         h.step();
     }
     shot(&mut h, "wide-right");
+    // The numbers stay at the left edge: a click there picks the row.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(298.0, 637.0)));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(298.0, 637.0), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.step();
+    let v = &h.state().rt[&id].results[0];
+    assert_eq!(v.rows_picked, [0usize].into(), "a click on the pinned number picks its row");
 }
