@@ -826,7 +826,20 @@ fn wide_table_scrolls_sideways() {
     settle(&mut h);
     let id = h.state().tab().id.clone();
     assert_eq!(h.state().rt[&id].results[0].table.cols.len(), 15);
+    h.state_mut().rt.get_mut(&id).unwrap().results[0].sel = Some((4, 2));
+    for _ in 0..2 {
+        h.step();
+    }
     shot(&mut h, "wide");
+    h.state_mut().settings.theme = crate::config::ThemePref::Light;
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "wide-light");
+    h.state_mut().settings.theme = crate::config::ThemePref::Dark;
+    for _ in 0..4 {
+        h.step();
+    }
     // Scrolled to the right: the last columns come into view.
     h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 650.0)));
     h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(-3000.0, 0.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });

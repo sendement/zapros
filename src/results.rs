@@ -438,6 +438,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let mut copy: Option<String> = None;
     let mut filter_to: Option<String> = None;
     let sel_bg = ui.visuals().selection.stroke.color;
+    let sel_fill = ui.visuals().selection.bg_fill.gamma_multiply(0.55);
+    let null_bg = if ui.visuals().dark_mode { egui::Color32::from_rgba_unmultiplied(140, 120, 200, 20) } else { egui::Color32::from_rgba_unmultiplied(120, 100, 190, 20) };
     let picked_bg = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
     let null_color = ui.visuals().weak_text_color();
     let footer_h = if v.totals.is_empty() { 0.0 } else { 24.0 };
@@ -583,11 +585,19 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     });
                     for &c in &view {
                         let col = &cols[c];
-                        let (rect, resp) = row.col(|ui| {
+                        let (_, resp) = row.col(|ui| {
+                            let cell = ui.max_rect().expand2(egui::vec2(4.0, 2.0));
                             if picked.contains(&c) {
-                                ui.painter().rect_filled(ui.max_rect().expand2(egui::vec2(4.0, 2.0)), 0.0, picked_bg);
+                                ui.painter().rect_filled(cell, 0.0, picked_bg);
                             }
                             let val = rows[ri].get(c).and_then(|x| x.as_ref());
+                            // NULL on a shade of its own; the chosen cell filled.
+                            if val.is_none() {
+                                ui.painter().rect_filled(cell.shrink(1.0), 0.0, null_bg);
+                            }
+                            if sel == Some((ri, c)) {
+                                ui.painter().rect(cell.shrink(1.0), 2.0, sel_fill, egui::Stroke::new(1.5, sel_bg), egui::StrokeKind::Inside);
+                            }
                             let layout = if col.numeric { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
                             ui.with_layout(layout, |ui| match val {
                                 None => {
@@ -600,9 +610,6 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             });
                         });
                         let resp = resp.interact(egui::Sense::click());
-                        if sel == Some((ri, c)) {
-                            resp.ctx.layer_painter(resp.layer_id).rect_stroke(rect.shrink(1.0), 2.0, egui::Stroke::new(1.5, sel_bg), egui::StrokeKind::Inside);
-                        }
                         if resp.clicked() {
                             sel = Some((ri, c));
                         }
@@ -640,7 +647,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     // rows' stripes cut by the panel's colour), a thin edge round it.
     {
         let dark = ui.visuals().dark_mode;
-        let head_bg = if dark { egui::Color32::from_rgb(34, 46, 64) } else { egui::Color32::from_rgb(222, 231, 244) };
+        // Grey, apart from the rows' shades.
+        let head_bg = if dark { egui::Color32::from_rgb(50, 50, 54) } else { egui::Color32::from_rgb(226, 226, 230) };
         let bottom = heads.iter().filter(|r| r.is_positive()).map(|r| r.bottom()).fold(table_rect.top() + 24.0, f32::max);
         let head = egui::Rect::from_min_max(table_rect.min, egui::pos2(table_rect.right(), bottom + 2.0));
         let r = 6u8;
