@@ -862,4 +862,39 @@ fn wide_table_scrolls_sideways() {
     h.step();
     let v = &h.state().rt[&id].results[0];
     assert_eq!(v.rows_picked, [0usize].into(), "a click on the pinned number picks its row");
+    // A cell: chosen by a click.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(420.0, 685.0)));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(420.0, 685.0), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.step();
+    assert_eq!(h.state().rt[&id].results[0].sel.map(|s| s.0), Some(2), "a click on a cell chooses it");
+    shot(&mut h, "cell-clicked");
+    // The sort square opens under the mouse: ▲ ▼; ▼ sorts descending.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(587.0, 612.0)));
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "sort-open");
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(589.0, 612.0)));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(589.0, 612.0), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.step();
+    assert_eq!(h.state().rt[&id].results[0].sort, vec![(10usize, false)], "▼ in the opened square");
+    // The header picks by a click anywhere on it, not just its name.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(725.0, 618.0)));
+    for _ in 0..3 {
+        h.step();
+    }
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(725.0, 618.0), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.step();
+    assert_eq!(h.state().rt[&id].results[0].picked, [11usize].into(), "a click past the name picks the column");
 }

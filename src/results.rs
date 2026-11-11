@@ -434,6 +434,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let num_w = (v.table.rows.len().to_string().len() as f32 * small_w + 8.0).max(18.0);
     // What the clicks ask, done after the table's drawn.
     let mut sort_click: Option<(usize, bool)> = None;
+    // From the opened sort square: column, ▲ / ▼ (None: drop it), Shift.
+    let mut sort_pick: Option<(usize, Option<bool>, bool)> = None;
     let mut pick: Option<(usize, egui::Modifiers)> = None;
     let mut sort_set: Option<Vec<(usize, bool)>> = None;
     let mut agg_set: Option<(Vec<usize>, Agg)> = None;
@@ -500,7 +502,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                 });
                 for (k, &c) in view.iter().enumerate() {
                     let col = &cols[c];
-                    let (rect, _) = h.col(|ui| {
+                    let mut head_rect = egui::Rect::NOTHING;
+                    h.col(|ui| {
                         if picked.contains(&c) || sel_col == Some(c) {
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
@@ -512,23 +515,72 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                                 p.rect_filled(cell, 0.0, picked_bg);
                             }
                         }
-                        // The sort's arrow, with its level when there are several.
+                        // The whole header picks (Ctrl, Shift: several), drags, has
+                        // the menu; the sort's square at the right opens under the
+                        // mouse into ▲ ▼ (✕ when sorted by it).
+                        let full = ui.max_rect();
+                        head_rect = full;
                         let level = sort.iter().position(|s| s.0 == c);
-                        let arrow = match level.map(|l| (l, sort[l].1)) {
-                            Some((l, asc)) if sort.len() > 1 => format!("{}{}", if asc { "▲" } else { "▼" }, l + 1),
-                            Some((_, asc)) => (if asc { "▲" } else { "▼" }).to_string(),
+                        let open_id = ui.id().with(("sort-open", c));
+                        let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+                        let opts: Vec<(&str, Option<bool>)> = if level.is_some() { vec![("▲", Some(true)), ("▼", Some(false)), ("✕", None)] } else { vec![("▲", Some(true)), ("▼", Some(false))] };
+                        let side = 16.0;
+                        let shut = match level {
+                            Some(l) if sort.len() > 1 => format!("{}{}", if sort[l].1 { "▲" } else { "▼" }, l + 1),
+                            Some(l) => (if sort[l].1 { "▲" } else { "▼" }).to_string(),
                             None => "△".to_string(),
                         };
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let color = if level.is_some() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-                            let a = ui.add(egui::Label::new(RichText::new(arrow).small().color(color)).sense(egui::Sense::click()).selectable(false));
-                            if a.clicked() {
-                                sort_click = Some((c, ui.input(|i| i.modifiers.shift)));
+                        let small_font = egui::TextStyle::Small.resolve(ui.style());
+                        let shut_w = ui.fonts_mut(|f| f.layout_no_wrap(shut.clone(), small_font.clone(), egui::Color32::WHITE).size().x + 8.0).max(side);
+                        let w = if open { opts.len() as f32 * side + 2.0 } else { shut_w };
+                        let pill = egui::Rect::from_min_size(egui::pos2(full.right() - w - 2.0, full.center().y - side / 2.0), egui::vec2(w, side)).round_ui();
+                        // The name, in what's left of it.
+                        let name_rect = egui::Rect::from_min_max(full.min, egui::pos2(pill.left() - 2.0, full.max.y));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(name_rect).layout(Layout::left_to_right(Align::Center)), |ui| {
+                            ui.add(egui::Label::new(RichText::new(&col.name).strong()).truncate().selectable(false));
+                        });
+                        // (Over the name; the sort square goes over it in turn.)
+                        let r = ui.interact(full, ui.id().with(("head", c)), egui::Sense::click_and_drag());
+                        let p = ui.painter();
+                        let strong = ui.visuals().strong_text_color();
+                        let weak = ui.visuals().weak_text_color();
+                        let edge_c = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                        let shift_held = ui.input(|i| i.modifiers.shift);
+                        let tip_sort = t("Сортировка: ▲ / ▼ — по этой колонке, с Shift — добавить уровнем ниже, ✕ — убрать", "Sort: ▲ / ▼ by this column, with Shift: add as the next level, ✕: drop it");
+                        if open {
+                            p.rect(pill, 3.0, head_sel, egui::Stroke::new(1.0, edge_c), egui::StrokeKind::Inside);
+                            for (n, (glyph, what)) in opts.iter().enumerate() {
+                                let b = egui::Rect::from_min_size(egui::pos2(pill.left() + 1.0 + n as f32 * side, pill.top()), egui::vec2(side, side));
+                                let br = ui.interact(b, ui.id().with(("sort-opt", c, n)), egui::Sense::click());
+                                let on = matches!((level.map(|l| sort[l].1), what), (Some(x), Some(y)) if x == *y);
+                                if br.hovered() {
+                                    p.rect_filled(b.shrink(1.0), 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                                }
+                                p.text(b.center(), egui::Align2::CENTER_CENTER, *glyph, small_font.clone(), if on || br.hovered() { strong } else { weak });
+                                if br.clicked() {
+                                    sort_pick = Some((c, *what, shift_held));
+                                }
+                                br.on_hover_text(tip_sort);
                             }
-                            a.on_hover_text(t("Сортировка: щелчок — по этой колонке, Shift+щелчок — добавить уровнем ниже", "Sort: click — by this column, Shift+click — add as the next level"));
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                let r = ui.add(egui::Label::new(RichText::new(&col.name).strong()).sense(egui::Sense::click_and_drag()).truncate().selectable(false));
-                                let tip = t("Щелчок — выделить (Ctrl, Shift — несколько), перетащить — переставить", "Click: pick (Ctrl, Shift: several), drag: move");
+                            let still = ui.ctx().pointer_hover_pos().is_some_and(|q| pill.expand(3.0).contains(q));
+                            if !still {
+                                ui.data_mut(|d| d.insert_temp(open_id, false));
+                            }
+                        } else {
+                            let br = ui.interact(pill, ui.id().with(("sort-shut", c)), egui::Sense::click());
+                            p.rect(pill, 3.0, egui::Color32::TRANSPARENT, egui::Stroke::new(1.0, edge_c), egui::StrokeKind::Inside);
+                            p.text(pill.center(), egui::Align2::CENTER_CENTER, shut, small_font.clone(), if level.is_some() { strong } else { weak });
+                            if br.hovered() {
+                                ui.data_mut(|d| d.insert_temp(open_id, true));
+                                ui.ctx().request_repaint();
+                            }
+                            if br.clicked() {
+                                sort_click = Some((c, shift_held));
+                            }
+                        }
+                        {
+                            {
+                                let tip = t("Щелчок — выделить (Ctrl, Shift — несколько), перетащить — переставить, правый — меню", "Click: pick (Ctrl, Shift: several), drag: move, right click: menu");
                                 let r = if col.ty.is_empty() { r.on_hover_text(tip) } else { r.on_hover_text(format!("{}\n{tip}", col.ty)) };
                                 if r.clicked() {
                                     pick = Some((c, ui.input(|i| i.modifiers)));
@@ -608,10 +660,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                                         ui.close();
                                     }
                                 });
-                            });
-                        });
+                            }
+                        }
                     });
-                    heads[k] = rect;
+                    heads[k] = head_rect;
                 }
             })
             .body(|body| {
@@ -623,7 +675,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     });
                     for &c in &view {
                         let col = &cols[c];
-                        let (_, resp) = row.col(|ui| {
+                        let mut hit = None;
+                        row.col(|ui| {
                             // Gapless, like the stripes: halfway into the gaps.
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
@@ -652,8 +705,11 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                                     ui.add(egui::Label::new(RichText::new(one).monospace()).truncate().selectable(false));
                                 }
                             });
+                            // The whole cell clicks (over its label). (The cell's own
+                            // response won't: egui sets its Ui back to hover-only.)
+                            hit = Some(ui.interact(ui.max_rect(), ui.id().with("cell"), egui::Sense::click()));
                         });
-                        let resp = resp.interact(egui::Sense::click());
+                        let Some(resp) = hit else { continue };
                         if resp.clicked() {
                             sel = Some((ri, c));
                         }
@@ -824,6 +880,19 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                 Some(false) if v.sort.len() == 1 => Vec::new(),
                 _ => vec![(c, true)],
             };
+        }
+        reorder(v);
+    }
+    if let Some((c, dir, shift)) = sort_pick {
+        let at = v.sort.iter().position(|s| s.0 == c);
+        match (dir, at) {
+            (None, Some(l)) => {
+                v.sort.remove(l);
+            }
+            (None, None) => {}
+            (Some(asc), Some(l)) if shift || v.sort.len() > 1 => v.sort[l].1 = asc,
+            (Some(asc), None) if shift => v.sort.push((c, asc)),
+            (Some(asc), _) => v.sort = vec![(c, asc)],
         }
         reorder(v);
     }

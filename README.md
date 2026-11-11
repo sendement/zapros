@@ -104,8 +104,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   right-click menu has Σ Totals → sum / min / max / average / count, the
   value shows in a row of its own under the table (right click there for
   another or to remove it), worked out again only when the rows change.
-  Sorting by several columns (the header's arrow; Shift adds a level, the
-  menu too). Columns are picked by their header (Ctrl / Shift for several)
+  Sorting by several columns (the header's little square opens under the
+  mouse into ▲ ▼ ✕; Shift adds a level, the menu too). Columns are picked
+  by a click anywhere on their header (Ctrl / Shift for several)
   and moved by dragging or from the menu; the order is kept for the next
   runs giving the same columns, and export follows it. A clicked cell
   lights its row and its column's header, the cell itself deeper; rows are
