@@ -527,8 +527,13 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             let m = ui.max_rect();
                             let cell = egui::Rect::from_min_max(egui::pos2(m.left() - half.x, m.top()), egui::pos2(m.right() + half.x, m.bottom().max(m.top() + 24.0) + 2.0)).round_ui();
                             let mut p = ui.painter().clone();
-                            let clip = egui::Rect::from_x_y_ranges(view_clip.x_range(), cell.y_range());
-                            p.set_clip_rect(cell.intersect(clip));
+                            // (What's in view: in a notebook scrolled past it, nothing —
+                            // not the buttons above.)
+                            let clip = cell.intersect(view_clip);
+                            p.set_clip_rect(clip);
+                            if !clip.is_positive() {
+                                p.set_opacity(0.0);
+                            }
                             if sel_col == Some(c) {
                                 p.rect_filled(cell, 0.0, head_sel);
                             }
@@ -705,7 +710,11 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             // Gapless, like the stripes: halfway into the gaps.
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
-                            p.set_clip_rect(cell.intersect(vp));
+                            let clip = cell.intersect(vp);
+                            p.set_clip_rect(clip);
+                            if !clip.is_positive() {
+                                p.set_opacity(0.0);
+                            }
                             let val = rows[ri].get(c).and_then(|x| x.as_ref());
                             // NULL on a shade of its own; the chosen cell filled.
                             if val.is_none() {
@@ -773,7 +782,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                 let r = shift(hash_head);
                 let mut clip = view_clip.intersect(r);
                 clip.min.y = clip.min.y.max(hash_head.top() + half.y);
-                let p = ui.painter().with_clip_rect(clip);
+                let mut p = ui.painter().with_clip_rect(clip);
+                if !clip.is_positive() {
+                    p.set_opacity(0.0);
+                }
                 p.rect_filled(r, 0.0, head_bg);
                 p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), ui.visuals().weak_text_color());
                 p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));

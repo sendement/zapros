@@ -964,3 +964,58 @@ fn notebook_output_pulled_up_and_hand_cursor() {
     let cell = h.get_by_label_contains("(500+)").rect().center() + egui::vec2(0.0, 150.0);
     assert_eq!(cursor(&mut h, cell), egui::CursorIcon::Default, "a table cell");
 }
+
+#[test]
+fn notebook_scrolled_keeps_shades_inside() {
+    let script = "-- %%\nselect id, note, total from orders;\n-- %%\nselect id, total from orders;\n";
+    let (mut h, _g) = harness("nb-shades", script, false);
+    h.state_mut().toggle_notebook();
+    h.step();
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, None);
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    {
+        let v = &mut h.state_mut().rt.get_mut(&crate::app::App::cell_key(&tab, &cells[0])).unwrap().results[0];
+        v.sel = Some((0, 1));
+        v.picked = [2usize].into();
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+    let before = h.render().expect("render");
+    // The lower output's top edge pulled up: the notebook scrolls the upper
+    // table out over the top.
+    let labels: Vec<egui::Rect> = h.query_all_by_label_contains("(500+)").map(|n| n.rect()).collect();
+    let lower = labels.iter().copied().max_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
+    let from = egui::pos2(lower.center().x + 300.0, lower.top() - 6.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=8 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from - egui::vec2(0.0, 40.0 * k as f32)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from - egui::vec2(0.0, 320.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "nb-shades");
+    let after = h.render().expect("render");
+    // Over the notebook (the toolbars, the tabs) nothing changed.
+    let bar = h.get_by_label_contains("Выполнить все").rect();
+    let ppp = after.width() as f32 / 1280.0;
+    let bottom = ((bar.bottom() + 2.0) * ppp) as u32;
+    let x0 = (bar.left() * ppp) as u32;
+    let mut differ = 0;
+    for y in 0..bottom {
+        for x in x0..after.width() {
+            if before.get_pixel(x, y) != after.get_pixel(x, y) {
+                differ += 1;
+            }
+        }
+    }
+    assert!(differ < 50, "{differ} pixels changed over the notebook");
+}
