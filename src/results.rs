@@ -441,6 +441,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let mut agg_set: Option<(Vec<usize>, Agg)> = None;
     let mut move_to: Option<(Vec<usize>, Place)> = None;
     let mut sel = v.sel;
+    let mut clear_picks = false;
     let mut copy: Option<String> = None;
     let mut filter_to: Option<String> = None;
     // Grey picks: a picked column only shades what's under it (the stripes
@@ -476,7 +477,17 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let sort = v.sort.clone();
     let picked = v.picked.clone();
     let rows = &v.table.rows;
-    let size = egui::vec2(ui.available_width(), (ui.available_height() - footer_h).max(40.0));
+    let mut size = egui::vec2(ui.available_width(), (ui.available_height() - footer_h).max(40.0));
+    // The rows' scroll bar: the table's own one sits at its content's right
+    // end (out of sight when it's wider than the room), so it's hidden and
+    // one of ours goes at the right of the room, beside the table.
+    let stride = 20.0 + ui.spacing().item_spacing.y;
+    let content_h = order.len() as f32 * stride;
+    let need_bar = content_h > size.y - 30.0;
+    let bar_room = if need_bar { ui.spacing().scroll.bar_width + 4.0 } else { 0.0 };
+    size.x -= bar_room;
+    let mut body_scroll_id = egui::Id::NULL;
+    let mut body_clip = egui::Rect::NOTHING;
     // The header's own colour goes under it (set once its height's known).
     let back = ui.painter().add(egui::Shape::Noop);
     let table_rect = ui
@@ -492,7 +503,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             ui.visuals_mut().selection.bg_fill = row_fill;
             ui.visuals_mut().selection.stroke.color = ui.visuals().strong_text_color();
             let view_clip = ui.clip_rect();
-            let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
+            // (As egui_extras names its body's scroll area.)
+            let state_id = ui.id().with(egui::IdSalt::new(("res", tab, i, view.clone())));
+            body_scroll_id = ui.make_persistent_id(egui::IdSalt::new(state_id.with("__scroll_area")));
+            let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
             for w in &widths {
                 tb = tb.column(Column::initial(*w).at_least(30.0).clip(true));
             }
@@ -507,7 +521,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                         if picked.contains(&c) || sel_col == Some(c) {
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
-                            p.set_clip_rect(cell.intersect(ui.clip_rect().expand2(half)));
+                            // (Not above the header: the table's edge is there.)
+                            let mut clip = ui.clip_rect().expand2(half);
+                            clip.min.y = ui.max_rect().top();
+                            p.set_clip_rect(cell.intersect(clip));
                             if sel_col == Some(c) {
                                 p.rect_filled(cell, 0.0, head_sel);
                             }
@@ -666,7 +683,8 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     heads[k] = head_rect;
                 }
             })
-            .body(|body| {
+            .body(|mut body| {
+                body_clip = body.ui_mut().clip_rect();
                 body.rows(20.0, order.len(), |mut row| {
                     let ri = order[row.index()];
                     row.set_selected(rows_picked.contains(&ri));
@@ -712,6 +730,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                         let Some(resp) = hit else { continue };
                         if resp.clicked() {
                             sel = Some((ri, c));
+                            clear_picks = true;
                         }
                         resp.context_menu(|ui| {
                             let val = rows[ri].get(c).cloned().flatten();
@@ -742,7 +761,9 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             let shift = |r: egui::Rect| r.translate(egui::vec2((view_clip.left() - r.left()).max(0.0), 0.0));
             if hash_head.is_positive() {
                 let r = shift(hash_head);
-                let p = ui.painter().with_clip_rect(view_clip.intersect(r));
+                let mut clip = view_clip.intersect(r);
+                clip.min.y = clip.min.y.max(hash_head.top() + half.y);
+                let p = ui.painter().with_clip_rect(clip);
                 p.rect_filled(r, 0.0, head_bg);
                 p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), ui.visuals().weak_text_color());
                 p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));
@@ -802,6 +823,40 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             p.rect_stroke(table_rect.shrink(0.5), r, egui::Stroke::new(1.0, edge), egui::StrokeKind::Middle);
         }
         p.hline(head.x_range().shrink(0.5), head.bottom(), egui::Stroke::new(1.0, edge));
+    }
+    if need_bar && hash_head.is_positive() && body_clip.height() > 0.0 {
+        let view_h = body_clip.height().max(1.0);
+        let track = egui::Rect::from_min_max(egui::pos2(table_rect.right() + 3.0, hash_head.bottom() + 2.0), egui::pos2(table_rect.right() + bar_room - 1.0, table_rect.bottom() - 2.0));
+        if let Some(mut st) = egui::scroll_area::State::load(&ctx, body_scroll_id) {
+            let max = (content_h - view_h).max(1.0);
+            let handle_h = (track.height() * view_h / content_h).clamp(20.0_f32.min(track.height()), track.height());
+            let room = (track.height() - handle_h).max(1.0);
+            let at = |o: f32| egui::Rect::from_min_size(egui::pos2(track.left(), track.top() + (o / max).clamp(0.0, 1.0) * room), egui::vec2(track.width(), handle_h));
+            let id = ui.id().with(("res-vbar", tab, i));
+            let r = ui.interact(track, id, egui::Sense::click_and_drag());
+            let grab_id = id.with("grab");
+            if let Some(p) = r.interact_pointer_pos() {
+                if r.drag_started() || r.clicked() || r.is_pointer_button_down_on() && ui.data(|d| d.get_temp::<f32>(grab_id)).is_none() {
+                    let h = at(st.offset.y);
+                    let grab = if h.contains(p) { p.y - h.top() } else { handle_h / 2.0 };
+                    ui.data_mut(|d| d.insert_temp(grab_id, grab));
+                }
+                let grab = ui.data(|d| d.get_temp::<f32>(grab_id)).unwrap_or(handle_h / 2.0);
+                let f = (p.y - grab - track.top()) / room;
+                // (At the very end: past it, the scroll area stops at its true end.)
+                st.offset.y = if f >= 1.0 { content_h } else { (f * max).clamp(0.0, max) };
+                st.store(&ctx, body_scroll_id);
+                ctx.request_repaint();
+            } else {
+                ui.data_mut(|d| d.remove_temp::<f32>(grab_id));
+            }
+            let w = &ui.visuals().widgets;
+            let fill = if r.dragged() || r.is_pointer_button_down_on() { w.active.bg_fill } else if r.hovered() { w.hovered.bg_fill } else { w.inactive.bg_fill };
+            let p = ui.painter();
+            let rad = (track.width() / 2.0) as u8;
+            p.rect_filled(track, rad, ui.visuals().extreme_bg_color);
+            p.rect_filled(at(st.offset.y), rad, fill);
+        }
     }
     // A header being dragged: where it would land.
     if let (Some(k), Some(p)) = (dragging, ctx.pointer_interact_pos()) {
@@ -902,6 +957,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     }
     if let Some((c, m)) = pick {
         pick_column(v, c, m);
+    }
+    if clear_picks {
+        v.picked.clear();
+        v.rows_picked.clear();
     }
     if let Some((r, m)) = row_click {
         if m.command || m.ctrl {

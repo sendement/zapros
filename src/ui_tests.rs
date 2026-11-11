@@ -897,4 +897,19 @@ fn wide_table_scrolls_sideways() {
     }
     h.step();
     assert_eq!(h.state().rt[&id].results[0].picked, [11usize].into(), "a click past the name picks the column");
+    // The rows' own scroll bar, at the right of the room even when the
+    // table is wider: dragged to the bottom, the last rows show.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(1261.0, 640.0)));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(1261.0, 640.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for y in [680.0, 720.0, 790.0] {
+        h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(1261.0, y)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(1261.0, 790.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "vbar-bottom");
 }
