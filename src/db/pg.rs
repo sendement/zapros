@@ -19,6 +19,9 @@ pub struct Pg {
     /// A savepoint before the statement running, so its failure undoes it
     /// alone and the transaction goes on.
     sp: bool,
+    /// The statement was cut short by our own cancel (enough rows): its
+    /// transaction is aborted, back to the savepoint.
+    cut: bool,
 }
 
 /// Statements PostgreSQL won't run inside a transaction.
@@ -86,7 +89,7 @@ impl Pg {
                 (client, Some(tls))
             }
         };
-        let mut s = Self { rt, client, notes, tls, in_tx: false, sp: false };
+        let mut s = Self { rt, client, notes, tls, in_tx: false, sp: false, cut: false };
         if spec.read_only {
             s.simple("SET default_transaction_read_only = on").ok();
         }
@@ -206,6 +209,7 @@ impl Session for Pg {
         let client = &self.client;
         let cancel = client.cancel_token();
         let tls = self.tls.clone();
+        let cut_short = std::cell::Cell::new(false);
         let result: Result<(Option<Table>, Option<u64>), tokio_postgres::Error> = self.rt.block_on(async {
             let stream = client.simple_query_raw(sql).await?;
             futures_util::pin_mut!(stream);
@@ -216,7 +220,10 @@ impl Session for Pg {
                 let m = match m {
                     Ok(m) => m,
                     // The cancel we sent once the limit was reached.
-                    Err(e) if cut && e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) => break,
+                    Err(e) if cut && e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) => {
+                        cut_short.set(true);
+                        break;
+                    }
                     Err(e) => return Err(e),
                 };
                 match m {
@@ -248,6 +255,22 @@ impl Session for Pg {
             }
             Ok((table, count))
         });
+        self.cut = cut_short.get();
+        // Cut short, but the query ended before our cancel got there: the
+        // cancel may still land on the next statement. A probe takes it.
+        let sent = matches!(&result, Ok((Some(t), _)) if t.more);
+        if sent && !self.cut {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            for _ in 0..3 {
+                match self.rt.block_on(self.client.simple_query("SELECT 1")) {
+                    Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) => {
+                        // Taken here; inside a transaction it's aborted now.
+                        self.cut = true;
+                    }
+                    _ => break,
+                }
+            }
+        }
         while let Ok(n) = self.notes.try_recv() {
             notes(n);
         }
@@ -477,11 +500,14 @@ impl Session for Pg {
             _ => {}
         }
         if std::mem::take(&mut self.sp) {
-            if !ok {
+            // Failed, or cut short by our cancel (which aborts it too).
+            let undo = !ok || std::mem::take(&mut self.cut);
+            if undo || self.simple("RELEASE SAVEPOINT zapros_stmt").is_err() {
                 self.simple("ROLLBACK TO SAVEPOINT zapros_stmt").ok();
+                self.simple("RELEASE SAVEPOINT zapros_stmt").ok();
             }
-            self.simple("RELEASE SAVEPOINT zapros_stmt").ok();
         }
+        self.cut = false;
     }
 
     fn set_auto(&mut self, on: bool) {
