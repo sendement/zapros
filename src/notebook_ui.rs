@@ -78,7 +78,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let accent = crate::editor::rgb(app.ws().color);
     let dark = ui.visuals().dark_mode;
     let focus = app.rt.get(&tab.id).and_then(|r| r.cell_focus.clone());
-    let md_edit = app.rt.get(&tab.id).and_then(|r| r.md_edit.clone());
+    // Markdown cells being edited (the rest shown), each until switched back.
+    let md_edit = app.rt.get(&tab.id).map(|r| r.md_edit.clone()).unwrap_or_default();
     let mut new_focus: Option<String> = None;
     let mut md_now = md_edit.clone();
     let n = nb.cells.len();
@@ -106,6 +107,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, if narrow { "MD" } else { "Markdown" })] {
                         if ui.selectable_label(cell.kind == k, name).clicked() && cell.kind != k {
                             ops.push(Op::Kind(i, k));
+                        }
+                    }
+                    if cell.kind == CellKind::Markdown {
+                        // Shown or its text being edited.
+                        ui.separator();
+                        let editing = md_now.contains(&cell.id);
+                        if ui.selectable_label(!editing, t("Просмотр", "View")).on_hover_text(t("Показать оформленным   Esc", "Show it formatted   Esc")).clicked() {
+                            md_now.remove(&cell.id);
+                        }
+                        if ui.selectable_label(editing, t("Правка", "Edit")).on_hover_text(t("Редактировать текст (или двойной щелчок по нему)", "Edit the text (or double-click it)")).clicked() && !editing {
+                            md_now.insert(cell.id.clone());
+                            ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), cell.id.clone()));
                         }
                     }
                     if cell.kind == CellKind::Sql {
@@ -245,7 +258,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         }
                     }
                     CellKind::Markdown => {
-                        if md_edit.as_deref() == Some(cell.id.as_str()) {
+                        if md_edit.contains(&cell.id) {
                             let mut text = cell.text.clone();
                             let lines = text.lines().count().max(3);
                             let r = ui.add(egui::TextEdit::multiline(&mut text).id(egui::Id::new(("md", &cell.id))).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(lines).hint_text(t("# Заголовок, **жирный**, *курсив*, `код`, - список", "# Heading, **bold**, *italic*, `code`, - list")));
@@ -255,17 +268,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             if r.has_focus() {
                                 new_focus = Some(cell.id.clone());
                             }
-                            // Done: Esc, Ctrl+Enter, or a click away.
-                            if r.lost_focus() || (r.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::Enter)))) {
-                                md_now = None;
-                            } else if !r.has_focus() && md_now.as_deref() == Some(cell.id.as_str()) && ctx.memory(|m| m.focused().is_none()) {
+                            // Just switched to: the caret goes in.
+                            let want = egui::Id::new("md-focus");
+                            if ctx.data(|d| d.get_temp::<String>(want)).as_deref() == Some(cell.id.as_str()) {
                                 r.request_focus();
+                                ctx.data_mut(|d| d.remove::<String>(want));
+                            }
+                            // Done: Esc or Ctrl+Enter (or the switch).
+                            if r.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::Enter))) {
+                                md_now.remove(&cell.id);
+                                r.surrender_focus();
                             }
                         } else {
                             let r = ui.scope(|ui| markdown(ui, &cell.text)).response;
                             let r = ui.interact(r.rect, egui::Id::new(("md-view", &cell.id)), egui::Sense::click()).on_hover_text(t("Двойной щелчок — редактировать", "Double-click to edit"));
                             if r.double_clicked() || (cell.text.trim().is_empty() && r.clicked()) {
-                                md_now = Some(cell.id.clone());
+                                md_now.insert(cell.id.clone());
+                                ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), cell.id.clone()));
                                 new_focus = Some(cell.id.clone());
                             }
                         }
@@ -341,7 +360,7 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
     }
     let Some(nb) = app.tab_mut().notebook.as_mut() else { return };
     let mut focus = None;
-    let mut edit = None;
+    let mut edit: Option<String> = None;
     match op {
         Op::Add(at, kind) => {
             let c = Cell { kind, ..Default::default() };
@@ -396,8 +415,9 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
     if focus.is_some() {
         rt.cell_focus = focus;
     }
-    if edit.is_some() {
-        rt.md_edit = edit;
+    if let Some(id) = edit {
+        rt.md_edit.insert(id.clone());
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), id));
     }
     app.touch();
 }

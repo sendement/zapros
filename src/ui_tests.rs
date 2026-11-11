@@ -1019,3 +1019,45 @@ fn notebook_scrolled_keeps_shades_inside() {
     }
     assert!(differ < 50, "{differ} pixels changed over the notebook");
 }
+
+#[test]
+fn notebook_markdown_view_edit_switch() {
+    let script = "-- %% [markdown]\n-- # Отчёт\n--\n-- первый **жирный** абзац\n-- %%\nselect 1;\n";
+    let (mut h, _g) = harness("nb-md", script, false);
+    h.state_mut().toggle_notebook();
+    for _ in 0..2 {
+        h.step();
+    }
+    let tab = h.state().tab().id.clone();
+    let cell = h.state().tab().notebook.as_ref().unwrap().cells[0].id.clone();
+    let editing = |h: &Harness<'static, App>| h.state().rt.get(&tab).is_some_and(|r| r.md_edit.contains(&cell));
+    assert!(!editing(&h));
+    h.get_by_label("Правка").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(editing(&h), "the switch opens the text");
+    shot(&mut h, "nb-md-edit");
+    // Typed into (the caret went in by itself).
+    key(&mut h, egui::Key::End, egui::Modifiers::COMMAND);
+    type_text(&mut h, "\nещё строка");
+    for _ in 0..2 {
+        h.step();
+    }
+    assert!(h.state().tab().notebook.as_ref().unwrap().cells[0].text.ends_with("ещё строка"), "{}", h.state().tab().notebook.as_ref().unwrap().cells[0].text);
+    // A click elsewhere doesn't close it; the switch does.
+    h.get_by_label_contains("Выполнить все").hover();
+    h.step();
+    let away = egui::pos2(900.0, 700.0);
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    assert!(editing(&h), "still edited after a click away");
+    h.get_by_label("Просмотр").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(!editing(&h), "back to the formatted view");
+    shot(&mut h, "nb-md-view");
+}

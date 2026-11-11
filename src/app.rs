@@ -150,9 +150,9 @@ pub struct TabRt {
     /// Column orders set by hand, by the columns' names (kept for the next
     /// runs giving the same columns).
     pub col_orders: HashMap<String, Vec<usize>>,
-    /// A notebook: the cell last edited, the Markdown cell being edited.
+    /// A notebook: the cell last edited, the Markdown cells being edited.
     pub cell_focus: Option<String>,
-    pub md_edit: Option<String>,
+    pub md_edit: std::collections::BTreeSet<String>,
     pub run: Option<Running>,
     pub issues: Vec<Issue>,
     pub check_key: u64,

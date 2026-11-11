@@ -83,7 +83,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Notebooks**: any tab can be shown as a notebook (📓 on the toolbar):
   cells of SQL or Markdown, one under another, each SQL cell with results
   of its own (batches, totals, export — as a tab's). Outputs live only in
-  memory; a cell's 📌 keeps its output in the session. A cell that is only
+  memory; a cell's 📌 keeps its output in the session. A Markdown cell's
+  header switches it between View and Edit (or double-click its text; Esc
+  or Ctrl+Enter go back), several may be open at once. A cell that is only
   a `WITH` lends its CTEs to the cells below: before a cell runs, the CTEs
   it uses (and the ones those use) are put into its own `WITH` — one
   `WITH`, nothing it doesn't use; run alone, a WITH cell shows its last CTE.
