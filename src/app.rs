@@ -1347,6 +1347,7 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(500));
             }
         }
+        crate::ui::hand_cursor(&ctx);
         if self.dirty && self.last_save.elapsed() > Duration::from_secs(self.settings.autosave_secs.max(1)) {
             self.save_session();
         }

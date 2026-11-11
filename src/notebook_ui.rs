@@ -82,6 +82,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let mut new_focus: Option<String> = None;
     let mut md_now = md_edit.clone();
     let n = nb.cells.len();
+    // (The notebook's scroll, as egui names it: moved along when an output's
+    // top edge is pulled.)
+    let nb_scroll = ui.make_persistent_id(egui::IdSalt::new(("notebook", &tab.id)));
+    let mut pull = 0.0f32;
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         for (i, cell) in nb.cells.iter().enumerate() {
             app.restore_cell(&tab.id, cell);
@@ -199,7 +203,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             // Being dragged: the height as the drag goes.
                             let drag_id = egui::Id::new(("cell-out-h", &cell.id));
                             let h = ctx.data(|d| d.get_temp::<f32>(drag_id)).unwrap_or(if cell.out_h > 0.0 { cell.out_h } else { usual });
-                            ui.add_space(4.0);
+                            // Its top edge: pulled up, the output grows upward (the
+                            // notebook scrolls along so the edge stays under the mouse),
+                            // as the results panel's edge does.
+                            let (edge, top) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
+                            let top = top.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода", "Drag: the output's height"));
+                            let c = if top.hovered() || top.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
+                            ui.painter().hline(edge.x_range().shrink(4.0), edge.center().y, Stroke::new(if top.hovered() || top.dragged() { 2.0 } else { 1.0 }, c));
+                            if top.dragged() {
+                                let dy = top.drag_delta().y;
+                                let nh = (h - dy).clamp(80.0, 1600.0);
+                                ctx.data_mut(|d| d.insert_temp(drag_id, nh));
+                                // (Grown by so much: everything moves up by as much.)
+                                pull += nh - h;
+                            }
+                            if top.drag_stopped() {
+                                ops.push(Op::Height(i, h));
+                                ctx.data_mut(|d| d.remove::<f32>(drag_id));
+                            }
                             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
                                 ui.set_min_height(h);
                                 ui.set_max_height(h);
@@ -270,6 +291,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         });
         ui.add_space(40.0);
     });
+    if pull != 0.0 {
+        if let Some(mut st) = egui::scroll_area::State::load(ui.ctx(), nb_scroll) {
+            st.offset.y = (st.offset.y + pull).max(0.0);
+            st.store(ui.ctx(), nb_scroll);
+        }
+    }
     {
         let rt = app.rt.entry(tab.id.clone()).or_default();
         if new_focus.is_some() {

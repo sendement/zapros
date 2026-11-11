@@ -90,8 +90,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   Saved as SQL with `-- %%` / `-- %% [markdown]` marks (such files open as
   notebooks); "To plain SQL" opens it as an ordinary script, as it is or
   with every statement standalone (CTEs put in). Cells fold to their first
-  line (one by one or all), an output's height is dragged by the grip
-  under it (double-click: back to the usual).
+  line (one by one or all), an output's height is dragged by its top edge
+  (pulled up, as the results panel's) or by the grip under it
+  (double-click: back to the usual).
+- **Pointer**: a pointing hand over everything that clicks (buttons,
+  arrows, tabs, the sort squares); scroll bars always shown.
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,

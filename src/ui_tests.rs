@@ -913,3 +913,54 @@ fn wide_table_scrolls_sideways() {
     }
     shot(&mut h, "vbar-bottom");
 }
+
+#[test]
+fn notebook_output_pulled_up_and_hand_cursor() {
+    let script = "-- %% [markdown]\n-- # Заголовок\n--\n-- текст\n-- %%\nselect id, note, total from orders;\n-- %%\nselect 1;\n";
+    let (mut h, _g) = harness("nb-pull", script, false);
+    h.state_mut().toggle_notebook();
+    h.step();
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, None);
+    settle(&mut h);
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "nb-pull-before");
+    let label = h.get_by_label_contains("(500+)").rect();
+    // The edge sits just over the output's tabs.
+    let edge = egui::pos2(label.center().x + 300.0, label.top() - 6.0);
+    let drag = |h: &mut Harness<'static, App>, from: egui::Pos2, to: egui::Pos2| {
+        h.input_mut().events.push(egui::Event::PointerMoved(from));
+        h.step();
+        h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        for k in 1..=5 {
+            h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 5.0)));
+            h.step();
+        }
+        h.input_mut().events.push(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.step();
+    };
+    drag(&mut h, edge, edge - egui::vec2(0.0, 100.0));
+    let out_h = h.state().tab().notebook.as_ref().unwrap().cells[1].out_h;
+    // The edge went up with the mouse (the notebook scrolled along).
+    let moved = h.get_by_label_contains("(500+)").rect();
+    assert!((moved.top() - (label.top() - 100.0)).abs() < 12.0, "{moved:?} vs {label:?}");
+    assert!((out_h - 400.0).abs() < 12.0, "pulled up by 100 from 300: {out_h}");
+    shot(&mut h, "nb-pull-after");
+    // A hand over buttons, the arrow over the table's cells.
+    let cursor = |h: &mut Harness<'static, App>, at: egui::Pos2| {
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.step();
+        h.step();
+        h.output().platform_output.cursor_icon
+    };
+    let run_all = h.get_by_label_contains("Выполнить все").rect().center();
+    assert_eq!(cursor(&mut h, run_all), egui::CursorIcon::PointingHand);
+    let num = h.get_by_label_contains("(500+)").rect().center();
+    assert_eq!(cursor(&mut h, num), egui::CursorIcon::PointingHand, "the output's tab");
+    let cell = h.get_by_label_contains("(500+)").rect().center() + egui::vec2(0.0, 150.0);
+    assert_eq!(cursor(&mut h, cell), egui::CursorIcon::Default, "a table cell");
+}

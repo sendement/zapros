@@ -45,7 +45,20 @@ pub fn standard(s: &mut egui::Style) {
     s.spacing.combo_width = 120.0;
     // Scroll bars in room of their own (not over the text when they grow
     // under the pointer).
-    s.spacing.scroll = egui::style::ScrollStyle { bar_width: 8.0, bar_inner_margin: 3.0, ..egui::style::ScrollStyle::solid() };
+    // Always seen (solid() hides the handle until the mouse is over the area),
+    // in the text's colour so it shows on light themes as well.
+    s.spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        bar_inner_margin: 3.0,
+        foreground_color: true,
+        dormant_background_opacity: 0.5,
+        active_background_opacity: 0.7,
+        interact_background_opacity: 0.9,
+        dormant_handle_opacity: 0.28,
+        active_handle_opacity: 0.4,
+        interact_handle_opacity: 0.6,
+        ..egui::style::ScrollStyle::solid()
+    };
     let v = &mut s.visuals;
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = r;
@@ -871,4 +884,31 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         app.rt.insert(tab_id, rt);
     });
     actions
+}
+
+/// A pointing hand over whatever clicks (buttons, arrows, tabs, squares…),
+/// when nothing chose a cursor of its own. Not over the table's cells
+/// ([`keep_arrow`]), scroll bars or big areas.
+pub fn hand_cursor(ctx: &egui::Context) {
+    if ctx.output(|o| o.cursor_icon) != egui::CursorIcon::Default {
+        return;
+    }
+    let pass = ctx.cumulative_pass_nr();
+    if ctx.data(|d| d.get_temp::<u64>(egui::Id::new("keep-arrow"))) == Some(pass) {
+        return;
+    }
+    let hovered: Vec<egui::Id> = ctx.interaction_snapshot(|s| s.hovered.iter().copied().collect());
+    let clicky = hovered.iter().filter_map(|&id| ctx.read_response(id)).any(|r| {
+        let (w, h) = (r.rect.width(), r.rect.height());
+        r.enabled() && r.sense.senses_click() && w * h < 400.0 * 120.0 && (!r.sense.senses_drag() || (h >= 16.0 && h <= 44.0 && w > h))
+    });
+    if clicky {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
+/// The arrow stays (this pass) though the thing under it clicks.
+pub fn keep_arrow(ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("keep-arrow"), pass));
 }

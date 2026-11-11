@@ -728,6 +728,9 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             hit = Some(ui.interact(ui.max_rect(), ui.id().with("cell"), egui::Sense::click()));
                         });
                         let Some(resp) = hit else { continue };
+                        if resp.hovered() {
+                            crate::ui::keep_arrow(&resp.ctx);
+                        }
                         if resp.clicked() {
                             sel = Some((ri, c));
                             clear_picks = true;
@@ -850,12 +853,20 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             } else {
                 ui.data_mut(|d| d.remove_temp::<f32>(grab_id));
             }
-            let w = &ui.visuals().widgets;
-            let fill = if r.dragged() || r.is_pointer_button_down_on() { w.active.bg_fill } else if r.hovered() { w.hovered.bg_fill } else { w.inactive.bg_fill };
+            // (As egui's own bars are styled.)
+            let sc = ui.spacing().scroll;
+            let over = ui.ctx().pointer_hover_pos().is_some_and(|q| table_rect.union(track).contains(q));
+            let (bg, handle) = if r.dragged() || r.hovered() {
+                (sc.interact_background_opacity, sc.interact_handle_opacity)
+            } else if over {
+                (sc.active_background_opacity, sc.active_handle_opacity)
+            } else {
+                (sc.dormant_background_opacity, sc.dormant_handle_opacity)
+            };
             let p = ui.painter();
             let rad = (track.width() / 2.0) as u8;
-            p.rect_filled(track, rad, ui.visuals().extreme_bg_color);
-            p.rect_filled(at(st.offset.y), rad, fill);
+            p.rect_filled(track, rad, ui.visuals().extreme_bg_color.gamma_multiply(bg));
+            p.rect_filled(at(st.offset.y), rad, ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(handle));
         }
     }
     // A header being dragged: where it would land.
