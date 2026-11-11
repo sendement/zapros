@@ -499,6 +499,9 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             egui::ScrollArea::horizontal().id_salt(("res-h", tab, i)).auto_shrink([false, false]).show(ui, |ui| {
             // (A little room inside the rounded edge.)
             egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 3 }).show(ui, |ui| {
+            // (Rounding at fractional scales made it a fraction wider than
+            // the room: a scroll bar for nothing.)
+            ui.set_max_width((ui.available_width() - 0.5).floor());
             // A picked row's colour (egui fills it gapless).
             ui.visuals_mut().selection.bg_fill = row_fill;
             ui.visuals_mut().selection.stroke.color = ui.visuals().strong_text_color();
@@ -519,11 +522,12 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     let mut head_rect = egui::Rect::NOTHING;
                     h.col(|ui| {
                         if picked.contains(&c) || sel_col == Some(c) {
-                            let cell = ui.max_rect().expand2(half).round_ui();
+                            // Down to the header's line (as it's put below), not above the
+                            // table's edge, not past what's in view.
+                            let m = ui.max_rect();
+                            let cell = egui::Rect::from_min_max(egui::pos2(m.left() - half.x, m.top()), egui::pos2(m.right() + half.x, m.bottom().max(m.top() + 24.0) + 2.0)).round_ui();
                             let mut p = ui.painter().clone();
-                            // (Not above the header: the table's edge is there.)
-                            let mut clip = ui.clip_rect().expand2(half);
-                            clip.min.y = ui.max_rect().top();
+                            let clip = egui::Rect::from_x_y_ranges(view_clip.x_range(), cell.y_range());
                             p.set_clip_rect(cell.intersect(clip));
                             if sel_col == Some(c) {
                                 p.rect_filled(cell, 0.0, head_sel);
@@ -685,6 +689,9 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             })
             .body(|mut body| {
                 body_clip = body.ui_mut().clip_rect();
+                // Fills stay inside what's in view (not over the header or past
+                // the right edge).
+                let vp = body_clip.intersect(view_clip);
                 body.rows(20.0, order.len(), |mut row| {
                     let ri = order[row.index()];
                     row.set_selected(rows_picked.contains(&ri));
@@ -698,7 +705,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                             // Gapless, like the stripes: halfway into the gaps.
                             let cell = ui.max_rect().expand2(half).round_ui();
                             let mut p = ui.painter().clone();
-                            p.set_clip_rect(cell.intersect(ui.clip_rect().expand2(half)));
+                            p.set_clip_rect(cell.intersect(vp));
                             let val = rows[ri].get(c).and_then(|x| x.as_ref());
                             // NULL on a shade of its own; the chosen cell filled.
                             if val.is_none() {
@@ -771,10 +778,10 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                 p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), ui.visuals().weak_text_color());
                 p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));
             }
-            for (ri, cell, clip) in pins {
+            for (ri, cell, _) in pins {
                 let r = shift(cell);
                 // (Only the body's top and bottom: sideways it's the view.)
-                let rows_clip = egui::Rect::from_x_y_ranges(view_clip.x_range(), clip.expand2(half).y_range());
+                let rows_clip = egui::Rect::from_x_y_ranges(view_clip.x_range(), body_clip.y_range());
                 let shown = r.intersect(rows_clip).intersect(view_clip);
                 if !shown.is_positive() {
                     continue;
