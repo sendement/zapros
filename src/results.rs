@@ -144,6 +144,12 @@ fn log_lines(ui: &mut egui::Ui, lines: &[crate::app::LogLine], goto: &mut Option
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let tab_id = app.tab().id.clone();
+    panel_for(app, ui, &tab_id);
+}
+
+/// The results of a tab, or of a notebook's cell (`key`).
+pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
+    let tab_id = key.to_string();
     let mut rt = app.rt.remove(&tab_id).unwrap_or_default();
     if let Pane::Result(i) = rt.shown {
         if i >= rt.results.len() {

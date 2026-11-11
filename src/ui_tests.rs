@@ -714,3 +714,49 @@ fn results_in_batches_export_and_totals() {
     assert!(third.starts_with("total,note,id\n37.5,,2001\n"), "{}", &third[..40]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn notebook_cells_with_and_export() {
+    let text = "-- %% [markdown]\n-- # Крупные заказы\n--\n-- Заказы **дороже 900** и *три* самых больших.\n-- %%\nwith big as (select * from orders where total > 900)\n-- %%\nselect count(*) as n from big;\n-- %%\nwith top as (select * from big order by total desc limit 3)\nselect id, total from top;\n";
+    let (mut h, _g) = harness("notebook", text, false);
+    h.state_mut().toggle_notebook();
+    h.step();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    assert_eq!(cells.len(), 4);
+    let tab = h.state().tab().id.clone();
+    // Everything, in order: the WITH cell only lends its CTE.
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, None);
+    settle(&mut h);
+    let key = |i: usize| crate::app::App::cell_key(&tab, &cells[i]);
+    let want = (1..=3000u64).filter(|x| ((x * 37) % 1000) as f64 + 0.5 > 900.0).count().to_string();
+    let rt2 = &h.state().rt[&key(2)];
+    assert_eq!(rt2.results[0].table.rows[0][0].as_deref(), Some(want.as_str()), "{:?}", rt2.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    let rt3 = &h.state().rt[&key(3)];
+    assert_eq!(rt3.results[0].table.rows.len(), 3, "{:?}", rt3.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    assert!(h.state().rt.get(&key(1)).is_none_or(|r| r.results.is_empty()), "a WITH cell gives nothing in a run of all");
+    // Run alone, the WITH cell shows its CTE.
+    h.state_mut().run_cells(&ctx, Some(cells[1].clone()));
+    settle(&mut h);
+    assert!(!h.state().rt[&key(1)].results.is_empty());
+    shot(&mut h, "notebook");
+    // Kept on disk only when pinned.
+    assert!(h.state().tab().notebook.as_ref().unwrap().cells[2].saved.is_none());
+    h.state_mut().pin_cell(&cells[2]);
+    let saved = h.state().tab().notebook.as_ref().unwrap().cells[2].saved.clone().unwrap();
+    assert_eq!(saved.tables[0].rows[0][0].as_deref(), Some(want.as_str()));
+    // As one text and back: the marks, the kept output stays.
+    h.state_mut().toggle_notebook();
+    h.step();
+    assert!(h.state().tab().text.contains("-- %%\nselect count(*) as n from big;"), "{}", h.state().tab().text);
+    h.state_mut().toggle_notebook();
+    h.step();
+    assert!(h.state().tab().notebook.as_ref().unwrap().cells[2].saved.is_some(), "the kept output survives the round trip");
+    // Plain SQL: each statement with its CTEs.
+    h.state_mut().export_notebook(true);
+    h.step();
+    let sql = h.state().tab().text.clone();
+    assert!(sql.starts_with("-- # Крупные заказы"), "{sql}");
+    assert!(sql.contains("WITH big as (select * from orders where total > 900)\nselect count(*) as n from big;"), "{sql}");
+    assert!(sql.contains("WITH big as (select * from orders where total > 900),\ntop as ("), "{sql}");
+}

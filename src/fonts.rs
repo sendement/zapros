@@ -48,6 +48,13 @@ pub fn install(ctx: &egui::Context) {
             }
         }
     }
+    // Bold text (a notebook's Markdown): the sans font's bold, then the rest.
+    let mut sans_bold = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    if let Some(f) = fc_match("sans-serif:bold") {
+        add(&mut defs, "sys-sans-bold", f);
+        sans_bold.insert(0, "sys-sans-bold".into());
+    }
+    defs.families.insert(FontFamily::Name("bold".into()), sans_bold);
     // And the other way: shapes (● ▦ ▸ ⋈) the sans font lacks.
     if defs.font_data.contains_key("sys-mono") {
         defs.families.entry(FontFamily::Proportional).or_default().push("sys-mono".into());

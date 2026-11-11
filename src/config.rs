@@ -207,17 +207,96 @@ pub struct Tab {
     pub other: Option<String>,
     /// The body is on screen (else the specification).
     pub on_body: bool,
+    /// As a notebook (cells), when on.
+    pub notebook: Option<Notebook>,
+}
+
+/// A tab as a notebook: cells of SQL or Markdown.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notebook {
+    /// Shown as cells (off: as one text, the cells kept for their saved
+    /// outputs).
+    pub on: bool,
+    pub cells: Vec<Cell>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CellKind {
+    #[default]
+    Sql,
+    Markdown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Cell {
+    pub id: String,
+    pub kind: CellKind,
+    pub text: String,
+    /// What it gave, kept by hand (the pin button) — nothing else is
+    /// written to disk.
+    pub saved: Option<Saved>,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self { id: crate::db::new_id(), kind: CellKind::Sql, text: String::new(), saved: None }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Saved {
+    pub when: String,
+    pub tables: Vec<SavedTable>,
+    pub output: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedTable {
+    pub sql: String,
+    /// (name, type, numeric).
+    pub cols: Vec<(String, String, bool)>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub more: bool,
+}
+
+impl Notebook {
+    pub fn pieces(&self) -> Vec<crate::sql::notebook::Piece> {
+        use crate::sql::notebook::{Kind, Piece};
+        self.cells.iter().map(|c| Piece { kind: if c.kind == CellKind::Markdown { Kind::Markdown } else { Kind::Sql }, text: c.text.clone() }).collect()
+    }
+
+    /// Cells from a text (its marks, or a cell per statement); saved
+    /// outputs of cells with the same text kept.
+    pub fn from_text(text: &str, d: crate::sql::Dialect, old: &[Cell]) -> Self {
+        use crate::sql::notebook::Kind;
+        let cells = crate::sql::notebook::parse(text, d)
+            .into_iter()
+            .map(|p| {
+                let kind = if p.kind == Kind::Markdown { CellKind::Markdown } else { CellKind::Sql };
+                let was = old.iter().find(|c| c.kind == kind && c.text == p.text);
+                Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), text: p.text }
+            })
+            .collect();
+        Self { on: true, cells }
+    }
 }
 
 impl Default for Tab {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false }
+        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false, notebook: None }
     }
 }
 
 impl Tab {
     /// Both parts of a package, specification first (as saved / run whole).
     pub fn full_text(&self) -> String {
+        if let Some(nb) = self.notebook.as_ref().filter(|n| n.on) {
+            return crate::sql::notebook::render(&nb.pieces());
+        }
         match &self.other {
             None => self.text.clone(),
             Some(o) if self.on_body => format!("{o}\n{}", self.text),
@@ -252,6 +331,28 @@ impl Tab {
             self.text = self.full_text();
             self.other = None;
             self.on_body = false;
+        }
+    }
+
+    /// Whether it's shown as a notebook.
+    pub fn is_notebook(&self) -> bool {
+        self.notebook.as_ref().is_some_and(|n| n.on)
+    }
+
+    /// As a notebook (on) or as one text (off).
+    pub fn set_notebook(&mut self, on: bool, d: crate::sql::Dialect) {
+        if on == self.is_notebook() {
+            return;
+        }
+        if on {
+            self.join_parts();
+            let old = self.notebook.take().map(|n| n.cells).unwrap_or_default();
+            self.notebook = Some(Notebook::from_text(&self.text, d, &old));
+        } else {
+            self.text = self.full_text();
+            if let Some(n) = self.notebook.as_mut() {
+                n.on = false;
+            }
         }
     }
 

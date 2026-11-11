@@ -74,6 +74,16 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Tabs**: a script tab's ✕ always shown or only under the pointer (the
   tab grows to it) — in the settings; toolbar buttons in their colours (run
   green, stop red, plan blue…).
+- **Notebooks**: any tab can be shown as a notebook (📓 on the toolbar):
+  cells of SQL or Markdown, one under another, each SQL cell with results
+  of its own (batches, totals, export — as a tab's). Outputs live only in
+  memory; a cell's 📌 keeps its output in the session. A cell that is only
+  a `WITH` lends its CTEs to the cells below: before a cell runs, the CTEs
+  it uses (and the ones those use) are put into its own `WITH` — one
+  `WITH`, nothing it doesn't use; run alone, a WITH cell shows its last CTE.
+  Saved as SQL with `-- %%` / `-- %% [markdown]` marks (such files open as
+  notebooks); "To plain SQL" opens it as an ordinary script, as it is or
+  with every statement standalone (CTEs put in).
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,

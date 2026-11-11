@@ -544,7 +544,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\nselect (1 + 2";
                 let issues = crate::sql::check::check(&sample, Dialect::Postgres, None);
                 let snapshot = s.clone();
-                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[] };
+                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], rows: 30 };
                 let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
                 let job = crate::editor::layout(&sample, &cx, None, snapshot.font_size, mono_bold);
                 egui::Frame::group(ui.style()).show(ui, |ui| {

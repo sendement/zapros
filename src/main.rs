@@ -8,6 +8,7 @@ mod editor;
 mod export;
 mod fonts;
 mod i18n;
+mod notebook_ui;
 mod outline_ui;
 mod results;
 mod secrets;

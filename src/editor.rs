@@ -85,6 +85,8 @@ pub struct Ctx<'a> {
     /// Where the server said a statement failed.
     pub server_err: Option<&'a (Range<usize>, String)>,
     pub rels: &'a [Relation],
+    /// Rows it takes at least (a notebook's cell: as many as its text has).
+    pub rows: usize,
 }
 
 pub struct Out {
@@ -600,9 +602,9 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         .code_editor()
         .lock_focus(true)
         .desired_width(f32::INFINITY)
-        .desired_rows(30)
+        .desired_rows(cx.rows)
         .frame(egui::Frame::NONE)
-        .margin(egui::Margin { left: 0, right: 8, top: 4, bottom: 40 })
+        .margin(egui::Margin { left: 0, right: 8, top: 4, bottom: if cx.rows < 30 { 4 } else { 40 } })
         .layouter(&mut layouter)
         .show(ui)
         })

@@ -711,6 +711,13 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             ui.label(crate::app::fmt_took(d));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let nb = app.tab().is_notebook();
+            if ui.add(egui::Button::selectable(nb, if compact { "📓".to_string() } else { format!("📓 {}", t("Блокнот", "Notebook")) })).on_hover_text(t("Вкладка как блокнот: независимые блоки SQL и Markdown, у каждого свой вывод. Выключить — снова одно полотно", "The tab as a notebook: separate SQL and Markdown cells, each with its own output. Off: one text again")).clicked() {
+                app.toggle_notebook();
+            }
+            if nb {
+                return;
+            }
             let on = app.session.outline;
             if ui.add(egui::Button::selectable(on, if compact { "☰".to_string() } else { format!("☰ {}", t("Структура", "Structure")) })).on_hover_text(t("Панель структуры: функции, процедуры, типы, запросы   Ctrl+Shift+O", "Structure panel: functions, procedures, types, statements   Ctrl+Shift+O")).clicked() {
                 app.session.outline = !on;
@@ -788,6 +795,11 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.add_space(3.0);
         toolbar(app, ui);
         ui.add_space(2.0);
+        // A notebook: its cells instead of the text and the results.
+        if app.tab().is_notebook() {
+            actions = crate::notebook_ui::show(app, ui);
+            return;
+        }
         if app.tab().other.is_some() {
             crate::outline_ui::parts_bar(app, ui);
             ui.add_space(2.0);
@@ -832,7 +844,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let part = tab.on_body;
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
-        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels };
+        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows: 30 };
         let out = egui::ScrollArea::both()
             .id_salt(("editor-scroll", &tab_id, tab.on_body))
             .auto_shrink([false, false])

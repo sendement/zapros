@@ -148,6 +148,9 @@ pub struct TabRt {
     /// Column orders set by hand, by the columns' names (kept for the next
     /// runs giving the same columns).
     pub col_orders: HashMap<String, Vec<usize>>,
+    /// A notebook: the cell last edited, the Markdown cell being edited.
+    pub cell_focus: Option<String>,
+    pub md_edit: Option<String>,
     pub run: Option<Running>,
     pub issues: Vec<Issue>,
     pub check_key: u64,
@@ -564,7 +567,13 @@ impl App {
                 }
                 self.new_tab(title, text, None);
                 self.tab_mut().path = Some(path.to_path_buf());
-                self.tab_mut().split_package();
+                // Saved as a notebook (its -- %% marks): opened as one.
+                if sql::notebook::is_notebook(&self.tab().text) {
+                    let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+                    self.tab_mut().set_notebook(true, d);
+                } else {
+                    self.tab_mut().split_package();
+                }
             }
             Err(e) => self.toast(format!("{}: {e}", path.display())),
         }
@@ -613,7 +622,136 @@ impl App {
         (!stmts.is_empty()).then_some((conn, stmts, d))
     }
 
+    /// A notebook cell's own state (results, editor…), apart from its tab's.
+    pub fn cell_key(tab: &str, cell: &str) -> String {
+        format!("{tab}#{cell}")
+    }
+
+    /// Runs notebook cells of the current tab (None: all of them, in
+    /// order); each statement gets the CTEs it uses from WITH cells above.
+    pub fn run_cells(&mut self, ctx: &egui::Context, only: Option<String>) {
+        let tab = self.tab().clone();
+        let Some(nb) = tab.notebook.as_ref() else { return };
+        let Some(conn) = self.tab_conn(self.ws(), &tab) else {
+            self.toast(t("Выберите подключение для вкладки", "Pick a connection for the tab"));
+            return;
+        };
+        let d = self.dialect_of(Some(&conn));
+        let mut known = sql::notebook::Known::default();
+        let mut todo: Vec<(String, Vec<Stmt>)> = Vec::new();
+        for c in nb.cells.iter().filter(|c| c.kind == crate::config::CellKind::Sql) {
+            let mut stmts = Vec::new();
+            for r in sql::split(&c.text, d, false) {
+                let s = sql::runnable(&c.text[r.clone()], d);
+                if s.is_empty() {
+                    continue;
+                }
+                let only_with = sql::notebook::parse_with(&s, d).is_some_and(|w| w.main.is_empty());
+                // A WITH cell run on its own shows its last CTE; run with
+                // the rest, it only lends its CTEs to the cells below.
+                if only.is_some() || !only_with {
+                    stmts.push(Stmt { sql: sql::notebook::glue(&s, &known, d), at: r.start });
+                }
+                known.learn(&s, d);
+            }
+            let wanted = only.as_ref().is_none_or(|o| *o == c.id);
+            if wanted && !stmts.is_empty() {
+                todo.push((c.id.clone(), stmts));
+            }
+            if only.as_ref().is_some_and(|o| *o == c.id) {
+                break;
+            }
+        }
+        if todo.is_empty() {
+            if only.is_some() {
+                self.toast(t("Нечего выполнять", "Nothing to run"));
+            }
+            return;
+        }
+        for (cell, stmts) in todo {
+            let key = Self::cell_key(&tab.id, &cell);
+            if self.rt.get(&key).is_some_and(|r| r.run.is_some()) {
+                continue;
+            }
+            self.rt.entry(key.clone()).or_default().output.clear();
+            self.dispatch(ctx, key, stmts, &conn);
+        }
+    }
+
+    /// The cell's results and output, kept in the notebook (written to
+    /// disk with the session).
+    pub fn pin_cell(&mut self, cell: &str) {
+        let key = Self::cell_key(&self.tab().id, cell);
+        let Some(rt) = self.rt.get(&key) else { return };
+        let saved = crate::config::Saved {
+            when: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            tables: rt
+                .results
+                .iter()
+                .map(|v| crate::config::SavedTable {
+                    sql: v.sql.clone(),
+                    cols: v.table.cols.iter().map(|c| (c.name.clone(), c.ty.clone(), c.numeric)).collect(),
+                    rows: v.table.rows.clone(),
+                    more: v.table.more,
+                })
+                .collect(),
+            output: rt.output.iter().map(|l| l.text.clone()).collect(),
+        };
+        if let Some(c) = self.tab_mut().notebook.as_mut().and_then(|n| n.cells.iter_mut().find(|c| c.id == cell)) {
+            c.saved = Some(saved);
+        }
+        self.touch();
+        self.toast(t("Вывод блока сохранён", "The cell's output is kept"));
+    }
+
+    /// A cell's saved output, shown when nothing's been run there yet.
+    pub fn restore_cell(&mut self, tab: &str, cell: &crate::config::Cell) {
+        let key = Self::cell_key(tab, &cell.id);
+        if self.rt.contains_key(&key) {
+            return;
+        }
+        let mut rt = TabRt::default();
+        if let Some(s) = &cell.saved {
+            for tb in &s.tables {
+                let table = Table { cols: tb.cols.iter().map(|(name, ty, numeric)| crate::db::Col { name: name.clone(), ty: ty.clone(), numeric: *numeric }).collect(), rows: tb.rows.clone(), more: tb.more };
+                rt.results.push(ResultView::new(tb.sql.clone(), table, Duration::ZERO, None));
+            }
+            rt.output = s.output.iter().map(|o| LogLine { when: s.when.clone(), kind: LogKind::Note, text: o.clone(), at: None }).collect();
+            rt.log.push(LogLine { when: s.when.clone(), kind: LogKind::Note, text: t("Сохранённый вывод", "Saved output").into(), at: None });
+            rt.shown = if rt.results.is_empty() { if rt.output.is_empty() { Pane::Messages } else { Pane::Output } } else { Pane::Result(0) };
+        }
+        self.rt.insert(key, rt);
+    }
+
+    /// The notebook as plain SQL, in a new tab.
+    pub fn export_notebook(&mut self, standalone: bool) {
+        let tab = self.tab().clone();
+        let Some(nb) = tab.notebook.as_ref() else { return };
+        let d = self.dialect_of(self.tab_conn(self.ws(), &tab).as_deref());
+        let text = sql::notebook::export(&nb.pieces(), d, standalone);
+        let title = format!("{} (SQL)", if tab.title.is_empty() { t("блокнот", "notebook") } else { tab.title.as_str() });
+        self.new_tab(Some(title), text, tab.conn.clone());
+    }
+
+    /// The current tab as a notebook or as one text.
+    pub fn toggle_notebook(&mut self) {
+        let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+        let on = !self.tab().is_notebook();
+        self.tab_mut().set_notebook(on, d);
+        self.touch();
+    }
+
     pub fn run(&mut self, ctx: &egui::Context, all: bool, explain: bool) {
+        // A notebook: the cell being edited, or every cell.
+        if self.tab().is_notebook() {
+            let focus = self.rt.get(&self.tab().id).and_then(|r| r.cell_focus.clone());
+            match (all, focus) {
+                (false, Some(c)) => self.run_cells(ctx, Some(c)),
+                (false, None) => self.toast(t("Выберите блок", "Pick a cell")),
+                (true, _) => self.run_cells(ctx, None),
+            }
+            return;
+        }
         let Some((conn, mut stmts, d)) = self.pick(all) else {
             if self.tab_conn(self.ws(), self.tab()).is_none() {
                 self.toast(t("Выберите подключение для вкладки", "Pick a connection for the tab"));
@@ -709,6 +847,24 @@ impl App {
 
     pub fn cancel(&mut self) {
         let id = self.tab().id.clone();
+        // A notebook's cells: each one running stops.
+        if self.tab().is_notebook() {
+            let prefix = format!("{id}#");
+            let running: Vec<String> = self.rt.iter().filter(|(k, r)| k.starts_with(&prefix) && r.run.is_some()).map(|(k, _)| k.clone()).collect();
+            let conns: Vec<String> = running.iter().filter_map(|k| self.rt[k].run.as_ref().map(|r| r.conn.clone())).collect();
+            for c in conns {
+                if let Some(l) = self.live.get(&c) {
+                    l.query.cancel();
+                }
+            }
+            if running.is_empty() {
+                let loading: Vec<(String, usize)> = self.rt.iter().filter(|(k, _)| k.starts_with(&prefix)).flat_map(|(k, r)| r.results.iter().enumerate().filter(|(_, v)| v.loading.is_some()).map(|(i, _)| (k.clone(), i)).collect::<Vec<_>>()).collect();
+                for (k, i) in loading {
+                    self.fetch_stop(&k, i);
+                }
+            }
+            return;
+        }
         // Nothing running: rows being loaded stop.
         if self.rt.get(&id).is_some_and(|r| r.run.is_none()) {
             let loading: Vec<usize> = self.rt[&id].results.iter().enumerate().filter(|(_, v)| v.loading.is_some()).map(|(i, _)| i).collect();
@@ -739,6 +895,16 @@ impl App {
     }
 
     pub fn format(&mut self) {
+        if self.tab().is_notebook() {
+            let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+            let o = self.settings.format;
+            let focus = self.rt.get(&self.tab().id).and_then(|r| r.cell_focus.clone());
+            if let Some(c) = self.tab_mut().notebook.as_mut().and_then(|n| n.cells.iter_mut().find(|c| Some(&c.id) == focus.as_ref() && c.kind == crate::config::CellKind::Sql)) {
+                c.text = sql::fmt::format(&c.text, d, o).trim_end().to_string();
+            }
+            self.touch();
+            return;
+        }
         let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
         let o = self.settings.format;
         let id = self.tab().id.clone();
