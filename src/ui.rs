@@ -618,8 +618,10 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         let label = |app: &App, c: &Option<String>| c.as_ref().and_then(|c| app.spec(c)).map_or(t("— подключение —", "— connection —").to_string(), |s| format!("{}  ·  {}", s.title(), s.kind.name()));
         let mut chosen: Option<Option<String>> = None;
         // Narrow: the buttons keep only their icons (names in the tips).
-        let compact = ui.available_width() < 1120.0;
-        let tiny = ui.available_width() < 780.0;
+        let compact = ui.available_width() < 1300.0;
+        let tiny = ui.available_width() < 900.0;
+        // Narrower still: auto-commit as a box alone.
+        let micro = ui.available_width() < 700.0;
         let lbl = |icon: &str, name: &str| if compact { icon.to_string() } else { format!("{icon} {name}") };
         let tx_lbl = |icon: &str, name: &str| if tiny { icon.to_string() } else { format!("{icon} {name}") };
         let tip = |name: &str, keys: &str| format!("{name}   {keys}");
@@ -686,7 +688,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 "Автокоммит: каждый запрос фиксируется сразу.\nВыключен — изменения копятся в транзакции до «Зафиксировать» или «Откатить».",
                 "Auto-commit: each statement is committed at once.\nOff: changes gather in a transaction until Commit or Roll back.",
             );
-            if ui.add_enabled(running.is_none() && app.live.contains_key(c), egui::Checkbox::new(&mut on, if tiny { t("Авто", "Auto") } else { t("Автокоммит", "Auto-commit") })).on_hover_text(auto_tip).on_disabled_hover_text(auto_tip).changed() {
+            if ui.add_enabled(running.is_none() && app.live.contains_key(c), egui::Checkbox::new(&mut on, if micro { "" } else if tiny { t("Авто", "Auto") } else { t("Автокоммит", "Auto-commit") })).on_hover_text(auto_tip).on_disabled_hover_text(auto_tip).changed() {
                 app.tx(c, crate::db::TxOp::Auto(on));
             }
             if !auto {

@@ -450,9 +450,13 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let picked = v.picked.clone();
     let rows = &v.table.rows;
     let size = egui::vec2(ui.available_width(), (ui.available_height() - footer_h).max(40.0));
+    // The header's own colour goes under it (set once its height's known).
+    let back = ui.painter().add(egui::Shape::Noop);
     let table_rect = ui
         .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
             // (Its id follows the columns' order: widths go with them.)
+            // (A little room inside the rounded edge.)
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 3 }).show(ui, |ui| {
             let mut tb = TableBuilder::new(ui).id_salt(("res", tab, i, view.clone())).striped(true).resizable(true).auto_shrink([false, false]).min_scrolled_height(0.0).cell_layout(Layout::left_to_right(Align::Center)).column(Column::exact(num_w));
             for w in &widths {
                 tb = tb.column(Column::initial(*w).at_least(30.0).clip(true));
@@ -625,9 +629,27 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
                     }
                 });
             });
+            });
         })
         .response
         .rect;
+    // The header on a colour of its own; the table's corners rounded (the
+    // rows' stripes cut by the panel's colour), a thin edge round it.
+    {
+        let dark = ui.visuals().dark_mode;
+        let head_bg = if dark { egui::Color32::from_rgb(34, 46, 64) } else { egui::Color32::from_rgb(222, 231, 244) };
+        let bottom = heads.iter().filter(|r| r.is_positive()).map(|r| r.bottom()).fold(table_rect.top() + 24.0, f32::max);
+        let head = egui::Rect::from_min_max(table_rect.min, egui::pos2(table_rect.right(), bottom + 2.0));
+        let r = 6u8;
+        ui.painter().set(back, egui::Shape::rect_filled(head, egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, head_bg));
+        let p = ui.painter();
+        corners(p, table_rect, r as f32, ui.visuals().panel_fill);
+        let edge = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        for _ in 0..2 {
+            p.rect_stroke(table_rect.shrink(0.5), r, egui::Stroke::new(1.0, edge), egui::StrokeKind::Middle);
+        }
+        p.hline(head.x_range().shrink(0.5), head.bottom(), egui::Stroke::new(1.0, edge));
+    }
     // A header being dragged: where it would land.
     if let (Some(k), Some(p)) = (dragging, ctx.pointer_interact_pos()) {
         let to = slot(&heads, p.x);
@@ -837,5 +859,29 @@ mod tests {
         assert_eq!(total(&v, 1, Agg::Count), "3");
         assert_eq!(total(&v, 0, Agg::Max), "b");
         assert_eq!(total(&v, 0, Agg::Sum), t("не числа", "not numbers"));
+    }
+}
+
+/// Paints `bg` over a rectangle's corners outside its rounding (what's
+/// under them looks rounded).
+fn corners(p: &egui::Painter, r: egui::Rect, radius: f32, bg: egui::Color32) {
+    let n = 8;
+    for (corner, center, a0) in [
+        (r.left_top(), r.left_top() + egui::vec2(radius, radius), 180.0f32),
+        (r.right_top(), r.right_top() + egui::vec2(-radius, radius), 270.0),
+        (r.right_bottom(), r.right_bottom() + egui::vec2(-radius, -radius), 0.0),
+        (r.left_bottom(), r.left_bottom() + egui::vec2(radius, -radius), 90.0),
+    ] {
+        // Triangles from the corner to each stretch of the arc.
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(corner, bg);
+        for k in 0..=n {
+            let a = (a0 + 90.0 * k as f32 / n as f32).to_radians();
+            mesh.colored_vertex(center + egui::vec2(a.cos(), a.sin()) * radius, bg);
+            if k > 0 {
+                mesh.add_triangle(0, k as u32, k as u32 + 1);
+            }
+        }
+        p.add(egui::Shape::mesh(mesh));
     }
 }

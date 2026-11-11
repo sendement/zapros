@@ -30,27 +30,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let mut actions = Vec::new();
     let mut ops: Vec<Op> = Vec::new();
     let ctx = ui.ctx().clone();
+    // Narrow: the buttons keep their icons only (names in the tips).
+    let narrow = ui.available_width() < 800.0;
+    let lbl = move |icon: &str, name: &str| if narrow { icon.to_string() } else { format!("{icon} {name}") };
     // The notebook's own bar.
     ui.horizontal(|ui| {
         if ui.add(tinted(format!("+ {}", "SQL"), crate::ui::BLUE)).on_hover_text(t("Добавить блок с запросом в конец", "Add a SQL cell at the end")).clicked() {
             ops.push(Op::Add(usize::MAX, CellKind::Sql));
         }
-        if ui.add(tinted(format!("+ {}", "Markdown"), crate::ui::VIOLET)).on_hover_text(t("Добавить текстовый блок в конец", "Add a text cell at the end")).clicked() {
+        if ui.add(tinted(format!("+ {}", if narrow { "MD" } else { "Markdown" }), crate::ui::VIOLET)).on_hover_text(t("Добавить текстовый блок в конец", "Add a text cell at the end")).clicked() {
             ops.push(Op::Add(usize::MAX, CellKind::Markdown));
         }
         ui.separator();
-        if ui.add(tinted(format!("⏩ {}", t("Выполнить все", "Run all")), crate::ui::TEAL)).on_hover_text(t("Все блоки по порядку   Ctrl+Shift+Enter", "Every cell in order   Ctrl+Shift+Enter")).clicked() {
+        if ui.add(tinted(lbl("⏩", t("Выполнить все", "Run all")), crate::ui::TEAL)).on_hover_text(t("Все блоки по порядку   Ctrl+Shift+Enter", "Every cell in order   Ctrl+Shift+Enter")).clicked() {
             actions.push(Action::RunScript);
         }
         ui.separator();
-        if ui.button(format!("▸ {}", t("Свернуть все", "Fold all"))).on_hover_text(t("Свернуть все блоки до первой строки", "Fold every cell to its first line")).clicked() {
+        if ui.button(lbl("▸", t("Свернуть все", "Fold all"))).on_hover_text(t("Свернуть все блоки до первой строки", "Fold every cell to its first line")).clicked() {
             ops.push(Op::FoldAll(true));
         }
-        if ui.button(format!("▾ {}", t("Развернуть все", "Unfold all"))).on_hover_text(t("Развернуть все блоки", "Unfold every cell")).clicked() {
+        if ui.button(lbl("▾", t("Развернуть все", "Unfold all"))).on_hover_text(t("Развернуть все блоки", "Unfold every cell")).clicked() {
             ops.push(Op::FoldAll(false));
         }
         ui.separator();
-        ui.menu_button(format!("📄 {}", t("В обычный SQL", "To plain SQL")), |ui| {
+        ui.menu_button(lbl("📄", t("В обычный SQL", "To plain SQL")), |ui| {
             if ui.button(t("Как есть (Markdown — комментариями)", "As it is (Markdown as comments)")).on_hover_text(t("Открыть в новой вкладке; блоки WITH остаются отдельными", "Opens in a new tab; WITH cells stay apart")).clicked() {
                 app.export_notebook(false);
                 ui.close();
@@ -61,7 +64,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(t("Ctrl+Enter — выполнить блок · блок из одного WITH отдаёт свои CTE блокам ниже", "Ctrl+Enter: run the cell · a cell of a WITH alone lends its CTEs to the cells below")).weak().small());
+            // Only in the room left (cut short, never over the buttons).
+            ui.add(egui::Label::new(RichText::new(t("Ctrl+Enter — выполнить блок · блок из одного WITH отдаёт свои CTE блокам ниже", "Ctrl+Enter: run the cell · a cell of a WITH alone lends its CTEs to the cells below")).weak().small()).truncate());
         });
     });
     ui.add_space(4.0);
@@ -84,45 +88,45 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let key = App::cell_key(&tab.id, &cell.id);
             let focused = focus.as_deref() == Some(cell.id.as_str());
             let stroke = if focused { Stroke::new(1.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
-            egui::Frame::NONE.stroke(stroke).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
+            let framed = egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
                 // Its header: kind, run, what it gave; moving, adding, deleting.
                 ui.horizontal(|ui| {
-                    let fold = ui.add(egui::Button::new(RichText::new(if cell.collapsed { "▸" } else { "▾" }).size(16.0)).frame(false)).on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
+                    let fold = ui.add(egui::Button::new(RichText::new(if cell.collapsed { "▸" } else { "▾" })).min_size(egui::vec2(24.0, 24.0))).on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
                     if fold.clicked() {
                         ops.push(Op::Fold(i));
                     }
                     ui.label(RichText::new(format!("[{}]", i + 1)).weak().small().monospace());
-                    for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, "Markdown")] {
-                        if ui.selectable_label(cell.kind == k, RichText::new(name).small()).clicked() && cell.kind != k {
+                    for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, if narrow { "MD" } else { "Markdown" })] {
+                        if ui.selectable_label(cell.kind == k, name).clicked() && cell.kind != k {
                             ops.push(Op::Kind(i, k));
                         }
                     }
                     if cell.kind == CellKind::Sql {
                         ui.separator();
-                        if ui.add_enabled(!running, tinted(format!("▶ {}", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
+                        if ui.add_enabled(!running, tinted(lbl("▶", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
                             ops.push(Op::Run(cell.id.clone()));
                         }
                         if running {
                             ui.add(egui::Spinner::new().size(14.0));
                         }
                         if crate::sql::notebook::parse_with(cell.text.trim().trim_end_matches(';'), dialect).is_some_and(|w| w.main.is_empty()) {
-                            ui.label(RichText::new(t("WITH — для блоков ниже", "WITH — for the cells below")).small().color(crate::ui::TEAL));
+                            ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗑").on_hover_text(t("Удалить блок", "Delete the cell")).clicked() {
+                        if ui.add(egui::Button::new("🗑").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Удалить блок", "Delete the cell")).clicked() {
                             ops.push(Op::Delete(i));
                         }
-                        if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).on_hover_text(t("Ниже", "Down")).clicked() {
+                        if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Ниже", "Down")).clicked() {
                             ops.push(Op::Down(i));
                         }
-                        if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).on_hover_text(t("Выше", "Up")).clicked() {
+                        if ui.add_enabled(i > 0, egui::Button::new("⏶").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Выше", "Up")).clicked() {
                             ops.push(Op::Up(i));
                         }
-                        ui.menu_button(" + ", |ui| {
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new("+").min_size(egui::vec2(28.0, 24.0))).ui(ui, |ui| {
                             if ui.button(t("SQL-блок ниже", "SQL cell below")).clicked() {
                                 ops.push(Op::Add(i + 1, CellKind::Sql));
                                 ui.close();
@@ -138,10 +142,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         });
                         if cell.kind == CellKind::Sql {
                             ui.separator();
-                            if has_out && ui.small_button("✖").on_hover_text(t("Очистить вывод (сохранённый остаётся)", "Clear the output (a kept one stays)")).clicked() {
+                            if has_out && ui.add(egui::Button::new("✖").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Очистить вывод (сохранённый остаётся)", "Clear the output (a kept one stays)")).clicked() {
                                 ops.push(Op::Clear(key.clone()));
                             }
-                            let pin = ui.add_enabled(has_out && !running, tinted("📌".into(), crate::ui::VIOLET)).on_hover_text(t("Сохранить вывод блока на диск (иначе он живёт только до закрытия)", "Keep the cell's output on disk (else it lives only until closing)"));
+                            let pin = ui.add_enabled(has_out && !running, tinted("📌".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Сохранить вывод блока на диск (иначе он живёт только до закрытия)", "Keep the cell's output on disk (else it lives only until closing)"));
                             if pin.clicked() {
                                 ops.push(Op::Pin(cell.id.clone()));
                             }
@@ -247,6 +251,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                 }
             });
+            // The edge drawn twice: its rounded corners as strong as its
+            // sides (a thin line's corners come out paler).
+            let edge = framed.response.rect.shrink(0.5);
+            for _ in 0..2 {
+                ui.painter().rect_stroke(edge, RADIUS, stroke, egui::StrokeKind::Middle);
+            }
             ui.add_space(6.0);
         }
         // Room to add one more at the end.
