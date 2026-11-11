@@ -46,6 +46,16 @@ pub struct EditorState {
     blocks: Vec<crate::sql::bands::Block>,
     /// (layout key, block start) → the x its lines' text starts at.
     frame_x: std::collections::HashMap<(u64, usize), f32>,
+    /// What can be folded: (its first line's start, its end), as of `job`.
+    foldable: Vec<(usize, usize)>,
+    /// Folded: the starts of the lines whose blocks are folded.
+    pub folds: Vec<usize>,
+    /// The caret: where, and since when (for the same-word marks).
+    caret_since: Option<(usize, std::time::Instant)>,
+    /// (layout key, word) → where the word is (bytes).
+    words: Option<(u64, String, Vec<usize>)>,
+    /// (layout key, byte under the pointer) → its bracket pair.
+    hover_pair: Option<(u64, usize, Option<(usize, usize)>)>,
     /// Cursor (bytes) as of the last frame: (primary, secondary).
     pub cursor: Option<(usize, usize)>,
     /// Put the cursor here (bytes) next frame and focus.
@@ -176,11 +186,20 @@ fn band_hues(dark: bool) -> Vec<Color32> {
 
 /// The text laid out with colours.
 pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> LayoutJob {
-    layout_blocks(text, cx, pair, font, mono_bold).0
+    layout_blocks(text, cx, pair, font, mono_bold, &[]).0
+}
+
+/// What a text lays out with besides its colours: its blocks (for the
+/// frames) and what can be folded (byte ranges over more than a line).
+#[derive(Default)]
+struct Found {
+    blocks: Vec<crate::sql::bands::Block>,
+    /// (the start of its first line, its end).
+    foldable: Vec<(usize, usize)>,
 }
 
 /// The text laid out with colours, and its blocks (for the frames).
-fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> (LayoutJob, Vec<crate::sql::bands::Block>) {
+fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool, hidden: &[Range<usize>]) -> (LayoutJob, Found) {
     use crate::sql::embed::Class;
     let pal: &Palette = if cx.dark { &cx.settings.dark } else { &cx.settings.light };
     // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
@@ -254,9 +273,18 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         cuts.push(floor(text, r.start));
         cuts.push(floor(text, r.end));
     }
+    for r in hidden {
+        cuts.push(r.start.min(text.len()));
+        cuts.push(r.end.min(text.len()));
+    }
     cuts.push(text.len());
     cuts.sort_unstable();
     cuts.dedup();
+    // Folded away: laid out as nothing (no width, no height).
+    let mut gone = TextFormat::simple(FontId::monospace(0.5), Color32::TRANSPARENT);
+    gone.line_height = Some(0.0);
+    gone.expand_bg = 0.0;
+    let mut hi = 0;
     let mut job = LayoutJob { text: text.to_string(), ..Default::default() };
     job.wrap.max_width = f32::INFINITY;
     let pair_bg = if cx.dark { Color32::from_rgba_unmultiplied(120, 160, 255, 70) } else { Color32::from_rgba_unmultiplied(80, 120, 255, 60) };
@@ -269,6 +297,13 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         }
         while ti + 1 < spans.len() && spans[ti + 1].range.start <= a {
             ti += 1;
+        }
+        while hi < hidden.len() && hidden[hi].end <= a {
+            hi += 1;
+        }
+        if hidden.get(hi).is_some_and(|r| r.start <= a && b <= r.end) {
+            job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: gone.clone() });
+            continue;
         }
         let mut f = spans.get(ti).map(&fmt_of).unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
         f.expand_bg = 0.0;
@@ -299,7 +334,15 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         }
         job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: f });
     }
-    (job, if pal.frames { blocks } else { Vec::new() })
+    // Foldable: blocks and statements over more than a line.
+    let mut spans_: Vec<Range<usize>> = if text.len() < 2_000_000 { crate::sql::split(text, cx.dialect, cx.settings.blank_line_splits).into_iter().map(|r| r.start..r.start + text[r.clone()].trim_end().len()).filter(|r| text[r.clone()].contains('\n')).collect() } else { Vec::new() };
+    spans_.extend(blocks.iter().filter(|b| b.range.end <= text.len() && text[b.range.clone()].contains('\n')).map(|b| b.range.clone()));
+    let line_starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    // One per first line: the longest.
+    let mut foldable: Vec<(usize, usize)> = spans_.into_iter().map(|r| (line_starts[line_starts.partition_point(|&x| x <= r.start) - 1], r.end)).collect();
+    foldable.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    foldable.dedup_by_key(|f| f.0);
+    (job, Found { blocks: if pal.frames { blocks } else { Vec::new() }, foldable })
 }
 
 /// Replaces `r` with `with` and puts the cursor after it (or at "$0").
@@ -561,27 +604,64 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let lines = text.matches('\n').count() + 1;
     let digits = lines.to_string().len().max(3) as f32;
     let char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(font), '0'));
-    let gutter = digits * char_w + 18.0;
+    // (Room for the fold marks too.)
+    let gutter = digits * char_w + 30.0;
     let cursor_now = egui::text_edit::TextEditState::load(&ctx, id).and_then(|s| s.cursor.char_range()).map(|r| byte_of(text, r.primary.index.0));
     let mono_bold = ctx.fonts(|f| f.families().iter().any(|fam| *fam == FontFamily::Name("mono-bold".into())));
     let (pair, _) = around(st, text, cursor_now, cx);
+    let text_len = text.len();
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (cx.dialect, cx.dark, cx.issues, cx.server_err, pair, font.to_bits(), mono_bold).hash(&mut h);
         format!("{:?}{:?}", cx.settings.dark, cx.settings.light).hash(&mut h);
         h.finish()
     };
+    // Folded blocks: from their first line's end to their last line's end.
+    let eol = |text: &str, x: usize| text[x.min(text.len())..].find('\n').map_or(text.len(), |i| x.min(text.len()) + i);
+    let hidden: Vec<Range<usize>> = {
+        let mut v: Vec<Range<usize>> = st
+            .folds
+            .iter()
+            .filter_map(|&f| {
+                let i = st.foldable.binary_search_by_key(&f, |x| x.0).ok()?;
+                let end = st.foldable[i].1.min(text.len());
+                let a = eol(text, f);
+                let b = eol(text, end.saturating_sub(1));
+                (a < b).then_some(a..b)
+            })
+            .collect();
+        v.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for r in v {
+            match merged.last_mut() {
+                Some(m) if r.start <= m.end => m.end = m.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        merged
+    };
+    // The caret inside a fold: it opens.
+    if let Some(c) = cursor_now {
+        if let Some(r) = hidden.iter().find(|r| r.start < c && c <= r.end) {
+            let f = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
+            st.folds.retain(|&x| x != f);
+            ctx.request_repaint();
+        }
+    }
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| -> Arc<egui::Galley> {
         let s = buf.as_str();
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (key, s).hash(&mut h);
+        // (Folds made for another text don't fit an edited one.)
+        let hidden: Vec<Range<usize>> = if s.len() == text_len { hidden.clone() } else { Vec::new() };
+        (key, s, &hidden).hash(&mut h);
         let k = h.finish();
         let job = match &st.job {
             Some((kk, j)) if *kk == k => j.clone(),
             _ => {
-                let (j, blocks) = layout_blocks(s, cx, pair, font, mono_bold);
+                let (j, found) = layout_blocks(s, cx, pair, font, mono_bold, &hidden);
                 st.job = Some((k, j.clone()));
-                st.blocks = blocks;
+                st.blocks = found.blocks;
+                st.foldable = found.foldable;
                 st.frame_x.clear();
                 j
             }
@@ -589,6 +669,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let before = text.clone();
+    // Under the text: the caret's line, the same words, a bracket pair.
+    let under = ui.painter().add(egui::Shape::Noop);
     // (egui moves the caret on any button's press: a right click inside the
     // selection must keep it — the selection as of before the press.)
     let right_press = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
@@ -611,6 +693,15 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         .inner;
     if *text != before {
         out.changed = true;
+        // Folds after the change move with the text.
+        let p = before.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
+        let delta = text.len() as isize - before.len() as isize;
+        for f in st.folds.iter_mut() {
+            if *f > p {
+                *f = (*f as isize + delta).max(0) as usize;
+            }
+        }
+        st.folds.retain(|&f| f <= text.len() && (f == 0 || text.as_bytes().get(f - 1) == Some(&b'\n')));
     }
 
     // Line numbers, error dots.
@@ -630,9 +721,11 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         if r.height() < 1.0 {
             r.max.y = r.min.y + row_h;
         }
-        if new_line && r.bottom() >= clip.top() && r.top() <= clip.bottom() {
+        // (A folded line's row has no height: no number.)
+        let gone = output.galley.rows.len() > 1 && row.rect().height() < 1.0;
+        if new_line && !gone && r.bottom() >= clip.top() && r.top() <= clip.bottom() {
             let color = if Some(line) == cur_line { strong } else { weak };
-            let x = output.galley_pos.x - 10.0;
+            let x = output.galley_pos.x - 18.0;
             painter.text(egui::pos2(x, r.center().y), egui::Align2::RIGHT_CENTER, (line + 1).to_string(), FontId::monospace(font * 0.85), color);
             if err_lines.contains(&line) {
                 painter.circle_filled(egui::pos2(output.galley_pos.x - gutter + 7.0, r.center().y), 3.0, Color32::from_rgb(230, 70, 70));
@@ -642,6 +735,193 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         if new_line {
             line += 1;
         }
+    }
+
+    // Fold marks in the gutter (▾ under the pointer, ▸ when folded), and
+    // a "⋯ n" after a folded line (a click opens it).
+    if !st.foldable.is_empty() {
+        let gutter_hot = ui.rect_contains_pointer(egui::Rect::from_min_max(egui::pos2(output.galley_pos.x - gutter, clip.top()), egui::pos2(output.galley_pos.x, clip.bottom())));
+        let mut toggle: Option<usize> = None;
+        let mut lb = 0usize;
+        let mut new_line = true;
+        let mut fi = 0;
+        for row in output.galley.rows.iter() {
+            let r = row.rect().translate(output.galley_pos.to_vec2());
+            let gone = output.galley.rows.len() > 1 && row.rect().height() < 1.0;
+            if new_line && !gone && r.bottom() >= clip.top() && r.top() <= clip.bottom() {
+                while fi < st.foldable.len() && st.foldable[fi].0 < lb {
+                    fi += 1;
+                }
+                if st.foldable.get(fi).is_some_and(|f| f.0 == lb) {
+                    let folded = st.folds.contains(&lb);
+                    let c = egui::pos2(output.galley_pos.x - 9.0, r.center().y);
+                    let hit = egui::Rect::from_center_size(c, egui::vec2(14.0, r.height().max(row_h)));
+                    let resp = ui.interact(hit, id.with(("fold", lb)), egui::Sense::click());
+                    if folded || gutter_hot {
+                        let color = if resp.hovered() || folded { strong } else { weak };
+                        painter.text(c, egui::Align2::CENTER_CENTER, if folded { "▸" } else { "▾" }, FontId::proportional(font * 0.8), color);
+                    }
+                    if resp.clicked() {
+                        toggle = Some(lb);
+                    }
+                    if folded {
+                        let end = st.foldable[fi].1.min(text.len());
+                        let n = text[lb..end].matches('\n').count();
+                        let label = format!("⋯ {n}");
+                        let g = painter.layout_no_wrap(label, FontId::monospace(font * 0.8), weak);
+                        let pill = egui::Rect::from_min_size(egui::pos2(r.right() + 8.0, r.center().y - g.size().y / 2.0 - 1.0), g.size() + egui::vec2(10.0, 2.0));
+                        let pr = ui.interact(pill, id.with(("unfold", lb)), egui::Sense::click()).on_hover_text(crate::i18n::t("Свёрнуто — щелчок развернёт", "Folded: click to open"));
+                        painter.rect(pill, 3, if pr.hovered() { ui.visuals().widgets.hovered.weak_bg_fill } else { ui.visuals().widgets.inactive.weak_bg_fill }, Stroke::NONE, egui::StrokeKind::Inside);
+                        painter.galley(pill.min + egui::vec2(5.0, 1.0), g, weak);
+                        if pr.clicked() {
+                            toggle = Some(lb);
+                        }
+                    }
+                }
+            }
+            // The next line's start.
+            if row.ends_with_newline {
+                lb = text[lb..].find('\n').map_or(text.len(), |i| lb + i + 1);
+            }
+            new_line = row.ends_with_newline;
+        }
+        if let Some(f) = toggle {
+            if let Some(i) = st.folds.iter().position(|&x| x == f) {
+                st.folds.remove(i);
+            } else {
+                st.folds.push(f);
+                // The caret inside goes to the fold's line.
+                if cursor_b.is_some_and(|c| c > eol(text, f)) {
+                    set_cursor(&ctx, id, text, eol(text, f), eol(text, f));
+                }
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    // Under the text: the caret's line (faint; the bands only change hue a
+    // little), the words like the one picked or under a resting caret, and
+    // the brackets under the pointer (or picked) with their pairs.
+    {
+        let mut shapes: Vec<egui::Shape> = Vec::new();
+        let gp = output.galley_pos.to_vec2();
+        let has_focus = ctx.memory(|m| m.has_focus(id));
+        let sel = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
+        if has_focus {
+            if let Some(cr) = output.cursor_range {
+                let at = output.galley.pos_from_cursor(cr.primary).translate(gp);
+                let line = egui::Rect::from_min_max(egui::pos2(output.galley_pos.x - 2.0, at.top()), egui::pos2(clip.right(), at.bottom()));
+                let c = if cx.dark { Color32::from_rgba_unmultiplied(255, 255, 255, 10) } else { Color32::from_rgba_unmultiplied(0, 0, 0, 9) };
+                shapes.push(egui::Shape::rect_filled(line, 0.0, c));
+            }
+        }
+        let k = st.job.as_ref().map_or(0, |j| j.0);
+        let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '#';
+        // The word: picked whole, or under a caret resting a while.
+        let mut word: Option<String> = None;
+        if let Some((p, q)) = sel {
+            let (a, b) = (p.min(q).min(text.len()), p.max(q).min(text.len()));
+            if a < b && b - a <= 128 && text.is_char_boundary(a) && text.is_char_boundary(b) {
+                let w = &text[a..b];
+                if w.chars().count() >= 2 && w.chars().all(is_word) {
+                    word = Some(w.to_string());
+                }
+            } else if a == b {
+                match st.caret_since {
+                    Some((x, since)) if x == a => {
+                        let wait = std::time::Duration::from_millis(600);
+                        if since.elapsed() >= wait {
+                            let s0 = text[..a].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map_or(a, |(i, _)| i);
+                            let s1 = text[a..].char_indices().find(|(_, c)| !is_word(*c)).map_or(text.len(), |(i, _)| a + i);
+                            if s1 > s0 && text[s0..s1].chars().count() >= 2 && !text[s0..s1].chars().all(|c| c.is_ascii_digit()) {
+                                word = Some(text[s0..s1].to_string());
+                            }
+                        } else if has_focus {
+                            ctx.request_repaint_after(wait - since.elapsed());
+                        }
+                    }
+                    _ => st.caret_since = Some((a, std::time::Instant::now())),
+                }
+            }
+            if a != b {
+                st.caret_since = None;
+            }
+        }
+        // The rows on screen, as bytes.
+        let (mut c0, mut c1, mut ci) = (usize::MAX, 0usize, 0usize);
+        for row in &output.galley.rows {
+            let r = row.rect().translate(gp);
+            let n = row.char_count_including_newline().0;
+            if r.bottom() >= clip.top() && r.top() <= clip.bottom() {
+                c0 = c0.min(ci);
+                c1 = ci + n;
+            }
+            ci += n;
+        }
+        let visible = (c0 != usize::MAX).then(|| (byte_of(text, c0), byte_of(text, c1)));
+        let char_rect = |b: usize, chars: usize| -> egui::Rect {
+            let ci = char_of(text, b);
+            let a = output.galley.pos_from_cursor(CCursor::new(ci));
+            let z = output.galley.pos_from_cursor(CCursor::new(ci + chars));
+            egui::Rect::from_min_max(egui::pos2(a.left(), a.top()), egui::pos2(z.left().max(a.left() + 2.0), a.bottom())).translate(gp)
+        };
+        if let (Some(w), Some((v0, v1))) = (&word, visible) {
+            let lw = w.to_lowercase();
+            if !st.words.as_ref().is_some_and(|(kk, ww, _)| *kk == k && *ww == lw) {
+                let low = text.to_lowercase();
+                let found: Vec<usize> = if low.len() == text.len() {
+                    low.match_indices(&lw)
+                        .map(|(i, _)| i)
+                        .filter(|&i| !text[..i].chars().next_back().is_some_and(is_word) && !text[i + lw.len()..].chars().next().is_some_and(is_word))
+                        .take(20_000)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                st.words = Some((k, lw.clone(), found));
+            }
+            let found = &st.words.as_ref().unwrap().2;
+            if found.len() > 1 {
+                let c = if cx.dark { Color32::from_rgba_unmultiplied(255, 235, 140, 34) } else { Color32::from_rgba_unmultiplied(200, 150, 0, 40) };
+                let n = w.chars().count();
+                for &b in found.iter().filter(|&&b| b >= v0 && b <= v1) {
+                    shapes.push(egui::Shape::rect_filled(char_rect(b, n).expand2(egui::vec2(0.5, 0.0)), 2.0, c));
+                }
+            }
+        }
+        // Brackets: under the pointer, or a picked one.
+        let mut at: Option<usize> = None;
+        if let Some(pos) = output.response.hover_pos() {
+            let b = byte_of(text, output.galley.cursor_from_pos(pos - output.galley_pos).index.0);
+            let is_br = |x: usize| text.get(x..).and_then(|s| s.chars().next()).is_some_and(|c| "()[]{}".contains(c));
+            at = if is_br(b) { Some(b) } else if b > 0 && is_br(b - 1) { Some(b - 1) } else { None };
+        }
+        if let Some((p, q)) = sel {
+            let (a, b) = (p.min(q), p.max(q));
+            if b == a + 1 && text.get(a..b).is_some_and(|s| "()[]{}".contains(s)) {
+                at = Some(a);
+            }
+        }
+        if let Some(b) = at {
+            let pr = match st.hover_pair {
+                Some((kk, bb, pr)) if kk == k && bb == b => pr,
+                _ => {
+                    let pr = bracket_pair(text, b, cx.dialect);
+                    st.hover_pair = Some((k, b, pr));
+                    pr
+                }
+            };
+            if let Some((x, y)) = pr {
+                let c = if cx.dark { Color32::from_rgba_unmultiplied(120, 170, 255, 60) } else { Color32::from_rgba_unmultiplied(70, 120, 255, 50) };
+                let line = Stroke::new(1.0, c.gamma_multiply(2.0));
+                for z in [x, y] {
+                    let r = char_rect(z, 1).expand2(egui::vec2(1.0, 0.0));
+                    shapes.push(egui::Shape::rect_filled(r, 2.0, c));
+                    shapes.push(egui::Shape::rect_stroke(r, 2.0, line, egui::StrokeKind::Inside));
+                }
+            }
+        }
+        painter.set(under, egui::Shape::Vec(shapes));
     }
 
     // Frames round the block at the caret and the one under the pointer.
@@ -696,8 +976,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 continue;
             }
             let c = hues[b.level % hues.len()];
-            let stroke = if strong { Stroke::new(1.5, c.gamma_multiply(0.85)) } else { Stroke::new(1.0, c.gamma_multiply(0.45)) };
-            painter.rect_stroke(rect, crate::ui::RADIUS, stroke, egui::StrokeKind::Middle);
+            let stroke = if strong { Stroke::new(1.0, c.gamma_multiply(0.85)) } else { Stroke::new(0.8, c.gamma_multiply(0.45)) };
+            painter.rect_stroke(rect, 3, stroke, egui::StrokeKind::Middle);
         }
     }
 

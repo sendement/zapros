@@ -237,11 +237,15 @@ pub struct Cell {
     /// What it gave, kept by hand (the pin button) — nothing else is
     /// written to disk.
     pub saved: Option<Saved>,
+    /// Shown as its first line only.
+    pub collapsed: bool,
+    /// Its output's height (0: the usual).
+    pub out_h: f32,
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), kind: CellKind::Sql, text: String::new(), saved: None }
+        Self { id: crate::db::new_id(), kind: CellKind::Sql, text: String::new(), saved: None, collapsed: false, out_h: 0.0 }
     }
 }
 
@@ -278,7 +282,7 @@ impl Notebook {
             .map(|p| {
                 let kind = if p.kind == Kind::Markdown { CellKind::Markdown } else { CellKind::Sql };
                 let was = old.iter().find(|c| c.kind == kind && c.text == p.text);
-                Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), text: p.text }
+                Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), collapsed: was.is_some_and(|c| c.collapsed), out_h: was.map_or(0.0, |c| c.out_h), text: p.text }
             })
             .collect();
         Self { on: true, cells }

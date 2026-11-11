@@ -752,6 +752,18 @@ fn notebook_cells_with_and_export() {
     h.state_mut().toggle_notebook();
     h.step();
     assert!(h.state().tab().notebook.as_ref().unwrap().cells[2].saved.is_some(), "the kept output survives the round trip");
+    // Every cell folded to its first line, then open again.
+    h.get_by_label_contains("Свернуть все").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().tab().notebook.as_ref().unwrap().cells.iter().all(|c| c.collapsed));
+    shot(&mut h, "notebook-folded");
+    h.get_by_label_contains("Развернуть все").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().tab().notebook.as_ref().unwrap().cells.iter().all(|c| !c.collapsed));
     // Plain SQL: each statement with its CTEs.
     h.state_mut().export_notebook(true);
     h.step();
@@ -759,4 +771,47 @@ fn notebook_cells_with_and_export() {
     assert!(sql.starts_with("-- # Крупные заказы"), "{sql}");
     assert!(sql.contains("WITH big as (select * from orders where total > 900)\nselect count(*) as n from big;"), "{sql}");
     assert!(sql.contains("WITH big as (select * from orders where total > 900),\ntop as ("), "{sql}");
+}
+
+#[test]
+fn folds_and_marks() {
+    let (mut h, _g) = harness_at("folds", ORA_STRINGS, false, 1.0);
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+    h.state_mut().conns.list.push(ora);
+    h.state_mut().tab_mut().conn = Some("ora".into());
+    h.state_mut().ask = None;
+    settle(&mut h);
+    h.state_mut().ask = None;
+    let id = h.state().tab().id.clone();
+    // The FOR loop folded (its first line stays, "⋯ n" after it).
+    let at = ORA_STRINGS.find("  for r in").unwrap();
+    h.state_mut().rt.get_mut(&id).unwrap().ed.folds.push(at);
+    // "orders" picked: the other "orders" marked too.
+    let o = ORA_STRINGS.rfind("orders").unwrap();
+    focus_editor(&mut h, o);
+    {
+        let tid = egui::Id::new(("editor", &id, false));
+        let ctx = h.ctx.clone();
+        let mut st = egui::text_edit::TextEditState::load(&ctx, tid).unwrap_or_default();
+        let ci = ORA_STRINGS[..o].chars().count();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(ci), egui::text::CCursor::new(ci + 6))));
+        st.store(&ctx, tid);
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "folds");
+    assert!(h.state().rt[&id].ed.folds.contains(&at), "the fold stays while the caret's outside it");
+    // A click on "⋯" opens it.
+    click_at(&mut h, egui::pos2(548.0, 178.0), egui::PointerButton::Primary);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().rt[&id].ed.folds.is_empty(), "the ⋯ opened it");
+    // A bracket under the pointer: it and its pair marked.
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(437.0, 178.0)));
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "bracket-hover");
 }
