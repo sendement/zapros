@@ -1290,7 +1290,7 @@ fn table_designer_beside_on_ctrl_click() {
 }
 
 #[test]
-fn oracle_job_window_and_tab() {
+fn oracle_job_in_a_tab() {
     let Ok(v) = std::env::var("ZAPROS_TEST_ORA") else { return };
     let p: Vec<String> = v.split(':').map(String::from).collect();
     let (mut h, _g) = harness("orajob", "", false);
@@ -1301,41 +1301,44 @@ fn oracle_job_window_and_tab() {
     h.state_mut().ensure_live(&ctx, "ora", None);
     settle(&mut h);
     let owner = p[3].to_uppercase();
-    // A job of our own to work on.
-    h.state_mut().open_job("ora", None, vec![owner.clone(), "jobs".into()]);
-    {
-        let w = h.state_mut().job_win.as_mut().unwrap();
-        if let crate::design_ui::Loaded::Job(je) = &mut w.d.loaded {
-            je.cur.name = "ZAPROS_TEST_JOB".into();
-            je.cur.enabled = false;
+    // (One left over from a run before goes first.)
+    if let Some(l) = h.state().live.get("ora") {
+        l.meta.send(crate::db::Req::Apply { key: "none".into(), stmts: vec!["BEGIN DBMS_SCHEDULER.DROP_JOB('ZAPROS_TEST_JOB'); EXCEPTION WHEN OTHERS THEN NULL; END;".into()] });
+    }
+    // A new job, in a tab beside.
+    h.state_mut().new_job("ora", vec![owner.clone(), "jobs".into()]);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    fn job<'a>(h: &'a mut Harness<'static, App>, id: &str) -> &'a mut crate::design_ui::JobEdit {
+        match h.state_mut().rt.get_mut(id).and_then(|r| r.design.as_mut()).map(|d| &mut d.loaded) {
+            Some(crate::design_ui::Loaded::Job(je)) => je,
+            _ => panic!("no job designer"),
         }
     }
-    // (One left over from a run before goes first.)
-    let wait_job = |h: &mut Harness<'static, App>| {
+    job(&mut h, &id).cur.name = "ZAPROS_TEST_JOB".into();
+    job(&mut h, &id).cur.enabled = false;
+    settle(&mut h);
+    shot(&mut h, "job-new");
+    let wait = |h: &mut Harness<'static, App>| {
         for _ in 0..100 {
             settle(h);
-            if h.state().job_win.as_ref().is_some_and(|w| !w.d.busy) {
+            let d = h.state().rt[&id].design.as_ref().unwrap();
+            if !d.busy && matches!(&d.loaded, crate::design_ui::Loaded::Job(je) if je.orig.is_some()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    if let Some(l) = h.state().live.get("ora") {
-        l.meta.send(crate::db::Req::Apply { key: "none".into(), stmts: vec!["BEGIN DBMS_SCHEDULER.DROP_JOB('ZAPROS_TEST_JOB'); EXCEPTION WHEN OTHERS THEN NULL; END;".into()] });
-    }
-    settle(&mut h);
-    shot(&mut h, "job-new");
     h.get_by_label_contains("Применить").click();
-    wait_job(&mut h);
-    let w = h.state().job_win.as_ref().unwrap();
-    assert!(matches!(w.d.status, Some(Ok(_))), "{:?}", w.d.status);
-    let crate::design_ui::Loaded::Job(je) = &w.d.loaded else { panic!() };
-    assert_eq!(je.orig.as_ref().map(|j| j.name.as_str()), Some("ZAPROS_TEST_JOB"));
-    assert_eq!(je.cur.schedule, "FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0");
+    wait(&mut h);
+    let d = h.state().rt[&id].design.as_ref().unwrap();
+    assert!(matches!(d.status, Some(Ok(_))), "{:?}", d.status);
+    assert_eq!(h.state().tab().title, "⏱ ZAPROS_TEST_JOB");
+    assert_eq!(h.state().tab().object.as_ref().unwrap().path, vec![owner.clone(), "jobs".into(), "ZAPROS_TEST_JOB".into()]);
+    assert_eq!(job(&mut h, &id).orig.as_ref().unwrap().schedule, "FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0");
     // Weekly on Monday and Friday at 09:30, by the designer.
     {
-        let w = h.state_mut().job_win.as_mut().unwrap();
-        let crate::design_ui::Loaded::Job(je) = &mut w.d.loaded else { panic!() };
+        let je = job(&mut h, &id);
         let p = je.plan.as_mut().unwrap();
         p.freq = crate::sched::Freq::Weekly;
         p.days = [true, false, false, false, true, false, false];
@@ -1345,32 +1348,126 @@ fn oracle_job_window_and_tab() {
     }
     settle(&mut h);
     shot(&mut h, "job-weekly");
-    h.get_by_label("{ } SQL").click();
-    settle(&mut h);
-    let sql = h.state().job_win.as_ref().unwrap().sql.clone();
-    assert!(sql.contains("SET_ATTRIBUTE('ZAPROS.ZAPROS_TEST_JOB', 'repeat_interval', 'FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0')") || sql.contains("'repeat_interval', 'FREQ=WEEKLY;BYDAY=MON,FRI"), "{sql}");
-    shot(&mut h, "job-sql");
+    let sql = h.state().rt[&id].design.as_ref().unwrap().script();
+    assert!(sql.contains("'repeat_interval', 'FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0')"), "{sql}");
     h.get_by_label_contains("Применить").click();
-    wait_job(&mut h);
-    let w = h.state().job_win.as_ref().unwrap();
-    assert!(matches!(w.d.status, Some(Ok(_))), "{:?}", w.d.status);
-    let crate::design_ui::Loaded::Job(je) = &w.d.loaded else { panic!() };
-    assert_eq!(je.orig.as_ref().unwrap().schedule, "FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0");
-    // In a tab beside: the same designer.
-    h.get_by_label_contains("Во вкладке").click();
-    settle(&mut h);
-    for _ in 0..50 {
+    for _ in 0..100 {
         settle(&mut h);
-        let id = h.state().tab().id.clone();
-        if matches!(h.state().rt.get(&id).and_then(|r| r.design.as_ref()).map(|d| &d.loaded), Some(crate::design_ui::Loaded::Job(_))) {
+        if job(&mut h, &id).orig.as_ref().unwrap().schedule.starts_with("FREQ=WEEKLY") {
             break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(h.state().job_win.is_none());
-    assert!(h.state().tab().object.as_ref().is_some_and(|o| o.kind == crate::db::ObjKind::Job));
-    shot(&mut h, "job-tab");
+    let status = format!("{:?}", h.state().rt[&id].design.as_ref().unwrap().status);
+    assert_eq!(job(&mut h, &id).orig.as_ref().unwrap().schedule, "FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0", "{status}");
+    // Its code a switch away.
+    h.get_by_label("{ } Код").click();
+    settle(&mut h);
+    assert!(h.state().tab().text.to_uppercase().contains("DBMS_SCHEDULER.CREATE_JOB"), "{}", h.state().tab().text);
+    shot(&mut h, "job-code");
     if let Some(l) = h.state().live.get("ora") {
         l.meta.send(crate::db::Req::Apply { key: "none".into(), stmts: vec!["BEGIN DBMS_SCHEDULER.DROP_JOB('ZAPROS_TEST_JOB'); END;".into()] });
     }
     settle(&mut h);
+}
+
+#[test]
+fn schemes_and_backdrop_gradient() {
+    let (mut h, _g) = harness("look", SCRIPT, false);
+    h.state_mut().settings_open = true;
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
+    settle(&mut h);
+    shot(&mut h, "look-settings");
+    h.state_mut().settings_open = false;
+    for (id, grad) in [("dracula", Some(0usize)), ("win11-light", None), ("ubuntu", Some(4)), ("nord", Some(2))] {
+        {
+            let s = &mut h.state_mut().settings;
+            s.scheme = id.into();
+            let sc = crate::themes::find(id).unwrap();
+            if sc.dark { s.dark = sc.palette() } else { s.light = sc.palette() }
+            s.backdrop = grad.map_or_else(crate::themes::Backdrop::default, crate::themes::preset);
+        }
+        settle(&mut h);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill, egui::Color32::from_rgb(crate::themes::find(id).unwrap().bg[0], crate::themes::find(id).unwrap().bg[1], crate::themes::find(id).unwrap().bg[2]));
+        shot(&mut h, &format!("look-{id}"));
+        // The gradient shows round the sheet: the top left differs from the bottom left.
+        let img = h.render().unwrap();
+        let (a, b) = (*img.get_pixel(3, 790), *img.get_pixel(1276, 3));
+        assert_eq!(a != b, grad.is_some(), "{id}: {a:?} {b:?}");
+    }
+}
+
+/// Ctrl+click at a line / column of the editor.
+fn ctrl_click_text(h: &mut Harness<'static, App>, line: usize, col: usize) {
+    let id = h.state().tab().id.clone();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    let font = egui::FontId::monospace(h.state().settings.font_size);
+    let (cw, rh) = h.ctx.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+    let p = egui::pos2(r.left() + (col as f32 + 0.5) * cw, r.top() + 4.0 + (line as f32 + 0.5) * rh);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    h.step();
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::COMMAND });
+        h.step();
+    }
+}
+
+#[test]
+fn ctrl_click_in_the_code() {
+    let src = "select o.total, c.name\n  from orders o\n  join customers c on c.id = o.customer_id;\n";
+    let (mut h, _g) = harness("follow", src, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    // The alias `c` in `c.name` → `customers` picked.
+    ctrl_click_text(&mut h, 0, 16);
+    h.step();
+    shot(&mut h, "follow-alias");
+    let id = h.state().tab().id.clone();
+    let cur = h.state().rt[&id].ed.cursor.unwrap();
+    let (a, b) = (cur.0.min(cur.1), cur.0.max(cur.1));
+    assert_eq!(&src[a..b], "customers");
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    // The table's name → its designer in a tab beside.
+    ctrl_click_text(&mut h, 1, 9);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    assert_eq!(h.state().tab().title, "▦ orders");
+    assert!(h.state().tab().object.is_some());
+    // A name the database doesn't have: said so.
+    h.state_mut().ws_mut().active = 0;
+    h.state_mut().tab_mut().text = "select nosuch(1);\n".into();
+    settle(&mut h);
+    ctrl_click_text(&mut h, 0, 8);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    assert!(h.state().toast.as_ref().is_some_and(|(m, _)| m.contains("nosuch")), "{:?}", h.state().toast);
+}
+
+#[test]
+fn ctrl_click_opens_a_function() {
+    if std::env::var("ZAPROS_TEST_PG").is_err() {
+        return;
+    }
+    let (mut h, _g) = harness("follow-pg", "select vip(1);\n", true);
+    h.state_mut().ws_mut().conn = Some("pg".into());
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "pg", None);
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    ctrl_click_text(&mut h, 0, 8);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    for _ in 0..20 {
+        settle(&mut h);
+        if h.state().ws().tabs.len() > 2 {
+            break;
+        }
+    }
+    assert_eq!(h.state().tab().title, "vip");
+    assert!(h.state().tab().text.to_lowercase().contains("function public.vip"), "{}", h.state().tab().text);
+    shot(&mut h, "follow-function");
 }

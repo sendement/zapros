@@ -222,13 +222,11 @@ pub struct App {
     dirty: bool,
     last_save: Instant,
     pub results_max: bool,
-    applied: Option<(ThemePref, u32)>,
+    applied: Option<(ThemePref, u32, String)>,
     pub about: bool,
     ctx: egui::Context,
     /// Connections started on their own once (not again after failing).
     auto_tried: HashSet<String>,
-    /// The job window (a job's schedule and the rest).
-    pub job_win: Option<crate::design_ui::JobWin>,
 }
 
 pub fn now() -> String {
@@ -311,7 +309,6 @@ impl App {
             about: false,
             ctx: cc.egui_ctx.clone(),
             auto_tried: HashSet::new(),
-            job_win: None,
         };
         if let Some(p) = app.session.project.clone() {
             app.open_dirs.insert(p);
@@ -572,24 +569,25 @@ impl App {
         self.load_source(conn, &path, kind, &id);
     }
 
-    /// The job window: a job (`path`), or a new one in `folder`.
-    pub fn open_job(&mut self, conn: &str, path: Option<Vec<String>>, folder: Vec<String>) {
-        use crate::design_ui::{Designer, JOB_WIN, JobEdit, JobWin, Loaded};
-        let ctx = self.ctx.clone();
-        let kind = self.spec(conn).map_or(Kind::Postgres, |s| s.kind);
-        let mut d = Designer::new(conn, kind, path.clone().unwrap_or_default(), crate::db::ObjKind::Job);
-        match path {
-            Some(_) => crate::design_ui::reload(self, &ctx, &mut d, JOB_WIN),
-            None => {
-                let mut je = JobEdit::of(kind, None);
-                // Oracle: in the folder's schema.
-                if kind == Kind::Oracle {
-                    je.cur.owner = folder.first().cloned().unwrap_or_default();
-                }
-                d.loaded = Loaded::Job(je);
+    /// A name Ctrl+clicked in the code: looked up on the tab's connection
+    /// (opened when found).
+    pub fn locate(&mut self, ctx: &egui::Context, schema: Option<String>, name: String, call: bool) {
+        let ws = self.ws().clone();
+        let Some(conn) = self.tab_conn(&ws, self.tab()) else {
+            self.toast(t("У вкладки нет подключения", "The tab has no connection"));
+            return;
+        };
+        if self.ensure_live(ctx, &conn, None) {
+            if let Some(l) = self.live.get(&conn) {
+                l.meta.send(Req::Locate { schema, name, call });
             }
         }
-        self.job_win = Some(JobWin { d, folder, sql_mode: false, sql: String::new(), open: true });
+    }
+
+    /// A new job's tab (its designer), to be made in `folder`.
+    pub fn new_job(&mut self, conn: &str, folder: Vec<String>) {
+        self.new_tab_next(Some(format!("⏱ {}", t("Новый джоб", "New job"))), String::new(), Some(conn.to_string()));
+        self.tab_mut().object = Some(config::ObjRef { conn: conn.to_string(), path: folder, kind: crate::db::ObjKind::Job, code: false });
     }
 
     pub fn new_tab(&mut self, title: Option<String>, text: String, conn: Option<String>) {
@@ -1214,12 +1212,21 @@ impl App {
                         self.touch();
                     }
                 }
-                What::Described { key, def } => {
-                    if key == crate::design_ui::JOB_WIN {
-                        if let Some(w) = self.job_win.as_mut() {
-                            w.d.take(def);
+                What::Located { name, found } => match found {
+                    Ok(Some((path, kind))) => {
+                        let conn = ev.conn.clone();
+                        let title = path.last().cloned().unwrap_or(name).split('(').next().unwrap_or_default().to_string();
+                        match kind {
+                            crate::db::ObjKind::Table | crate::db::ObjKind::Job => self.open_object(&conn, path, kind, title),
+                            k if k.has_source() || k == crate::db::ObjKind::Synonym => self.open_source_next(&conn, path, k, title),
+                            _ => {}
                         }
-                    } else if let Some(d) = self.rt.get_mut(&key).and_then(|r| r.design.as_mut()) {
+                    }
+                    Ok(None) => self.toast(format!("«{name}» — {}", t("в базе не найдено", "not found in the database"))),
+                    Err(e) => self.toast(e),
+                },
+                What::Described { key, def } => {
+                    if let Some(d) = self.rt.get_mut(&key).and_then(|r| r.design.as_mut()) {
                         d.take(def);
                     }
                 }
@@ -1227,35 +1234,29 @@ impl App {
                     let conn = ev.conn.clone();
                     let ctx = self.ctx.clone();
                     let msg = |n: usize| format!("{}: {n}", t("Готово, выполнено команд", "Done, statements run"));
-                    if key == crate::design_ui::JOB_WIN {
-                        if let Some(mut w) = self.job_win.take() {
-                            w.d.busy = false;
-                            match result {
-                                Ok(n) => {
-                                    // A new one: shown as it is now (by the name given).
-                                    if let crate::design_ui::Loaded::Job(je) = &w.d.loaded {
-                                        if je.orig.is_none() {
-                                            let name = if w.d.kind == Kind::Oracle { je.cur.name.to_uppercase() } else { je.cur.name.clone() };
-                                            w.d.path = w.folder.iter().cloned().chain([name]).collect();
-                                        }
-                                    }
-                                    w.sql_mode = false;
-                                    w.d.status = Some(Ok(msg(n)));
-                                    if w.d.kind == Kind::Oracle {
-                                        crate::design_ui::reload(self, &ctx, &mut w.d, crate::design_ui::JOB_WIN);
-                                    }
-                                    let folder = w.folder.clone();
-                                    self.request_children(&conn, folder);
-                                }
-                                Err(e) => w.d.status = Some(Err(e)),
-                            }
-                            self.job_win = Some(w);
-                        }
-                    } else if let Some(mut d) = self.rt.get_mut(&key).and_then(|r| r.design.take()) {
+                    if let Some(mut d) = self.rt.get_mut(&key).and_then(|r| r.design.take()) {
                         d.busy = false;
                         match result {
                             Ok(n) => {
                                 d.status = Some(Ok(msg(n)));
+                                // A new job: from now on the one made (by the name given).
+                                let mut folder = None;
+                                if let crate::design_ui::Loaded::Job(je) = &d.loaded {
+                                    if je.orig.is_none() {
+                                        let name = if d.kind == Kind::Oracle { je.cur.name.to_uppercase() } else { je.cur.name.clone() };
+                                        folder = Some(d.path.clone());
+                                        d.path.push(name.clone());
+                                        if let Some(tb) = self.session.workspaces.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|tb| tb.id == key) {
+                                            tb.title = format!("⏱ {name}");
+                                            if let Some(o) = tb.object.as_mut() {
+                                                o.path = d.path.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(f) = folder {
+                                    self.request_children(&conn, f);
+                                }
                                 crate::design_ui::reload(self, &ctx, &mut d, &key);
                                 let (path, obj) = (d.path.clone(), d.obj);
                                 self.load_source(&conn, &path, obj, &key);
@@ -1339,16 +1340,31 @@ impl App {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.settings.theme, self.settings.ui_scale.to_bits());
-        if self.applied == Some(want) {
+        let want = (self.settings.theme, self.settings.ui_scale.to_bits(), self.settings.scheme.clone());
+        if self.applied.as_ref() == Some(&want) {
             return;
         }
         self.applied = Some(want);
-        ctx.set_theme(match self.settings.theme {
-            ThemePref::System => egui::ThemePreference::System,
-            ThemePref::Dark => egui::ThemePreference::Dark,
-            ThemePref::Light => egui::ThemePreference::Light,
-        });
+        // A scheme: its own colours, dark or light as it is.
+        match crate::themes::find(&self.settings.scheme) {
+            Some(s) => {
+                let theme = if s.dark { egui::Theme::Dark } else { egui::Theme::Light };
+                ctx.set_visuals_of(theme, crate::themes::visuals(s));
+                ctx.set_theme(theme);
+                let back = Some(egui::Color32::from_rgb(s.back[0], s.back[1], s.back[2]));
+                if s.dark { crate::themes::set_back(back, None) } else { crate::themes::set_back(None, back) }
+            }
+            None => {
+                ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+                ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+                crate::themes::set_back(None, None);
+                ctx.set_theme(match self.settings.theme {
+                    ThemePref::System => egui::ThemePreference::System,
+                    ThemePref::Dark => egui::ThemePreference::Dark,
+                    ThemePref::Light => egui::ThemePreference::Light,
+                });
+            }
+        }
         ctx.set_zoom_factor(self.settings.ui_scale.clamp(0.5, 3.0));
         ctx.all_styles_mut(crate::ui::standard);
     }
@@ -1474,6 +1490,12 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
         self.closing(&ctx);
+        // The backdrop's gradient, under the panels (they leave it bare).
+        crate::themes::set_gradient(self.settings.backdrop.on);
+        if self.settings.backdrop.on {
+            let base = crate::ui::chrome(ui.visuals());
+            self.settings.backdrop.paint(ui.painter(), ui.max_rect(), base);
+        }
         crate::side::panel(self, ui);
         crate::ui::status(self, ui);
         let actions = crate::ui::center(self, ui);
@@ -1490,10 +1512,10 @@ impl eframe::App for App {
                     let (wi, ti) = (self.session.active, self.ws().active);
                     self.save_tab(wi, ti);
                 }
+                Action::Open { schema, name, call } => self.locate(&ctx, schema, name, call),
             }
         }
         crate::dialogs::all(self, &ctx);
-        crate::design_ui::window(self, &ctx);
         if let Some((m, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(5) {
                 self.toast = None;

@@ -156,6 +156,10 @@ pub struct Settings {
     pub autosave_secs: u64,
     /// The script tabs' ✕: always there, or only under the pointer.
     pub close_always: bool,
+    /// A colour scheme's id ("" — the standard look, by `theme`).
+    pub scheme: String,
+    /// The backdrop (round the sheet) as a gradient.
+    pub backdrop: crate::themes::Backdrop,
 }
 
 impl Default for Settings {
@@ -183,6 +187,8 @@ impl Default for Settings {
             autosave_secs: 3,
             embedded_sql: true,
             close_always: false,
+            scheme: String::new(),
+            backdrop: crate::themes::Backdrop::default(),
         }
     }
 }

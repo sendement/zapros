@@ -33,7 +33,7 @@ pub fn folder_label(key: &str) -> &'static str {
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     // Full height, its top row (icons) level with the workspace tabs.
-    let frame = egui::Frame::NONE.fill(crate::ui::chrome(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
+    let frame = egui::Frame::NONE.fill(crate::ui::backdrop(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
     let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
         crate::ui::icon_bar(app, ui);
         // The list on a card of its own: no edge, rounded, as tall as the
@@ -275,7 +275,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
         }
         let jobs = kind == crate::db::Kind::Oracle || kind == crate::db::Kind::Postgres;
         if name.double_clicked() && o.kind == ObjKind::Job && jobs {
-            app.open_job(conn, Some(p.clone()), path.clone());
+            app.open_object(conn, p.clone(), ObjKind::Job, o.name.clone());
         } else if name.double_clicked() && o.kind.has_source() {
             if let Some(l) = app.live.get(conn) {
                 l.meta.send(Req::Source { path: p.clone(), kind: o.kind, open_as: o.name.split('(').next().unwrap_or(&o.name).to_string(), into: None });
@@ -283,7 +283,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
         }
         let name = match o.kind {
             ObjKind::Table => name.on_hover_text(t("Двойной щелчок — исходный код (DDL), Ctrl+щелчок — конструктор во вкладке рядом", "Double-click: source (DDL); Ctrl+click: the designer in a tab beside")),
-            ObjKind::Job if jobs => name.on_hover_text(t("Двойной щелчок — расписание и свойства, Ctrl+щелчок — во вкладке рядом", "Double-click: schedule and properties; Ctrl+click: in a tab beside")),
+            ObjKind::Job if jobs => name.on_hover_text(t("Двойной щелчок или Ctrl+щелчок — расписание и свойства во вкладке рядом", "Double-click or Ctrl+click: schedule and properties in a tab beside")),
             k if k.has_source() => name.on_hover_text(t("Двойной щелчок — исходный код (DDL), Ctrl+щелчок — во вкладке рядом", "Double-click: source (DDL); Ctrl+click: in a tab beside")),
             _ => name,
         };
@@ -299,17 +299,13 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                 ui.close();
             }
             if o.kind == ObjKind::Job && jobs {
-                if ui.button(t("Расписание и свойства…", "Schedule and properties…")).clicked() {
-                    app.open_job(conn, Some(p.clone()), path.clone());
-                    ui.close();
-                }
-                if ui.button(t("Во вкладке рядом (Ctrl+щелчок)", "In a tab beside (Ctrl+click)")).clicked() {
+                if ui.button(t("Расписание и свойства (Ctrl+щелчок)", "Schedule and properties (Ctrl+click)")).clicked() {
                     app.open_object(conn, p.clone(), ObjKind::Job, o.name.clone());
                     ui.close();
                 }
             }
             if o.kind == ObjKind::Folder && o.name == "jobs" && jobs && ui.button(t("Новый джоб…", "New job…")).clicked() {
-                app.open_job(conn, None, p.clone());
+                app.new_job(conn, p.clone());
                 ui.close();
             }
             if o.kind.has_source() && ui.button(t("Исходный код (DDL)", "Source (DDL)")).clicked() {

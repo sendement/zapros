@@ -286,6 +286,24 @@ impl Session for Ch {
         }
     }
 
+    fn locate(&mut self, schema: Option<&str>, name: &str, call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
+        if call {
+            let f = self.rows(&format!("SELECT name FROM system.functions WHERE origin = 'SQLUserDefined' AND name = {}", literal(name)))?;
+            return Ok(f.into_iter().next().map(|r| (vec!["functions".to_string(), r[0].clone()], ObjKind::Function)));
+        }
+        let db = schema.map_or("currentDatabase()".to_string(), literal);
+        let r = self.rows(&format!("SELECT database, name, engine FROM system.tables WHERE database = {db} AND name = {} LIMIT 1", literal(name)))?;
+        Ok(r.into_iter().next().map(|r| {
+            let (folder, kind) = match r[2].as_str() {
+                "View" => ("views", ObjKind::View),
+                "MaterializedView" => ("matviews", ObjKind::MatView),
+                "Dictionary" => ("dictionaries", ObjKind::Dictionary),
+                _ => ("tables", ObjKind::Table),
+            };
+            (vec![r[0].clone(), folder.into(), r[1].clone()], kind)
+        }))
+    }
+
     fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
         use crate::design::{Column, ObjDef, TableDef};
         let p: Vec<&str> = path.iter().map(String::as_str).collect();

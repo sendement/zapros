@@ -76,6 +76,9 @@ pub fn standard(s: &mut egui::Style) {
 /// The window's backdrop: the side panel and around the sheet (a little
 /// darker than the sheet the editor and results lie on).
 pub fn chrome(v: &egui::Visuals) -> Color32 {
+    if let Some(b) = crate::themes::back(v.dark_mode) {
+        return b;
+    }
     let p = v.panel_fill;
     let k = if v.dark_mode { 0.70 } else { 0.91 };
     Color32::from_rgb((p.r() as f32 * k) as u8, (p.g() as f32 * k) as u8, (p.b() as f32 * k) as u8)
@@ -83,9 +86,13 @@ pub fn chrome(v: &egui::Visuals) -> Color32 {
 
 /// The side panel's card: between the backdrop and the sheet.
 pub fn card(v: &egui::Visuals) -> Color32 {
-    let p = v.panel_fill;
-    let k = if v.dark_mode { 0.84 } else { 0.96 };
-    Color32::from_rgb((p.r() as f32 * k) as u8, (p.g() as f32 * k) as u8, (p.b() as f32 * k) as u8)
+    crate::themes::mix(chrome(v), v.panel_fill, 0.5)
+}
+
+/// What the panels round the sheet are filled with: the backdrop, or
+/// nothing over its gradient.
+pub fn backdrop(v: &egui::Visuals) -> Color32 {
+    if crate::themes::gradient() { Color32::TRANSPARENT } else { chrome(v) }
 }
 
 fn elided(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
@@ -214,7 +221,7 @@ fn query_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Action::Cancel => app.cancel(),
                 Action::Commit => app.commit_current(true),
                 Action::Rollback => app.commit_current(false),
-                Action::Save => {}
+                Action::Save | Action::Open { .. } => {}
             }
         }
     };
@@ -760,7 +767,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn status(app: &mut App, ui: &mut egui::Ui) {
-    let bg = chrome(ui.visuals());
+    let bg = backdrop(ui.visuals());
     egui::Panel::bottom("status").frame(egui::Frame::NONE.fill(bg).inner_margin(egui::Margin { left: 8, right: 10, top: 2, bottom: 3 })).show_separator_line(false).show(ui, |ui| {
         ui.horizontal(|ui| {
             let ws = app.ws().clone();
@@ -814,7 +821,7 @@ pub fn status(app: &mut App, ui: &mut egui::Ui) {
 /// The editor and, below it, the results. Returns the editor's actions.
 pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let mut actions = Vec::new();
-    let bg = chrome(ui.visuals());
+    let bg = backdrop(ui.visuals());
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ui, |ui| {
         let full = ui.max_rect();
         let row = Rect::from_min_size(full.min + Vec2::new(0.0, 6.0), Vec2::new(full.width() - 6.0, ROW_H));

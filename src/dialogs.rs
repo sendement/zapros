@@ -403,6 +403,117 @@ fn case_pick(ui: &mut egui::Ui, v: &mut Case, id: &str) -> bool {
     changed
 }
 
+/// A gradient as a strip.
+fn gradient_strip(ui: &mut egui::Ui, b: &crate::themes::Backdrop, size: egui::Vec2) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+    let mut flat = b.clone();
+    flat.radial = false;
+    flat.angle = 0.0;
+    flat.strength = 1.0;
+    let p = ui.painter().with_clip_rect(rect);
+    flat.paint(&p, rect, Color32::BLACK);
+    ui.painter().rect_stroke(rect, 4.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+    r
+}
+
+/// Colour schemes and the backdrop's gradient.
+fn look(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
+    use crate::themes::{SCHEMES, Stop, mix};
+    ui.label(RichText::new(t("Цветовая схема", "Colour scheme")).strong());
+    ui.label(RichText::new(t("Схема задаёт цвета окна и палитру редактора (её можно доправить на вкладке «Подсветка»).", "A scheme sets the window's colours and the editor's palette (fine-tune it under Colours).")).weak().small());
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.selectable_label(s.scheme.is_empty(), t("Стандартная", "Standard")).clicked() {
+            s.scheme.clear();
+        }
+        ui.add_enabled_ui(s.scheme.is_empty(), |ui| {
+            ui.radio_value(&mut s.theme, ThemePref::System, t("как в системе", "system"));
+            ui.radio_value(&mut s.theme, ThemePref::Dark, t("тёмная", "dark"));
+            ui.radio_value(&mut s.theme, ThemePref::Light, t("светлая", "light"));
+        });
+    });
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for sc in SCHEMES {
+            if crate::themes::swatch(ui, sc, s.scheme == sc.id).on_hover_text(sc.name).clicked() {
+                s.scheme = sc.id.to_string();
+                let keep = |old: &Palette| Palette { bold_keywords: old.bold_keywords, italic_comments: old.italic_comments, rainbow: old.rainbow, bands: old.bands, frames: old.frames, ..sc.palette() };
+                if sc.dark {
+                    s.dark = keep(&s.dark);
+                } else {
+                    s.light = keep(&s.light);
+                }
+            }
+        }
+    });
+    ui.add_space(6.0);
+    if ui.button(t("Вернуть стандартные палитры редактора", "Standard editor palettes back")).clicked() {
+        s.dark = Palette::dark();
+        s.light = Palette::light();
+    }
+    ui.separator();
+    let b = &mut s.backdrop;
+    ui.label(RichText::new(t("Фон окна", "Window backdrop")).strong());
+    ui.checkbox(&mut b.on, t("Градиент за вкладками, панелями и строкой состояния", "A gradient behind the tabs, panels and status line"));
+    ui.add_enabled_ui(b.on, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t("Готовые:", "Presets:"));
+            for (i, p) in crate::themes::PRESETS.iter().enumerate() {
+                let pb = crate::themes::preset(i);
+                if gradient_strip(ui, &pb, egui::vec2(64.0, 18.0)).on_hover_text(p.0).clicked() {
+                    *b = crate::themes::Backdrop { strength: b.strength, ..pb };
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut b.radial, false, t("линейный", "linear"));
+            ui.radio_value(&mut b.radial, true, t("от центра", "radial"));
+            if !b.radial {
+                ui.add_space(8.0);
+                ui.label(t("угол", "angle"));
+                ui.add(egui::Slider::new(&mut b.angle, 0.0..=360.0).step_by(5.0).suffix("°"));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(t("Насыщенность", "Strength"));
+            ui.add(egui::Slider::new(&mut b.strength, 0.05..=1.0).step_by(0.05));
+        });
+        ui.label(RichText::new(t("Цвета (уровни градиента)", "Colours (the gradient's stops)")).weak());
+        let mut remove = None;
+        let n = b.stops.len();
+        for (i, st) in b.stops.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgb(&mut st.color);
+                ui.add(egui::Slider::new(&mut st.at, 0.0..=1.0).step_by(0.01));
+                if n > 2 && ui.small_button("🗑").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            b.stops.remove(i);
+        }
+        ui.horizontal(|ui| {
+            if ui.button(format!("➕ {}", t("Цвет", "Colour"))).clicked() && !b.stops.is_empty() {
+                // Into the widest gap, its colour in between.
+                b.stops.sort_by(|x, y| x.at.total_cmp(&y.at));
+                let k = b.stops.windows(2).enumerate().map(|(k, w)| (k, w[1].at - w[0].at)).max_by(|x, y| x.1.total_cmp(&y.1)).map_or(0, |x| x.0);
+                let (a, z) = (b.stops[k].clone(), b.stops.get(k + 1).cloned().unwrap_or_else(|| b.stops[k].clone()));
+                let c = mix(Color32::from_rgb(a.color[0], a.color[1], a.color[2]), Color32::from_rgb(z.color[0], z.color[1], z.color[2]), 0.5);
+                b.stops.insert(k + 1, Stop { at: (a.at + z.at) / 2.0, color: [c.r(), c.g(), c.b()] });
+            }
+            if ui.button(t("Наоборот", "Reverse")).clicked() {
+                for st in b.stops.iter_mut() {
+                    st.at = 1.0 - st.at;
+                }
+            }
+        });
+        let w = ui.available_width().min(420.0);
+        gradient_strip(ui, b, egui::vec2(w, 22.0));
+    });
+}
+
 fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
     egui::Grid::new("pal").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
         let row = |ui: &mut egui::Ui, n: &str, c: &mut [u8; 3]| {
@@ -444,7 +555,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     let mut page: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
     egui::Window::new(t("Настройки", "Settings")).open(&mut open).default_size([640.0, 520.0]).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Бьютифаер", "Formatter"), t("Подсветка", "Colours")].iter().enumerate() {
+            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Бьютифаер", "Formatter"), t("Подсветка", "Colours"), t("Оформление", "Look")].iter().enumerate() {
                 if ui.selectable_label(page == i, *n).clicked() {
                     page = i;
                 }
@@ -453,6 +564,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
         ui.separator();
         let s = &mut app.settings;
         egui::ScrollArea::vertical().show(ui, |ui| match page {
+            5 => look(ui, s),
             0 => {
                 ui.horizontal(|ui| {
                     ui.label(t("Язык", "Language"));

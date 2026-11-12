@@ -349,6 +349,11 @@ pub trait Session: Send {
     fn describe(&mut self, _path: &[String], _kind: ObjKind) -> Res<crate::design::ObjDef> {
         Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here")))
     }
+    /// An object named in the code (`schema` None: as the session sees
+    /// it): its path in the tree and what it is.
+    fn locate(&mut self, _schema: Option<&str>, _name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
+        Ok(None)
+    }
     /// Tables and their columns of the schemas given (empty: the current).
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>>;
     /// Stops what `run` is doing, from another thread.
@@ -436,6 +441,8 @@ pub enum Req {
     Source { path: Vec<String>, kind: ObjKind, open_as: String, into: Option<String> },
     /// For a designer (`key`: whose).
     Describe { key: String, path: Vec<String>, kind: ObjKind },
+    /// Where a name in the code leads (Ctrl+click).
+    Locate { schema: Option<String>, name: String, call: bool },
     /// A designer's statements, one after another (stops at a failure).
     Apply { key: String, stmts: Vec<String> },
     Relations { schemas: Vec<String> },
@@ -486,6 +493,7 @@ pub enum What {
     Children { path: Vec<String>, items: Result<Vec<Obj>, String> },
     Source { path: Vec<String>, open_as: String, into: Option<String>, text: Result<String, String> },
     Described { key: String, def: Result<crate::design::ObjDef, String> },
+    Located { name: String, found: Result<Option<(Vec<String>, ObjKind)>, String> },
     /// How many ran, or the failure (with the statement).
     Applied { key: String, result: Result<usize, String> },
     Relations(Result<Vec<Relation>, String>),
@@ -732,6 +740,10 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                     session = None;
                 }
                 tell(What::Described { key, def: def.map_err(|f| f.message) });
+            }
+            Req::Locate { schema, name, call } => {
+                let found = if ensure(&mut session) { session.as_mut().unwrap().locate(schema.as_deref(), &name, call) } else { Err(Failure::new("no connection")) };
+                tell(What::Located { name, found: found.map_err(|f| f.message) });
             }
             Req::Apply { key, stmts } => {
                 let result = if ensure(&mut session) {

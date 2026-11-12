@@ -1,6 +1,6 @@
 //! The designers: a table's columns, a job and its schedule — in a tab of
-//! their own (Ctrl+click in the tree; Designer | Code over it) or, for a
-//! job, in a window (Designer | SQL).
+//! their own (Ctrl+click in the tree, or Ctrl+click on a name in the
+//! code), Designer | Code over it.
 
 use egui::{Color32, RichText};
 
@@ -9,9 +9,6 @@ use crate::db::{Kind, ObjKind, Req};
 use crate::design::{ColEdit, Column, JobDef, ObjDef, TableDef, edits_of, job_sql, table_changes};
 use crate::i18n::t;
 use crate::sched::Plan;
-
-/// The job window's key (a tab's is its id).
-pub const JOB_WIN: &str = "\u{1}job-window";
 
 pub struct TableEdit {
     pub orig: TableDef,
@@ -45,16 +42,6 @@ pub struct Designer {
     /// Statements sent, no answer yet.
     pub busy: bool,
     pub status: Option<Result<String, String>>,
-}
-
-pub struct JobWin {
-    pub d: Designer,
-    /// The tree folder it's listed in (refreshed after a change).
-    pub folder: Vec<String>,
-    /// SQL instead of the designer, and that SQL (as typed).
-    pub sql_mode: bool,
-    pub sql: String,
-    pub open: bool,
 }
 
 impl Designer {
@@ -442,6 +429,27 @@ fn changes_bar(app: &mut App, ui: &mut egui::Ui, d: &mut Designer, key: &str) ->
     reset
 }
 
+/// Whether the tab's object is a job yet to be made (its path: the
+/// folder it goes to).
+pub fn is_new_job(o: &crate::config::ObjRef) -> bool {
+    o.kind == ObjKind::Job && o.path.last().is_some_and(|x| x == "jobs")
+}
+
+/// A designer for the tab's object: asked for, or (a new job) blank.
+fn designer_for(app: &mut App, ctx: &egui::Context, obj: &crate::config::ObjRef, kind: Kind, key: &str) -> Designer {
+    let mut d = Designer::new(&obj.conn, kind, obj.path.clone(), obj.kind);
+    if is_new_job(obj) {
+        let mut je = JobEdit::of(kind, None);
+        if kind == Kind::Oracle {
+            je.cur.owner = obj.path.first().cloned().unwrap_or_default();
+        }
+        d.loaded = Loaded::Job(je);
+    } else {
+        reload(app, ctx, &mut d, key);
+    }
+    d
+}
+
 /// A tab's designer (in place of its text and results).
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let tab = app.tab().clone();
@@ -451,11 +459,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Some(d) => d,
         None => {
             let kind = app.spec(&obj.conn).map_or(Kind::Postgres, |s| s.kind);
-            let mut d = Designer::new(&obj.conn, kind, obj.path.clone(), obj.kind);
-            reload(app, &ctx, &mut d, &tab.id);
-            d
+            designer_for(app, &ctx, &obj, kind, &tab.id)
         }
     };
+    // The changes and Apply: pinned under it, always in sight.
+    if matches!(d.loaded, Loaded::Table(_) | Loaded::Job(_)) {
+        let mut reset = false;
+        egui::Panel::bottom(egui::Id::new(("design-changes", &tab.id))).frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 0 })).show_separator_line(false).resizable(false).show(ui, |ui| {
+            reset = changes_bar(app, ui, &mut d, &tab.id);
+        });
+        if reset {
+            let kind = d.kind;
+            d = designer_for(app, &ctx, &obj, kind, &tab.id);
+        }
+    }
     egui::ScrollArea::vertical().id_salt(("designer", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(4.0);
         match &mut d.loaded {
@@ -475,13 +492,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Loaded::Table(te) => table_ui(app, ui, d.kind, te),
             Loaded::Job(je) => job_ui(app, ui, d.kind, je),
         }
-        if matches!(d.loaded, Loaded::Table(_) | Loaded::Job(_)) {
-            ui.add_space(10.0);
-            if changes_bar(app, ui, &mut d, &tab.id) {
-                d.loaded = Loaded::Waiting;
-                reload(app, &ctx, &mut d, &tab.id);
-            }
-        }
+        ui.add_space(10.0);
     });
     if let Some(rt) = app.rt.get_mut(&tab.id) {
         rt.design = Some(d);
@@ -497,6 +508,14 @@ pub fn mode_bar(app: &mut App, ui: &mut egui::Ui) {
         let icon = obj.kind.icon();
         for (code, label) in [(false, format!("{icon} {}", t("Конструктор", "Designer"))), (true, format!("{{ }} {}", t("Код", "Code")))] {
             if ui.selectable_label(obj.code == code, label).clicked() && obj.code != code {
+                // A job yet to be made has no code of its own: the script
+                // that makes it.
+                if code && is_new_job(&obj) {
+                    if let Some(d) = app.rt.get(&tab_id).and_then(|r| r.design.as_ref()) {
+                        let sc = d.script();
+                        app.tab_mut().text = sc;
+                    }
+                }
                 if let Some(o) = app.tab_mut().object.as_mut() {
                     o.code = code;
                 }
@@ -506,10 +525,11 @@ pub fn mode_bar(app: &mut App, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("↻").on_hover_text(t("Перечитать из базы", "Read it from the database again")).clicked() {
                 let kind = app.spec(&obj.conn).map_or(Kind::Postgres, |s| s.kind);
-                let mut d = Designer::new(&obj.conn, kind, obj.path.clone(), obj.kind);
-                reload(app, &ctx, &mut d, &tab_id);
+                let d = designer_for(app, &ctx, &obj, kind, &tab_id);
                 app.rt.entry(tab_id.clone()).or_default().design = Some(d);
-                app.load_source(&obj.conn, &obj.path, obj.kind, &tab_id);
+                if !is_new_job(&obj) {
+                    app.load_source(&obj.conn, &obj.path, obj.kind, &tab_id);
+                }
             }
             if let Some(d) = app.rt.get(&tab_id).and_then(|r| r.design.as_ref()) {
                 let n = d.changes().len();
@@ -519,89 +539,4 @@ pub fn mode_bar(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
-}
-
-/// The job window: Designer | SQL.
-pub fn window(app: &mut App, ctx: &egui::Context) {
-    let Some(mut w) = app.job_win.take() else { return };
-    let title = match &w.d.loaded {
-        Loaded::Job(je) if je.orig.is_none() => t("Новый джоб", "New job").to_string(),
-        _ => format!("{} {}", t("Джоб", "Job"), w.d.path.last().cloned().unwrap_or_default()),
-    };
-    let mut open = w.open;
-    let center = ctx.content_rect().center();
-    egui::Window::new(title).id(egui::Id::new("job-window")).open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(center).default_width(680.0).default_height((ctx.content_rect().height() - 80.0).min(760.0)).resizable(true).collapsible(false).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            let was = w.sql_mode;
-            if ui.selectable_label(!w.sql_mode, format!("⏱ {}", t("Конструктор", "Designer"))).clicked() {
-                w.sql_mode = false;
-            }
-            if ui.selectable_label(w.sql_mode, format!("{{ }} {}", t("SQL", "SQL"))).clicked() {
-                w.sql_mode = true;
-            }
-            if w.sql_mode && !was {
-                w.sql = w.d.script();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_tab = !w.d.path.is_empty() && matches!(&w.d.loaded, Loaded::Job(je) if je.orig.is_some());
-                if can_tab && ui.button(t("Во вкладке", "In a tab")).on_hover_text(t("Открыть джоб во вкладке рядом", "Open the job in a tab beside")).clicked() {
-                    let title = w.d.path.last().cloned().unwrap_or_default();
-                    app.open_object(&w.d.conn, w.d.path.clone(), ObjKind::Job, title);
-                    w.open = false;
-                }
-            });
-        });
-        ui.separator();
-        let busy = w.d.busy;
-        egui::ScrollArea::vertical().id_salt("job-win-scroll").max_height(ui.available_height() - 70.0).auto_shrink([false, true]).show(ui, |ui| {
-            if w.sql_mode {
-                ui.label(RichText::new(t("Что будет выполнено (можно править):", "What runs (can be edited):")).weak());
-                let d = w.d.kind.dialect();
-                sql_edit(app, ui, d, &mut w.sql, 12, "job-sql");
-            } else {
-                match &mut w.d.loaded {
-                    Loaded::Waiting => {
-                        ui.add(egui::Spinner::new());
-                    }
-                    Loaded::Failed(e) => {
-                        ui.colored_label(crate::ui::RED, e.as_str());
-                    }
-                    Loaded::Job(je) => job_ui(app, ui, w.d.kind, je),
-                    Loaded::Table(_) => {}
-                }
-            }
-        });
-        ui.separator();
-        match &w.d.status {
-            Some(Ok(m)) => {
-                ui.colored_label(crate::ui::GREEN, m.as_str());
-            }
-            Some(Err(e)) => {
-                ui.colored_label(crate::ui::RED, e.as_str());
-            }
-            None => {}
-        }
-        ui.horizontal(|ui| {
-            let script = if w.sql_mode { w.sql.clone() } else { w.d.script() };
-            let some = !script.trim().is_empty();
-            if busy {
-                ui.add(egui::Spinner::new().size(14.0));
-            }
-            if ui.add_enabled(some && !busy, crate::ui::tinted(format!("✔ {}", t("Применить", "Apply")), crate::ui::GREEN)).clicked() {
-                let stmts = split(w.d.kind, &script);
-                apply(app, ctx, &mut w.d, JOB_WIN, stmts);
-            }
-            if !w.sql_mode && !some {
-                ui.label(RichText::new(t("Пока ничего не изменено", "Nothing changed yet")).weak());
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(t("Закрыть", "Close")).clicked() {
-                    w.open = false;
-                }
-            });
-        });
-    });
-    if open && w.open {
-        app.job_win = Some(w);
-    }
 }

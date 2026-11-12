@@ -15,6 +15,7 @@ mod notebook_ui;
 mod outline_ui;
 mod results;
 mod sched;
+mod themes;
 mod secrets;
 mod side;
 mod sql;

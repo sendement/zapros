@@ -105,6 +105,20 @@ impl Session for Lite {
         Ok(r.into_iter().next().and_then(|r| r.into_iter().next()).map(|s| s + ";\n").unwrap_or_default())
     }
 
+    fn locate(&mut self, _schema: Option<&str>, name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
+        let r = self.rows("SELECT name, type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND name NOT LIKE 'sqlite_%' LIMIT 1", &[name])?;
+        Ok(r.into_iter().next().and_then(|r| {
+            let (folder, kind) = match r[1].as_str() {
+                "table" => ("tables", ObjKind::Table),
+                "view" => ("views", ObjKind::View),
+                "index" => ("indexes", ObjKind::Index),
+                "trigger" => ("triggers", ObjKind::Trigger),
+                _ => return None,
+            };
+            Some((vec![folder.to_string(), r[0].clone()], kind))
+        }))
+    }
+
     fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
         use crate::design::{Column, ObjDef, TableDef};
         let p: Vec<&str> = path.iter().map(String::as_str).collect();

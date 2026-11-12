@@ -19,7 +19,7 @@ use crate::sql::complete::{self, Hints};
 use crate::sql::lex::{self, Tk};
 use crate::sql::{Dialect, statement_at};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     RunStatement,
     RunScript,
@@ -29,6 +29,9 @@ pub enum Action {
     Save,
     Commit,
     Rollback,
+    /// Ctrl+click on a name of the database's: open it (a table's
+    /// designer, a function's code…).
+    Open { schema: Option<String>, name: String, call: bool },
 }
 
 pub struct Popup {
@@ -67,6 +70,8 @@ pub struct EditorState {
     pub block: Option<crate::block::Block>,
     /// The mouse is making the block now.
     block_drag: bool,
+    /// Where a Ctrl+click led (lit a moment).
+    flash: Option<(Range<usize>, std::time::Instant)>,
     /// The text's rect, as of the last frame (where an Alt press lands).
     pub text_rect: Option<egui::Rect>,
     /// (text hash, cursor) → bracket pair and the statement there.
@@ -479,6 +484,67 @@ fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text:
     let cx = if b.head.1 == c1 { x(c1) } else { x(c0) };
     ui.painter().line_segment([egui::pos2(cx, top), egui::pos2(cx, bottom)], egui::Stroke::new(stroke.width.max(1.5), stroke.color));
     ctx.request_repaint_after(std::time::Duration::from_millis(500));
+}
+
+/// The name at `at` (letters, digits, _ $ #, or a quoted one).
+fn name_at(text: &str, at: usize) -> Option<Range<usize>> {
+    let at = floor(text, at.min(text.len()));
+    let is = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '#';
+    let a = text[..at].char_indices().rev().take_while(|(_, c)| is(*c)).last().map_or(at, |(i, _)| i);
+    let b = text[at..].char_indices().find(|(_, c)| !is(*c)).map_or(text.len(), |(i, _)| at + i);
+    (b > a).then_some(a..b)
+}
+
+/// Ctrl held: the name under the pointer underlined, a hand; a click goes
+/// where it leads — in the text (an alias's table, a CTE, the script's own
+/// function: picked and lit), or to the database (an action).
+fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str, st: &mut EditorState, output: &egui::text_edit::TextEditOutput, cx: &Ctx, out: &mut Out) {
+    let gp = output.galley_pos;
+    let rect_of = |r: &Range<usize>| {
+        let a = output.galley.pos_from_cursor(CCursor::new(char_of(text, r.start))).translate(gp.to_vec2());
+        let b = output.galley.pos_from_cursor(CCursor::new(char_of(text, r.end))).translate(gp.to_vec2());
+        egui::Rect::from_min_max(a.min, egui::pos2(b.max.x.max(a.min.x + 2.0), a.max.y))
+    };
+    // The place led to, lit a moment.
+    if let Some((r, since)) = st.flash.clone() {
+        let t = since.elapsed().as_secs_f32();
+        if t > 1.4 || r.end > text.len() {
+            st.flash = None;
+        } else {
+            let k = (1.0 - t / 1.4).clamp(0.0, 1.0);
+            let c = ui.visuals().selection.stroke.color;
+            let rect = rect_of(&r).expand2(egui::vec2(2.0, 1.0));
+            ui.painter().rect_filled(rect, 3.0, ui.visuals().selection.bg_fill.gamma_multiply(0.6 * k));
+            ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.5, c.gamma_multiply(k)), egui::StrokeKind::Outside);
+            ctx.request_repaint();
+        }
+    }
+    if !ctx.input(|i| i.modifiers.command) {
+        return;
+    }
+    let Some(pos) = ctx.pointer_hover_pos().filter(|p| output.response.rect.contains(*p)) else { return };
+    let at = byte_of(text, output.galley.cursor_from_pos(pos - gp).index.0);
+    let Some(word) = name_at(text, at) else { return };
+    let wr = rect_of(&word);
+    if !wr.expand(2.0).contains(pos) {
+        return;
+    }
+    let link = ui.visuals().hyperlink_color;
+    ui.painter().hline(wr.x_range(), wr.bottom() - 1.0, egui::Stroke::new(1.2, link));
+    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    if !output.response.clicked() {
+        return;
+    }
+    let has_col = |t: &str, c: &str| cx.rels.iter().any(|r| r.name.eq_ignore_ascii_case(t) && r.cols.iter().any(|(n, _)| n.eq_ignore_ascii_case(c)));
+    match crate::sql::follow::follow(text, word.start, cx.dialect, &has_col).map(|x| x.1) {
+        Some(crate::sql::follow::Target::Here(r)) => {
+            set_cursor(ctx, id, text, r.start, r.end);
+            ui.scroll_to_rect(rect_of(&r), Some(egui::Align::Center));
+            st.flash = Some((r, std::time::Instant::now()));
+        }
+        Some(crate::sql::follow::Target::Object { schema, name, call }) => out.actions.push(Action::Open { schema, name, call }),
+        None => {}
+    }
 }
 
 fn set_cursor(ctx: &egui::Context, id: egui::Id, text: &str, a: usize, b: usize) {
@@ -937,6 +1003,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         }
     }
     block_mouse_and_paint(ui, &ctx, id, text, st, &output, alt_press, under_block, char_w);
+    follow_links(ui, &ctx, id, text, st, &output, cx, &mut out);
 
     // Line numbers, error dots.
     let painter = ui.painter().clone();

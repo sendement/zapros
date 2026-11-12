@@ -43,15 +43,30 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   ClickHouse, SQLite — where SQLite can't change a column it says so), then
   applied, reset or opened as a script; keys, indexes and the engine are
   listed below.
-- **Jobs** (Oracle Scheduler, pg_cron): double-click opens a window with
-  the job's schedule set by hand — every N minutes, hourly, daily, on days
+- **Jobs** (Oracle Scheduler, pg_cron): double-click (or Ctrl+click) opens
+  a tab beside with the job's schedule set by hand — every N minutes, hourly, daily, on days
   of the week, on days of the month (the last one too), at one or several
   times — written as `repeat_interval` or cron, in words, with the next five
   runs; an expression the designer can't read is edited as text. Also
   enabled, what it runs, the comment, its state and last / next run.
-  Designer | SQL: the script it makes (CREATE_JOB / SET_ATTRIBUTE,
-  `cron.schedule` / `cron.alter_job`) can be edited before it's applied.
-  "New job…" on the Jobs folder; the same designer in a tab by Ctrl+click.
+  The script it makes (CREATE_JOB / SET_ATTRIBUTE, `cron.schedule` /
+  `cron.alter_job`) is shown under it, pinned with Apply; "New job…" on the
+  Jobs folder opens a blank one (its Code: the script that makes it).
+- **Ctrl+click in the code** (the script and notebook cells; with Ctrl held
+  the name under the pointer is underlined): an alias — its table (or CTE)
+  picked and lit; a CTE's name — its definition; a function or procedure of
+  the script itself (a package body's) — there; a column — the statement's
+  table that has it; a table — its designer in a tab beside; a view,
+  function, procedure, package, sequence… — its code in a tab beside
+  (schema-qualified, `package.member` and synonyms too).
+- **Colour schemes**: Windows 11 Dark / Light, Dracula, Ubuntu / Ubuntu
+  Light, One Dark, JetBrains Darcula, Monokai, Nord, Solarized Dark / Light,
+  GitHub Dark / Light, Gruvbox, Catppuccin Mocha / Latte, Tokyo Night —
+  window colours and the editor's palette together (Settings → Look); the
+  standard look follows the system or is set dark / light.
+- **Backdrop gradient**: behind the tabs, panels and status line, any
+  number of colour stops, linear at an angle or from the centre, its
+  strength over the scheme's own backdrop; presets to start from.
 - **Packages in two parts.** An Oracle package (opened from the tree or a
   file) shows its specification and body as two sub-tabs (Alt+1 / Alt+2),
   each run (compiled) on its own and saved together; the script's "/"

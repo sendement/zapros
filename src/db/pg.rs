@@ -372,13 +372,52 @@ impl Session for Pg {
         })
     }
 
+    fn locate(&mut self, schema: Option<&str>, name: &str, call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
+        let s = schema.unwrap_or("");
+        let rel = |me: &mut Self| -> Res<Option<(Vec<String>, ObjKind)>> {
+            let r = me.rows(
+                "select n.nspname::text, c.relname::text, c.relkind::text from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where c.relname = $2 and c.relkind in ('r', 'p', 'f', 'v', 'm', 'S') and (n.nspname = $1 or ($1 = '' and pg_table_is_visible(c.oid)))
+                  order by n.nspname = 'public' desc limit 1",
+                &[s, name],
+            )?;
+            Ok(r.into_iter().next().map(|r| {
+                let (folder, kind) = match r[2].as_str() {
+                    "v" => ("views", ObjKind::View),
+                    "m" => ("matviews", ObjKind::MatView),
+                    "S" => ("sequences", ObjKind::Sequence),
+                    _ => ("tables", ObjKind::Table),
+                };
+                (vec![r[0].clone(), folder.into(), r[1].clone()], kind)
+            }))
+        };
+        let func = |me: &mut Self| -> Res<Option<(Vec<String>, ObjKind)>> {
+            let r = me.rows(
+                "select n.nspname::text, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', p.prokind::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                  where p.proname = $2 and (n.nspname = $1 or ($1 = '' and pg_function_is_visible(p.oid))) and n.nspname not in ('pg_catalog', 'information_schema') limit 1",
+                &[s, name],
+            )?;
+            Ok(r.into_iter().next().map(|r| if r[2] == "p" { (vec![r[0].clone(), "procedures".into(), r[1].clone()], ObjKind::Procedure) } else { (vec![r[0].clone(), "functions".into(), r[1].clone()], ObjKind::Function) }))
+        };
+        if call {
+            if let Some(f) = func(self)? {
+                return Ok(Some(f));
+            }
+            return rel(self);
+        }
+        if let Some(r) = rel(self)? {
+            return Ok(Some(r));
+        }
+        func(self)
+    }
+
     fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
         use crate::design::{Column, JobDef, ObjDef, TableDef};
         let p: Vec<&str> = path.iter().map(String::as_str).collect();
         match (p.as_slice(), kind) {
             (["jobs", job], ObjKind::Job) => {
                 let id = job.split(' ').next().unwrap_or("0");
-                let r = self.rows("select jobid::text, coalesce(jobname, ''), schedule, command, database, active::text, username from cron.job where jobid = $1::text::bigint", &[id])?;
+                let r = self.rows("select jobid::text, coalesce(jobname, ''), schedule, command, database, active::text, username from cron.job where jobid::text = $1 or jobname = $2 order by jobid::text = $1 desc limit 1", &[id, job])?;
                 let r = r.into_iter().next().ok_or_else(|| Failure::new("no such job"))?;
                 let last = self
                     .rows("select status || ' · ' || to_char(start_time, 'YYYY-MM-DD HH24:MI:SS') from cron.job_run_details where jobid = $1::text::bigint order by start_time desc limit 1", &[id])
@@ -416,7 +455,7 @@ impl Session for Pg {
         let (s, name) = match p.as_slice() {
             ["jobs", job] => {
                 let id = job.split(' ').next().unwrap_or("0");
-                let r = self.rows("select coalesce(jobname, ''), schedule, command, database from cron.job where jobid = $1::text::bigint", &[id])?;
+                let r = self.rows("select coalesce(jobname, ''), schedule, command, database from cron.job where jobid::text = $1 or jobname = $2 order by jobid::text = $1 desc limit 1", &[id, job])?;
                 let r = r.first().ok_or_else(|| Failure::new("no such job"))?;
                 return Ok(format!("-- database: {}\nSELECT cron.schedule({}, {}, $job$\n{}\n$job$);\n", r[3], literal(&r[0]), literal(&r[1]), r[2].trim()));
             }

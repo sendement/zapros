@@ -309,6 +309,52 @@ impl Session for Ora {
         Ok(text + "\n")
     }
 
+    fn locate(&mut self, schema: Option<&str>, name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
+        let pick = |rows: Vec<Vec<String>>| -> Option<(Vec<String>, ObjKind)> {
+            let r = rows.into_iter().next()?;
+            let (folder, kind) = match r[2].as_str() {
+                "TABLE" => ("tables", ObjKind::Table),
+                "VIEW" => ("views", ObjKind::View),
+                "MATERIALIZED VIEW" => ("matviews", ObjKind::MatView),
+                "FUNCTION" => ("functions", ObjKind::Function),
+                "PROCEDURE" => ("procedures", ObjKind::Procedure),
+                "PACKAGE" | "PACKAGE BODY" => ("packages", ObjKind::Package),
+                "SEQUENCE" => ("sequences", ObjKind::Sequence),
+                "TRIGGER" => ("triggers", ObjKind::Trigger),
+                "TYPE" | "TYPE BODY" => ("types", ObjKind::Type),
+                "JOB" => ("jobs", ObjKind::Job),
+                _ => return None,
+            };
+            Some((vec![r[0].clone(), folder.into(), r[1].clone()], kind))
+        };
+        let q = "SELECT owner, object_name, object_type FROM all_objects WHERE object_name = :2 AND owner = NVL(:1, USER)
+                  AND object_type IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'FUNCTION', 'PROCEDURE', 'PACKAGE', 'SEQUENCE', 'TRIGGER', 'TYPE', 'JOB')
+                  ORDER BY DECODE(object_type, 'TABLE', 0, 'MATERIALIZED VIEW', 1, 2)";
+        let none: Option<&str> = None;
+        if let Some(s) = schema {
+            if let Some(f) = pick(self.rows(q, &[&s, &name])?) {
+                return Ok(Some(f));
+            }
+            // pkg.member: the package (in the session's schema, or by a synonym).
+            if let Some(f) = pick(self.rows(q, &[&none, &s])?) {
+                return Ok(Some(f));
+            }
+            let syn = self.rows("SELECT table_owner, table_name FROM all_synonyms WHERE synonym_name = :1 AND owner IN (USER, 'PUBLIC') ORDER BY DECODE(owner, 'PUBLIC', 1, 0)", &[&s])?;
+            if let Some(r) = syn.into_iter().next() {
+                return Ok(pick(self.rows(q, &[&r[0], &r[1]])?));
+            }
+            return Ok(None);
+        }
+        if let Some(f) = pick(self.rows(q, &[&none, &name])?) {
+            return Ok(Some(f));
+        }
+        let syn = self.rows("SELECT table_owner, table_name FROM all_synonyms WHERE synonym_name = :1 AND owner IN (USER, 'PUBLIC') ORDER BY DECODE(owner, 'PUBLIC', 1, 0)", &[&name])?;
+        match syn.into_iter().next() {
+            Some(r) => Ok(pick(self.rows(q, &[&r[0], &r[1]])?)),
+            None => Ok(None),
+        }
+    }
+
     fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
         use crate::design::{Column, JobDef, ObjDef, TableDef};
         let p: Vec<&str> = path.iter().map(String::as_str).collect();
