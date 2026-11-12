@@ -1,6 +1,7 @@
 //! zapros: an SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite.
 
 mod app;
+mod block;
 mod config;
 mod db;
 mod dialogs;

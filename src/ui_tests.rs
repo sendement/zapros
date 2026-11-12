@@ -1061,3 +1061,101 @@ fn notebook_markdown_view_edit_switch() {
     assert!(!editing(&h), "back to the formatted view");
     shot(&mut h, "nb-md-view");
 }
+
+#[test]
+fn block_selection_with_alt() {
+    let (mut h, _g) = harness("block", "select a,\n       bb,\n       c\n  from orders;\n", false);
+    focus_editor(&mut h, 0);
+    let id = h.state().tab().id.clone();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    let font = egui::FontId::monospace(h.state().settings.font_size);
+    let (cw, rh) = h.ctx.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+    let at = |line: f32, col: f32| egui::pos2(r.left() + col * cw, r.top() + 4.0 + (line + 0.5) * rh);
+    // Alt held: from line 1 col 7 down to line 3.
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+    h.input_mut().events.push(egui::Event::PointerMoved(at(0.0, 7.0)));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(0.0, 7.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::ALT });
+    h.step();
+    for l in [0.7, 1.4, 2.0] {
+        h.input_mut().events.push(egui::Event::PointerMoved(at(l, 7.0)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(2.0, 7.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::ALT });
+    h.step();
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+    assert_eq!(h.state().rt[&id].ed.block.map(|b| (b.lines(), b.cols())), Some(((0, 2), (7, 7))));
+    // Typed on every line at once, then a Backspace on every line.
+    type_text(&mut h, "o.");
+    assert_eq!(h.state().tab().text, "select o.a,\n       o.bb,\n       o.c\n  from orders;\n");
+    key(&mut h, egui::Key::Backspace, egui::Modifiers::NONE);
+    assert_eq!(h.state().tab().text, "select oa,\n       obb,\n       oc\n  from orders;\n");
+    h.step();
+    let caret = h.state().rt[&id].ed.cursor;
+    assert_eq!(caret, Some((31, 31)), "the text's caret at the block's head");
+    shot(&mut h, "block");
+    // Esc: back to one caret, typing goes to one place.
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(h.state().rt[&id].ed.block.is_none());
+}
+
+#[test]
+fn wheel_scrolls_while_selecting() {
+    let script: String = (1..=120).map(|i| format!("select {i} as n;\n")).collect();
+    let (mut h, _g) = harness("wheel-sel", &script, false);
+    focus_editor(&mut h, 0);
+    let id = h.state().tab().id.clone();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    let p = egui::pos2(r.left() + 40.0, r.top() + 12.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    // A small move makes it a drag; then the wheel, the pointer still.
+    h.input_mut().events.push(egui::Event::PointerMoved(p + egui::vec2(0.0, 30.0)));
+    h.step();
+    for _ in 0..6 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -300.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    for _ in 0..20 {
+        h.step();
+    }
+    let (a, b) = h.state().rt[&id].ed.cursor.unwrap();
+    let text = h.state().tab().text.clone();
+    let line = |x: usize| text[..x].matches('\n').count();
+    assert!(line(a.max(b)) > 40, "the selection reached line {}", line(a.max(b)));
+    assert_eq!(line(a.min(b)), 0);
+    h.input_mut().events.push(egui::Event::PointerButton { pos: p + egui::vec2(0.0, 30.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+}
+
+#[test]
+fn block_rectangle_cut() {
+    let (mut h, _g) = harness("block-rect", "select id,\n       note,\n       total\n  from orders;\n", false);
+    focus_editor(&mut h, 0);
+    let id = h.state().tab().id.clone();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    let font = egui::FontId::monospace(h.state().settings.font_size);
+    let (cw, rh) = h.ctx.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+    let at = |line: f32, col: f32| egui::pos2(r.left() + col * cw, r.top() + 4.0 + (line + 0.5) * rh);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+    h.input_mut().events.push(egui::Event::PointerMoved(at(0.0, 0.0)));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(0.0, 0.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::ALT });
+    h.step();
+    for (l, c) in [(0.5, 3.0), (1.5, 6.0), (2.0, 7.0)] {
+        h.input_mut().events.push(egui::Event::PointerMoved(at(l, c)));
+        h.step();
+    }
+    shot(&mut h, "block-rect");
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(2.0, 7.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::ALT });
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+    h.step();
+    h.input_mut().events.push(egui::Event::Cut);
+    h.step();
+    h.step();
+    assert_eq!(h.state().tab().text, "id,\nnote,\ntotal\n  from orders;\n");
+}

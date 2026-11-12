@@ -104,6 +104,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   (double-click: back to the usual).
 - **Pointer**: a pointing hand over everything that clicks (buttons,
   arrows, tabs, the sort squares); scroll bars always shown.
+- **Block selection**: Alt and the mouse pick a rectangle of lines and
+  columns; typing, Backspace / Delete, paste (a line each when the counts
+  match) act on every line of it, Ctrl+C / Ctrl+X take its columns; Esc,
+  a move or a plain click end it. The wheel scrolls while a selection is
+  being dragged.
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Results**: a tab per statement, virtual scrolling, sort by column,

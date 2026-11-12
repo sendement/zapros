@@ -61,6 +61,12 @@ pub struct EditorState {
     /// Put the cursor here (bytes) next frame and focus.
     pub goto: Option<usize>,
     pub focus: bool,
+    /// A block (column) selection, made with Alt and the mouse.
+    pub block: Option<crate::block::Block>,
+    /// The mouse is making the block now.
+    block_drag: bool,
+    /// The text's rect, as of the last frame (where an Alt press lands).
+    pub text_rect: Option<egui::Rect>,
     /// (text hash, cursor) → bracket pair and the statement there.
     around: Option<(u64, usize, Option<(usize, usize)>, Option<Range<usize>>)>,
 }
@@ -355,6 +361,67 @@ fn edit(text: &mut String, r: Range<usize>, with: &str) -> usize {
     r.start + mark.unwrap_or(with.len())
 }
 
+/// The block selection: made by the mouse (Alt held), the text's caret
+/// kept at its head, its columns painted under the text, a tall caret when
+/// it's thin.
+#[allow(clippy::too_many_arguments)]
+fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str, st: &mut EditorState, output: &egui::text_edit::TextEditOutput, alt_press: bool, under: egui::layers::ShapeIdx, char_w: f32) {
+    use crate::block::{self, Block};
+    let gp = output.galley_pos;
+    let to_lc = |pos: egui::Pos2| {
+        let c = output.galley.cursor_from_pos(pos - gp);
+        let line = text[..byte_of(text, c.index.0)].matches('\n').count();
+        (line, ((pos.x - gp.x) / char_w).round().max(0.0) as usize)
+    };
+    if st.block_drag {
+        if alt_press {
+            if let Some(o) = ctx.input(|i| i.pointer.press_origin()) {
+                let (l, c) = to_lc(o);
+                st.block = Some(Block::at(l, c));
+            }
+        }
+        if let (Some(b), Some(p)) = (st.block.as_mut(), ctx.input(|i| i.pointer.interact_pos())) {
+            b.head = to_lc(p);
+        }
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            st.block_drag = false;
+        }
+    }
+    let Some(b) = st.block else { return };
+    let sp = block::spans(text);
+    let (l0, l1) = b.lines();
+    let (c0, c1) = b.cols();
+    // The text's caret at the block's head (no selection of its own).
+    let hl = b.head.0.min(sp.len() - 1);
+    let at = sp[hl].0 + block::byte_at(&text[sp[hl].0..sp[hl].1], b.head.1);
+    if output.cursor_range.is_none_or(|r| r.primary != r.secondary || byte_of(text, r.primary.index.0) != at) {
+        set_cursor(ctx, id, text, at, at);
+        ctx.request_repaint();
+    }
+    let row = |l: usize| {
+        let ci = char_of(text, sp[l.min(sp.len() - 1)].0);
+        output.galley.pos_from_cursor(egui::text::CCursor::new(ci)).translate(gp.to_vec2())
+    };
+    let x = |c: usize| gp.x + c as f32 * char_w;
+    let fill = ui.visuals().selection.bg_fill;
+    let mut shapes = Vec::new();
+    if c0 < c1 {
+        for l in l0..=l1.min(sp.len() - 1) {
+            let r = row(l);
+            if r.height() > 0.5 {
+                shapes.push(egui::Shape::rect_filled(egui::Rect::from_x_y_ranges(x(c0)..=x(c1), r.y_range()), 0.0, fill));
+            }
+        }
+    }
+    ui.painter().set(under, egui::Shape::Vec(shapes));
+    // A caret as tall as the block, where typing goes.
+    let (top, bottom) = (row(l0).top(), row(l1).bottom());
+    let stroke = ui.visuals().text_cursor.stroke;
+    let cx = if b.head.1 == c1 { x(c1) } else { x(c0) };
+    ui.painter().line_segment([egui::pos2(cx, top), egui::pos2(cx, bottom)], egui::Stroke::new(stroke.width.max(1.5), stroke.color));
+    ctx.request_repaint_after(std::time::Duration::from_millis(500));
+}
+
 fn set_cursor(ctx: &egui::Context, id: egui::Id, text: &str, a: usize, b: usize) {
     let mut st = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
     st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(char_of(text, b)), CCursor::new(char_of(text, a)))));
@@ -458,6 +525,82 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     }
     if std::mem::take(&mut st.focus) {
         ctx.memory_mut(|m| m.request_focus(id));
+    }
+    // Focus gone (Esc, a click elsewhere): no block.
+    if !focused && !st.block_drag {
+        st.block = None;
+    }
+    // A block selection takes the typing, Backspace / Delete, copy, cut and
+    // paste for all its lines; a move, Esc, Enter or undo ends it.
+    if focused && st.block.is_some() {
+        use crate::block::{self, Op};
+        let mut ops: Vec<Op> = Vec::new();
+        let (mut copy, mut end) = (false, false);
+        ui.input_mut(|i| {
+            i.events.retain(|e| match e {
+                egui::Event::Text(t) => {
+                    match ops.last_mut() {
+                        Some(Op::Insert(p)) if p.len() == 1 => p[0].push_str(t),
+                        _ => ops.push(Op::Insert(vec![t.clone()])),
+                    }
+                    false
+                }
+                egui::Event::Paste(t) => {
+                    ops.push(Op::Insert(st.block.as_ref().map_or_else(|| vec![t.clone()], |b| block::pieces(t, b))));
+                    false
+                }
+                egui::Event::Copy => {
+                    copy = true;
+                    false
+                }
+                egui::Event::Cut => {
+                    copy = true;
+                    ops.push(Op::Delete);
+                    false
+                }
+                egui::Event::Key { key: Key::Backspace, pressed, .. } => {
+                    if *pressed {
+                        ops.push(Op::Backspace);
+                    }
+                    false
+                }
+                egui::Event::Key { key: Key::Delete, pressed, .. } => {
+                    if *pressed {
+                        ops.push(Op::Delete);
+                    }
+                    false
+                }
+                egui::Event::Key { key: Key::Escape, pressed: true, .. } => {
+                    end = true;
+                    false
+                }
+                egui::Event::Key { key, pressed: true, modifiers, .. }
+                    if matches!(key, Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End | Key::PageUp | Key::PageDown | Key::Enter | Key::Tab) || (modifiers.command && matches!(key, Key::Z | Key::Y | Key::A)) =>
+                {
+                    end = true;
+                    true
+                }
+                _ => true,
+            });
+        });
+        if let Some(b) = st.block.as_mut() {
+            if copy {
+                ctx.copy_text(block::text_of(text, b));
+            }
+            // (Cut of a caret-thin block deletes nothing.)
+            let thin = b.cols().0 == b.cols().1;
+            for op in &ops {
+                if copy && thin && *op == Op::Delete {
+                    continue;
+                }
+                block::edit(text, b, op);
+                out.changed = true;
+            }
+        }
+        st.popup = None;
+        if end {
+            st.block = None;
+        }
     }
     let cur = egui::text_edit::TextEditState::load(&ctx, id).and_then(|s| s.cursor.char_range()).map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
     let mut typed: Option<String> = None;
@@ -675,9 +818,30 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     // selection must keep it — the selection as of before the press.)
     let right_press = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
     let sel_before = st.cursor;
+    // Alt and a press on the text: a block selection starts; a press
+    // without Alt ends one.
+    let (alt_press, plain_press) = ctx.input(|i| {
+        let on = i.pointer.interact_pos().is_some_and(|p| st.text_rect.is_some_and(|r| r.contains(p)));
+        let pressed = on && i.pointer.primary_pressed();
+        (pressed && i.modifiers.alt, pressed && !i.modifiers.alt)
+    });
+    if alt_press {
+        st.block_drag = true;
+    }
+    if plain_press {
+        st.block = None;
+        st.block_drag = false;
+    }
+    let blocky = st.block.is_some() || st.block_drag;
+    // Under the text: the block's columns.
+    let under_block = ui.painter().add(egui::Shape::Noop);
     let output = ui
         .horizontal_top(|ui| {
             ui.add_space(gutter);
+            // (The text's own selection hidden while a block is made.)
+            if blocky {
+                ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
+            }
             egui::TextEdit::multiline(text)
         .id(id)
         .font(FontId::monospace(font))
@@ -703,6 +867,16 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         }
         st.folds.retain(|&f| f <= text.len() && (f == 0 || text.as_bytes().get(f - 1) == Some(&b'\n')));
     }
+    st.text_rect = Some(output.response.rect);
+    // The wheel while the mouse is held (a selection being dragged): egui's
+    // scroll areas ignore it then, so it's passed on by hand.
+    if output.response.dragged() || st.block_drag {
+        let d = ctx.input(|i| i.smooth_scroll_delta());
+        if d != egui::Vec2::ZERO {
+            ui.scroll_with_delta(d);
+        }
+    }
+    block_mouse_and_paint(ui, &ctx, id, text, st, &output, alt_press, under_block, char_w);
 
     // Line numbers, error dots.
     let painter = ui.painter().clone();
