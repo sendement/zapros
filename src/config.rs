@@ -212,6 +212,20 @@ pub struct Tab {
     pub on_body: bool,
     /// As a notebook (cells), when on.
     pub notebook: Option<Notebook>,
+    /// A database object's tab: its designer, or its code (the text).
+    pub object: Option<ObjRef>,
+}
+
+/// The object a tab shows.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObjRef {
+    pub conn: String,
+    /// Its path in the tree.
+    pub path: Vec<String>,
+    pub kind: crate::db::ObjKind,
+    /// The code shown (else the designer).
+    #[serde(default)]
+    pub code: bool,
 }
 
 /// A tab as a notebook: cells of SQL or Markdown.
@@ -294,7 +308,22 @@ impl Notebook {
 
 impl Default for Tab {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false, notebook: None }
+        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false, notebook: None, object: None }
+    }
+}
+
+/// A PL/SQL unit with the "/" that ends it in a script.
+fn slashed(s: &str) -> String {
+    let t = s.trim_end();
+    if t.ends_with("\n/") || t == "/" { format!("{t}\n") } else { format!("{t}\n/\n") }
+}
+
+/// A part shown apart: without the "/" (sessions from before kept it).
+pub fn unslashed(s: &str) -> String {
+    let t = s.trim_end();
+    match t.strip_suffix("\n/") {
+        Some(rest) => format!("{}\n", rest.trim_end()),
+        None => s.to_string(),
     }
 }
 
@@ -304,10 +333,9 @@ impl Tab {
         if let Some(nb) = self.notebook.as_ref().filter(|n| n.on) {
             return crate::sql::notebook::render(&nb.pieces());
         }
-        match &self.other {
+        match self.parts() {
             None => self.text.clone(),
-            Some(o) if self.on_body => format!("{o}\n{}", self.text),
-            Some(o) => format!("{}\n{o}", self.text),
+            Some((spec, body)) => format!("{}\n{}", slashed(spec), slashed(body)),
         }
     }
 

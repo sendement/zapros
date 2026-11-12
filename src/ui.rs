@@ -23,10 +23,14 @@ pub fn conn_dot(app: &App, conn: &str) -> (Color32, String) {
 
 /// Height of the row of workspace tabs (and of the icons beside it).
 pub const ROW_H: f32 = 32.0;
-const SHEET_R: f32 = 8.0;
+pub const SHEET_R: f32 = 8.0;
+/// Where the sheet lay last frame (for the side panel's card).
+pub const SHEET_KEY: &str = "sheet-rect";
 /// Gap between a not-chosen workspace tab and the sheet.
-const IDLE_GAP: f32 = 4.0;
-const TAB_R: f32 = 8.0;
+const IDLE_GAP: f32 = 3.0;
+/// …and between it and the row's top.
+const IDLE_TOP: f32 = 1.0;
+const TAB_R: f32 = 6.0;
 const FILLET: f32 = 6.0;
 /// Where the first workspace tab starts, from the sheet's left edge.
 const TABS_FROM: f32 = 16.0;
@@ -74,6 +78,13 @@ pub fn standard(s: &mut egui::Style) {
 pub fn chrome(v: &egui::Visuals) -> Color32 {
     let p = v.panel_fill;
     let k = if v.dark_mode { 0.70 } else { 0.91 };
+    Color32::from_rgb((p.r() as f32 * k) as u8, (p.g() as f32 * k) as u8, (p.b() as f32 * k) as u8)
+}
+
+/// The side panel's card: between the backdrop and the sheet.
+pub fn card(v: &egui::Visuals) -> Color32 {
+    let p = v.panel_fill;
+    let k = if v.dark_mode { 0.84 } else { 0.96 };
     Color32::from_rgb((p.r() as f32 * k) as u8, (p.g() as f32 * k) as u8, (p.b() as f32 * k) as u8)
 }
 
@@ -310,7 +321,7 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
         let r = ui.interact(rect, ui.id().with(("ws-tab", i)), egui::Sense::click());
         let is_active = i == active;
         // Not chosen: a rounded box clear of the sheet's edge.
-        let body = if is_active { rect } else { Rect::from_min_max(rect.min + Vec2::new(0.0, 4.0), rect.max - Vec2::new(0.0, IDLE_GAP)) };
+        let body = if is_active { rect } else { Rect::from_min_max(rect.min + Vec2::new(0.0, IDLE_TOP), rect.max - Vec2::new(0.0, IDLE_GAP)) };
         if is_active {
             active_rect = Some(body);
         } else {
@@ -385,7 +396,7 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     painter.extend(active_text);
     // "+": a new workspace.
     // Like a not-chosen tab: rounded on top, standing on the sheet.
-    let plus = Rect::from_min_max(Pos2::new(x, row.top() + 4.0), Pos2::new(x + plus_w + 6.0, sheet.top() - IDLE_GAP));
+    let plus = Rect::from_min_max(Pos2::new(x, row.top() + IDLE_TOP), Pos2::new(x + plus_w + 6.0, sheet.top() - IDLE_GAP));
     let r = ui.interact(plus, ui.id().with("ws-new"), egui::Sense::click());
     let k = if r.hovered() { 1.0 } else { 0.6 };
     painter.rect_filled(plus, TAB_R, v.widgets.inactive.weak_bg_fill.gamma_multiply(k));
@@ -808,12 +819,26 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let full = ui.max_rect();
         let row = Rect::from_min_size(full.min + Vec2::new(0.0, 6.0), Vec2::new(full.width() - 6.0, ROW_H));
         let sheet = Rect::from_min_max(Pos2::new(full.left() + 2.0, row.bottom()), Pos2::new(full.right() - 6.0, full.bottom() - 2.0));
+        if ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))) != Some(sheet) {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
+            ui.ctx().request_repaint();
+        }
         workspaces(app, ui, row, sheet);
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(sheet.shrink2(Vec2::new(8.0, 7.0))).layout(egui::Layout::top_down(egui::Align::Min)));
         let ui = &mut ui;
         ui.set_clip_rect(sheet.shrink(1.0));
         script_tabs(app, ui);
         ui.add_space(3.0);
+        // A table's or a job's tab: Designer | Code; the designer instead
+        // of the text and the results.
+        if app.tab().object.is_some() {
+            crate::design_ui::mode_bar(app, ui);
+            ui.add_space(2.0);
+            if !app.tab().object.as_ref().is_some_and(|o| o.code) {
+                crate::design_ui::show(app, ui);
+                return;
+            }
+        }
         toolbar(app, ui);
         ui.add_space(2.0);
         // A notebook: its cells instead of the text and the results.

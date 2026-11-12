@@ -213,7 +213,7 @@ pub struct Obj {
     pub leaf: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjKind {
     Database,
     Schema,
@@ -345,6 +345,10 @@ pub trait Session: Send {
     fn children(&mut self, path: &[String]) -> Res<Vec<Obj>>;
     /// An object's source (CREATE …).
     fn source(&mut self, path: &[String], kind: ObjKind) -> Res<String>;
+    /// A table's columns or a job, for the designers.
+    fn describe(&mut self, _path: &[String], _kind: ObjKind) -> Res<crate::design::ObjDef> {
+        Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here")))
+    }
     /// Tables and their columns of the schemas given (empty: the current).
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>>;
     /// Stops what `run` is doing, from another thread.
@@ -428,7 +432,12 @@ pub enum Req {
     /// The open cursor closes.
     StopFetch,
     Children { path: Vec<String> },
-    Source { path: Vec<String>, kind: ObjKind, open_as: String },
+    /// `into`: the tab it goes to (else a new one).
+    Source { path: Vec<String>, kind: ObjKind, open_as: String, into: Option<String> },
+    /// For a designer (`key`: whose).
+    Describe { key: String, path: Vec<String>, kind: ObjKind },
+    /// A designer's statements, one after another (stops at a failure).
+    Apply { key: String, stmts: Vec<String> },
     Relations { schemas: Vec<String> },
     Tx(TxOp),
     Close,
@@ -475,7 +484,10 @@ pub enum What {
     /// `more`: rows were left when it closed.
     Rows { run: u64, rows: Vec<Vec<Option<String>>>, more: bool, open: bool, error: Option<String> },
     Children { path: Vec<String>, items: Result<Vec<Obj>, String> },
-    Source { path: Vec<String>, open_as: String, text: Result<String, String> },
+    Source { path: Vec<String>, open_as: String, into: Option<String>, text: Result<String, String> },
+    Described { key: String, def: Result<crate::design::ObjDef, String> },
+    /// How many ran, or the failure (with the statement).
+    Applied { key: String, result: Result<usize, String> },
     Relations(Result<Vec<Relation>, String>),
     /// Where the transaction stands (after a run or a commit).
     Tx { auto: bool, pending: bool },
@@ -710,9 +722,46 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 }
                 tell(What::Children { path, items: items.map_err(|f| f.message) });
             }
-            Req::Source { path, kind, open_as } => {
+            Req::Source { path, kind, open_as, into } => {
                 let text = if ensure(&mut session) { session.as_mut().unwrap().source(&path, kind) } else { Err(Failure::new("no connection")) };
-                tell(What::Source { path, open_as, text: text.map_err(|f| f.message) });
+                tell(What::Source { path, open_as, into, text: text.map_err(|f| f.message) });
+            }
+            Req::Describe { key, path, kind } => {
+                let def = if ensure(&mut session) { session.as_mut().unwrap().describe(&path, kind) } else { Err(Failure::new("no connection")) };
+                if def.as_ref().is_err_and(|f| f.lost) {
+                    session = None;
+                }
+                tell(What::Described { key, def: def.map_err(|f| f.message) });
+            }
+            Req::Apply { key, stmts } => {
+                let result = if ensure(&mut session) {
+                    let s = session.as_mut().unwrap();
+                    let mut done = 0;
+                    let mut err = None;
+                    for sql in &stmts {
+                        match s.run(sql, &mut Fetch::limit(0), &mut |_| {}) {
+                            Ok(_) => done += 1,
+                            Err(f) => {
+                                if f.lost {
+                                    session = None;
+                                }
+                                err = Some(format!("{}\n\n{}", f.message, crate::app::head(sql, 300)));
+                                break;
+                            }
+                        }
+                    }
+                    // (Its own session: nothing else is in its transaction.)
+                    if spec.kind.transactions() && !auto.get() && let Some(s) = session.as_mut() {
+                        s.finish(err.is_none()).ok();
+                    }
+                    match err {
+                        Some(e) => Err(e),
+                        None => Ok(done),
+                    }
+                } else {
+                    Err("no connection".to_string())
+                };
+                tell(What::Applied { key, result });
             }
             Req::Relations { schemas } => {
                 if ensure(&mut session) {

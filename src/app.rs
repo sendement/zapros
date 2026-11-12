@@ -142,6 +142,8 @@ pub struct Running {
 #[derive(Default)]
 pub struct TabRt {
     pub ed: EditorState,
+    /// An object's tab: its designer.
+    pub design: Option<crate::design_ui::Designer>,
     pub results: Vec<ResultView>,
     pub shown: Pane,
     pub log: Vec<LogLine>,
@@ -225,6 +227,8 @@ pub struct App {
     ctx: egui::Context,
     /// Connections started on their own once (not again after failing).
     auto_tried: HashSet<String>,
+    /// The job window (a job's schedule and the rest).
+    pub job_win: Option<crate::design_ui::JobWin>,
 }
 
 pub fn now() -> String {
@@ -262,6 +266,10 @@ impl App {
                 ws.tabs.push(Tab::default());
             }
             ws.active = ws.active.min(ws.tabs.len() - 1);
+            for tb in ws.tabs.iter_mut().filter(|t| t.other.is_some()) {
+                tb.text = config::unslashed(&tb.text);
+                tb.other = tb.other.as_deref().map(config::unslashed);
+            }
         }
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = Self {
@@ -303,6 +311,7 @@ impl App {
             about: false,
             ctx: cc.egui_ctx.clone(),
             auto_tried: HashSet::new(),
+            job_win: None,
         };
         if let Some(p) = app.session.project.clone() {
             app.open_dirs.insert(p);
@@ -516,6 +525,71 @@ impl App {
                 l.meta.send(Req::Relations { schemas: Vec::new() });
             }
         }
+    }
+
+    /// A new tab right after the current one (its id).
+    pub fn new_tab_next(&mut self, title: Option<String>, text: String, conn: Option<String>) -> String {
+        let ws = self.ws_mut();
+        let n = ws.tabs.len() + 1;
+        let tab = Tab { title: title.unwrap_or_else(|| format!("{} {n}", t("Скрипт", "Script"))), text, conn, ..Default::default() };
+        let id = tab.id.clone();
+        let at = (ws.active + 1).min(ws.tabs.len());
+        ws.tabs.insert(at, tab);
+        ws.active = at;
+        self.rt.entry(id.clone()).or_default().ed.focus = true;
+        self.touch();
+        id
+    }
+
+    /// The object's code into tab `into`.
+    pub fn load_source(&mut self, conn: &str, path: &[String], kind: crate::db::ObjKind, into: &str) {
+        let ctx = self.ctx.clone();
+        if self.ensure_live(&ctx, conn, None) {
+            if let Some(l) = self.live.get(conn) {
+                l.meta.send(Req::Source { path: path.to_vec(), kind, open_as: String::new(), into: Some(into.to_string()) });
+            }
+        }
+    }
+
+    /// The object's code in a tab beside the current one.
+    pub fn open_source_next(&mut self, conn: &str, path: Vec<String>, kind: crate::db::ObjKind, title: String) {
+        let id = self.new_tab_next(Some(title), String::new(), Some(conn.to_string()));
+        self.load_source(conn, &path, kind, &id);
+    }
+
+    /// A table or a job in a tab beside the current one: its designer
+    /// (its code a switch away).
+    pub fn open_object(&mut self, conn: &str, path: Vec<String>, kind: crate::db::ObjKind, title: String) {
+        // Already open: there.
+        let wi = self.session.active;
+        if let Some(i) = self.session.workspaces[wi].tabs.iter().position(|tb| tb.object.as_ref().is_some_and(|o| o.conn == conn && o.path == path)) {
+            self.session.workspaces[wi].active = i;
+            self.touch();
+            return;
+        }
+        let id = self.new_tab_next(Some(format!("{} {title}", kind.icon())), String::new(), Some(conn.to_string()));
+        self.tab_mut().object = Some(config::ObjRef { conn: conn.to_string(), path: path.clone(), kind, code: false });
+        self.load_source(conn, &path, kind, &id);
+    }
+
+    /// The job window: a job (`path`), or a new one in `folder`.
+    pub fn open_job(&mut self, conn: &str, path: Option<Vec<String>>, folder: Vec<String>) {
+        use crate::design_ui::{Designer, JOB_WIN, JobEdit, JobWin, Loaded};
+        let ctx = self.ctx.clone();
+        let kind = self.spec(conn).map_or(Kind::Postgres, |s| s.kind);
+        let mut d = Designer::new(conn, kind, path.clone().unwrap_or_default(), crate::db::ObjKind::Job);
+        match path {
+            Some(_) => crate::design_ui::reload(self, &ctx, &mut d, JOB_WIN),
+            None => {
+                let mut je = JobEdit::of(kind, None);
+                // Oracle: in the folder's schema.
+                if kind == Kind::Oracle {
+                    je.cur.owner = folder.first().cloned().unwrap_or_default();
+                }
+                d.loaded = Loaded::Job(je);
+            }
+        }
+        self.job_win = Some(JobWin { d, folder, sql_mode: false, sql: String::new(), open: true });
     }
 
     pub fn new_tab(&mut self, title: Option<String>, text: String, conn: Option<String>) {
@@ -1126,7 +1200,77 @@ impl App {
                     };
                     self.tree.insert((ev.conn.clone(), path), node);
                 }
-                What::Source { path: _, open_as, text } => match text {
+                What::Source { path: _, open_as: _, into: Some(into), text } => {
+                    let s = match text {
+                        Ok(s) => s,
+                        Err(e) => format!("-- {}\n", e.replace('\n', "\n-- ")),
+                    };
+                    if let Some(tb) = self.session.workspaces.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|tb| tb.id == into) {
+                        tb.text = s;
+                        tb.other = None;
+                        if tb.object.is_none() {
+                            tb.split_package();
+                        }
+                        self.touch();
+                    }
+                }
+                What::Described { key, def } => {
+                    if key == crate::design_ui::JOB_WIN {
+                        if let Some(w) = self.job_win.as_mut() {
+                            w.d.take(def);
+                        }
+                    } else if let Some(d) = self.rt.get_mut(&key).and_then(|r| r.design.as_mut()) {
+                        d.take(def);
+                    }
+                }
+                What::Applied { key, result } => {
+                    let conn = ev.conn.clone();
+                    let ctx = self.ctx.clone();
+                    let msg = |n: usize| format!("{}: {n}", t("Готово, выполнено команд", "Done, statements run"));
+                    if key == crate::design_ui::JOB_WIN {
+                        if let Some(mut w) = self.job_win.take() {
+                            w.d.busy = false;
+                            match result {
+                                Ok(n) => {
+                                    // A new one: shown as it is now (by the name given).
+                                    if let crate::design_ui::Loaded::Job(je) = &w.d.loaded {
+                                        if je.orig.is_none() {
+                                            let name = if w.d.kind == Kind::Oracle { je.cur.name.to_uppercase() } else { je.cur.name.clone() };
+                                            w.d.path = w.folder.iter().cloned().chain([name]).collect();
+                                        }
+                                    }
+                                    w.sql_mode = false;
+                                    w.d.status = Some(Ok(msg(n)));
+                                    if w.d.kind == Kind::Oracle {
+                                        crate::design_ui::reload(self, &ctx, &mut w.d, crate::design_ui::JOB_WIN);
+                                    }
+                                    let folder = w.folder.clone();
+                                    self.request_children(&conn, folder);
+                                }
+                                Err(e) => w.d.status = Some(Err(e)),
+                            }
+                            self.job_win = Some(w);
+                        }
+                    } else if let Some(mut d) = self.rt.get_mut(&key).and_then(|r| r.design.take()) {
+                        d.busy = false;
+                        match result {
+                            Ok(n) => {
+                                d.status = Some(Ok(msg(n)));
+                                crate::design_ui::reload(self, &ctx, &mut d, &key);
+                                let (path, obj) = (d.path.clone(), d.obj);
+                                self.load_source(&conn, &path, obj, &key);
+                                // The tree's columns and the hints.
+                                self.tree.retain(|(c, p), _| !(c == &conn && p.starts_with(&path)));
+                                self.refresh_relations(&conn);
+                            }
+                            Err(e) => d.status = Some(Err(e)),
+                        }
+                        if let Some(r) = self.rt.get_mut(&key) {
+                            r.design = Some(d);
+                        }
+                    }
+                }
+                What::Source { path: _, open_as, into: None, text } => match text {
                     Ok(s) => {
                         let conn = ev.conn.clone();
                         self.new_tab(Some(open_as), s, Some(conn));
@@ -1160,6 +1304,10 @@ impl App {
         let active = self.tab().id.clone();
         for (id, text, conn) in ids {
             if id != active {
+                // (Left before its check came: done when it's shown again.)
+                if let Some(rt) = self.rt.get_mut(&id) {
+                    rt.check_due = None;
+                }
                 continue;
             }
             let d = self.dialect_of(conn.as_deref());
@@ -1345,6 +1493,7 @@ impl eframe::App for App {
             }
         }
         crate::dialogs::all(self, &ctx);
+        crate::design_ui::window(self, &ctx);
         if let Some((m, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(5) {
                 self.toast = None;

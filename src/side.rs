@@ -36,8 +36,22 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::NONE.fill(crate::ui::chrome(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
     let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
         crate::ui::icon_bar(app, ui);
-        ui.add_space(6.0);
-        if app.session.side_files { files(app, ui) } else { databases(app, ui) }
+        // The list on a card of its own: no edge, rounded, as tall as the
+        // sheet beside it (its top and bottom from the last frame).
+        let max = ui.max_rect();
+        let sheet = ui.ctx().data(|d| d.get_temp::<egui::Rect>(egui::Id::new(crate::ui::SHEET_KEY)));
+        let (top, bottom) = sheet.map_or((ui.cursor().top(), max.bottom() - 22.0), |s| (s.top(), s.bottom()));
+        let card = egui::Rect::from_min_max(egui::pos2(max.left(), top), egui::pos2(max.right(), bottom.max(top + 40.0)));
+        ui.painter().rect_filled(card, crate::ui::SHEET_R, crate::ui::card(ui.visuals()));
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(egui::vec2(7.0, 7.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+        inner.set_clip_rect(card.shrink(1.0).intersect(ui.clip_rect()));
+        for st in [egui::TextStyle::Body, egui::TextStyle::Button] {
+            if let Some(f) = inner.style_mut().text_styles.get_mut(&st) {
+                f.size += 1.5;
+            }
+        }
+        if app.session.side_files { files(app, &mut inner) } else { databases(app, &mut inner) }
+        ui.allocate_rect(egui::Rect::from_min_max(ui.cursor().min, egui::pos2(max.right(), card.bottom())), egui::Sense::hover());
     });
     let w = r.response.rect.width();
     if (w - app.session.side_width).abs() > 1.0 {
@@ -240,7 +254,18 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
             })
             .inner;
         let (arrow, name) = r;
-        let toggle = arrow.is_some_and(|a| a.clicked()) || (!o.leaf && name.clicked() && !o.kind.has_source()) || (!o.leaf && name.double_clicked() && !o.kind.has_source());
+        // Ctrl+click: the object in a tab beside (a table or a job: its
+        // designer; the rest: its code).
+        let ctrl = name.clicked() && ui.input(|i| i.modifiers.command);
+        if ctrl {
+            let title = o.name.split('(').next().unwrap_or(&o.name).to_string();
+            match o.kind {
+                ObjKind::Table | ObjKind::Job => app.open_object(conn, p.clone(), o.kind, title),
+                k if k.has_source() => app.open_source_next(conn, p.clone(), k, title),
+                _ => {}
+            }
+        }
+        let toggle = arrow.is_some_and(|a| a.clicked()) || (!o.leaf && name.clicked() && !ctrl && !o.kind.has_source()) || (!o.leaf && name.double_clicked() && !o.kind.has_source());
         if toggle {
             if open {
                 app.open_nodes.remove(&nkey);
@@ -248,12 +273,20 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                 app.open_nodes.insert(nkey.clone());
             }
         }
-        if name.double_clicked() && o.kind.has_source() {
+        let jobs = kind == crate::db::Kind::Oracle || kind == crate::db::Kind::Postgres;
+        if name.double_clicked() && o.kind == ObjKind::Job && jobs {
+            app.open_job(conn, Some(p.clone()), path.clone());
+        } else if name.double_clicked() && o.kind.has_source() {
             if let Some(l) = app.live.get(conn) {
-                l.meta.send(Req::Source { path: p.clone(), kind: o.kind, open_as: o.name.split('(').next().unwrap_or(&o.name).to_string() });
+                l.meta.send(Req::Source { path: p.clone(), kind: o.kind, open_as: o.name.split('(').next().unwrap_or(&o.name).to_string(), into: None });
             }
         }
-        let name = if o.kind.has_source() { name.on_hover_text(t("Двойной щелчок — исходный код (DDL)", "Double-click: source (DDL)")) } else { name };
+        let name = match o.kind {
+            ObjKind::Table => name.on_hover_text(t("Двойной щелчок — исходный код (DDL), Ctrl+щелчок — конструктор во вкладке рядом", "Double-click: source (DDL); Ctrl+click: the designer in a tab beside")),
+            ObjKind::Job if jobs => name.on_hover_text(t("Двойной щелчок — расписание и свойства, Ctrl+щелчок — во вкладке рядом", "Double-click: schedule and properties; Ctrl+click: in a tab beside")),
+            k if k.has_source() => name.on_hover_text(t("Двойной щелчок — исходный код (DDL), Ctrl+щелчок — во вкладке рядом", "Double-click: source (DDL); Ctrl+click: in a tab beside")),
+            _ => name,
+        };
         name.context_menu(|ui| {
             let q = qualified(kind, &path, &o.name);
             if o.kind.is_relation() && ui.button(t("Первые 200 строк", "First 200 rows")).clicked() {
@@ -261,9 +294,27 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                 app.run(&ctx, true, false);
                 ui.close();
             }
+            if o.kind == ObjKind::Table && ui.button(t("Конструктор (Ctrl+щелчок)", "Designer (Ctrl+click)")).clicked() {
+                app.open_object(conn, p.clone(), ObjKind::Table, o.name.clone());
+                ui.close();
+            }
+            if o.kind == ObjKind::Job && jobs {
+                if ui.button(t("Расписание и свойства…", "Schedule and properties…")).clicked() {
+                    app.open_job(conn, Some(p.clone()), path.clone());
+                    ui.close();
+                }
+                if ui.button(t("Во вкладке рядом (Ctrl+щелчок)", "In a tab beside (Ctrl+click)")).clicked() {
+                    app.open_object(conn, p.clone(), ObjKind::Job, o.name.clone());
+                    ui.close();
+                }
+            }
+            if o.kind == ObjKind::Folder && o.name == "jobs" && jobs && ui.button(t("Новый джоб…", "New job…")).clicked() {
+                app.open_job(conn, None, p.clone());
+                ui.close();
+            }
             if o.kind.has_source() && ui.button(t("Исходный код (DDL)", "Source (DDL)")).clicked() {
                 if let Some(l) = app.live.get(conn) {
-                    l.meta.send(Req::Source { path: p.clone(), kind: o.kind, open_as: o.name.clone() });
+                    l.meta.send(Req::Source { path: p.clone(), kind: o.kind, open_as: o.name.clone(), into: None });
                 }
                 ui.close();
             }

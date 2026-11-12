@@ -105,6 +105,21 @@ impl Session for Lite {
         Ok(r.into_iter().next().and_then(|r| r.into_iter().next()).map(|s| s + ";\n").unwrap_or_default())
     }
 
+    fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
+        use crate::design::{Column, ObjDef, TableDef};
+        let p: Vec<&str> = path.iter().map(String::as_str).collect();
+        let (["tables", t], ObjKind::Table) = (p.as_slice(), kind) else {
+            return Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here")));
+        };
+        let cols = self
+            .rows("SELECT name, type, CASE WHEN \"notnull\" THEN 'N' ELSE 'Y' END, coalesce(dflt_value, ''), CASE WHEN pk > 0 THEN 'Y' ELSE 'N' END FROM pragma_table_info(?1) ORDER BY cid", &[t])?
+            .into_iter()
+            .map(|r| Column { name: r[0].clone(), ty: r[1].clone(), nullable: r[2] == "Y", default: r[3].clone(), comment: String::new(), pk: r[4] == "Y" })
+            .collect();
+        let info = self.rows("SELECT name, CASE WHEN \"unique\" THEN 'UNIQUE' ELSE '' END || ' INDEX' FROM pragma_index_list(?1) ORDER BY 1", &[t])?.into_iter().map(|r| (r[0].clone(), r[1].trim().to_string())).collect();
+        Ok(ObjDef::Table(TableDef { schema: String::new(), name: t.to_string(), cols, comment: String::new(), info }))
+    }
+
     fn relations(&mut self, _schemas: &[String]) -> Res<Vec<Relation>> {
         let rows = self.rows(
             "SELECT 'main', m.name, p.name, p.type FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid",

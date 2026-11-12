@@ -286,6 +286,32 @@ impl Session for Ch {
         }
     }
 
+    fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
+        use crate::design::{Column, ObjDef, TableDef};
+        let p: Vec<&str> = path.iter().map(String::as_str).collect();
+        let ([db, "tables", t], ObjKind::Table) = (p.as_slice(), kind) else {
+            return Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here")));
+        };
+        let cols = self
+            .rows(&format!(
+                "SELECT name, type, if(default_kind IN ('', 'DEFAULT'), default_expression, concat(default_kind, ' ', default_expression)), comment, toString(is_in_primary_key) FROM system.columns WHERE database = {} AND table = {} ORDER BY position",
+                literal(db),
+                literal(t)
+            ))?
+            .into_iter()
+            .map(|r| Column { name: r[0].clone(), nullable: r[1].starts_with("Nullable("), ty: r[1].clone(), default: r[2].clone(), comment: r[3].clone(), pk: r[4] == "1" })
+            .collect();
+        let r = self.rows(&format!("SELECT comment, engine, sorting_key, partition_key, primary_key FROM system.tables WHERE database = {} AND name = {}", literal(db), literal(t)))?;
+        let r = r.into_iter().next().unwrap_or_default();
+        let mut info = Vec::new();
+        for (k, i) in [("ENGINE", 1), ("ORDER BY", 2), ("PARTITION BY", 3), ("PRIMARY KEY", 4)] {
+            if let Some(v) = r.get(i).filter(|v| !v.is_empty()) {
+                info.push((k.to_string(), v.clone()));
+            }
+        }
+        Ok(ObjDef::Table(TableDef { schema: db.to_string(), name: t.to_string(), cols, comment: r.first().cloned().unwrap_or_default(), info }))
+    }
+
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {
         // None asked for: every database but the system's.
         let cond = if schemas.is_empty() {

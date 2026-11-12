@@ -309,6 +309,57 @@ impl Session for Ora {
         Ok(text + "\n")
     }
 
+    fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
+        use crate::design::{Column, JobDef, ObjDef, TableDef};
+        let p: Vec<&str> = path.iter().map(String::as_str).collect();
+        match (p.as_slice(), kind) {
+            ([s, "jobs", name], ObjKind::Job) => {
+                let r = self.rows(
+                    "SELECT job_name, NVL(repeat_interval, ''), NVL(job_action, NVL(program_name, '')), NVL(job_type, ''), enabled, NVL(comments, ''), state,
+                            TO_CHAR(next_run_date, 'YYYY-MM-DD HH24:MI:SS'), TO_CHAR(last_start_date, 'YYYY-MM-DD HH24:MI:SS'), run_count, failure_count, NVL(schedule_name, '')
+                       FROM all_scheduler_jobs WHERE owner = :1 AND job_name = :2",
+                    &[s, name],
+                )?;
+                let r = r.into_iter().next().ok_or_else(|| Failure::new("no such job"))?;
+                let t = crate::i18n::t;
+                let mut info = vec![(t("состояние", "state").to_string(), r[6].clone()), (t("следующий запуск", "next run").to_string(), r[7].clone()), (t("последний запуск", "last run").to_string(), r[8].clone()), (t("запусков / сбоев", "runs / failures").to_string(), format!("{} / {}", r[9], r[10]))];
+                if !r[11].is_empty() {
+                    info.push((t("расписание (объект)", "schedule (object)").to_string(), r[11].clone()));
+                }
+                Ok(ObjDef::Job(JobDef { owner: s.to_string(), name: r[0].clone(), schedule: r[1].clone(), action: r[2].clone(), action_type: r[3].clone(), enabled: r[4] == "TRUE", comment: r[5].clone(), info, ..Default::default() }))
+            }
+            ([s, "tables", name], ObjKind::Table) => {
+                let rows = self.rows(
+                    "SELECT c.column_name,
+                            CASE WHEN c.data_type IN ('VARCHAR2', 'NVARCHAR2', 'CHAR', 'NCHAR') THEN c.data_type || '(' || c.char_length || CASE WHEN c.char_used = 'C' AND c.data_type IN ('VARCHAR2', 'CHAR') THEN ' CHAR' END || ')'
+                                 WHEN c.data_type = 'RAW' THEN 'RAW(' || c.data_length || ')'
+                                 WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL THEN 'NUMBER(' || c.data_precision || CASE WHEN c.data_scale <> 0 THEN ',' || c.data_scale END || ')'
+                                 WHEN c.data_type = 'NUMBER' AND c.data_scale = 0 THEN 'INTEGER'
+                                 ELSE c.data_type END,
+                            c.nullable, c.data_default, NVL(m.comments, ''),
+                            CASE WHEN EXISTS (SELECT 1 FROM all_constraints k JOIN all_cons_columns kc ON kc.owner = k.owner AND kc.constraint_name = k.constraint_name
+                                               WHERE k.owner = c.owner AND k.table_name = c.table_name AND k.constraint_type = 'P' AND kc.column_name = c.column_name) THEN 'Y' ELSE 'N' END
+                       FROM all_tab_columns c LEFT JOIN all_col_comments m ON m.owner = c.owner AND m.table_name = c.table_name AND m.column_name = c.column_name
+                      WHERE c.owner = :1 AND c.table_name = :2 ORDER BY c.column_id",
+                    &[s, name],
+                )?;
+                let cols = rows.into_iter().map(|r| Column { name: r[0].clone(), ty: r[1].clone(), nullable: r[2] == "Y", default: r[3].trim().to_string(), comment: r[4].clone(), pk: r[5] == "Y" }).collect();
+                let comment = self.rows("SELECT NVL(comments, '') FROM all_tab_comments WHERE owner = :1 AND table_name = :2", &[s, name])?.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default();
+                let info = self
+                    .rows(
+                        "SELECT constraint_name, DECODE(constraint_type, 'P', 'PRIMARY KEY', 'U', 'UNIQUE', 'R', 'FOREIGN KEY', 'C', 'CHECK', constraint_type) FROM all_constraints
+                          WHERE owner = :1 AND table_name = :2 AND constraint_type IN ('P', 'U', 'R') ORDER BY DECODE(constraint_type, 'P', 0, 1), 1",
+                        &[s, name],
+                    )?
+                    .into_iter()
+                    .map(|r| (r[0].clone(), r[1].clone()))
+                    .collect();
+                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: name.to_string(), cols, comment, info }))
+            }
+            _ => Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here"))),
+        }
+    }
+
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {
         let mut out = Vec::new();
         let me = self.rows("SELECT USER FROM dual", &[])?.remove(0).remove(0);

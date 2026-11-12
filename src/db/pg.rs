@@ -372,6 +372,45 @@ impl Session for Pg {
         })
     }
 
+    fn describe(&mut self, path: &[String], kind: ObjKind) -> Res<crate::design::ObjDef> {
+        use crate::design::{Column, JobDef, ObjDef, TableDef};
+        let p: Vec<&str> = path.iter().map(String::as_str).collect();
+        match (p.as_slice(), kind) {
+            (["jobs", job], ObjKind::Job) => {
+                let id = job.split(' ').next().unwrap_or("0");
+                let r = self.rows("select jobid::text, coalesce(jobname, ''), schedule, command, database, active::text, username from cron.job where jobid = $1::text::bigint", &[id])?;
+                let r = r.into_iter().next().ok_or_else(|| Failure::new("no such job"))?;
+                let last = self
+                    .rows("select status || ' · ' || to_char(start_time, 'YYYY-MM-DD HH24:MI:SS') from cron.job_run_details where jobid = $1::text::bigint order by start_time desc limit 1", &[id])
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .and_then(|v| v.into_iter().next())
+                    .unwrap_or_default();
+                let mut info = vec![("jobid".to_string(), r[0].clone()), (crate::i18n::t("пользователь", "user").to_string(), r[6].clone())];
+                if !last.is_empty() {
+                    info.push((crate::i18n::t("последний запуск", "last run").to_string(), last));
+                }
+                Ok(ObjDef::Job(JobDef { id: r[0].clone(), name: r[1].clone(), schedule: r[2].clone(), action: r[3].clone(), database: r[4].clone(), enabled: r[5] == "true", info, ..Default::default() }))
+            }
+            ([s, "tables", t], ObjKind::Table) => {
+                let rel = format!("{}.{}", ident(s), ident(t));
+                let cols = self.rows(
+                    "select a.attname::text, format_type(a.atttypid, a.atttypmod), (not a.attnotnull)::text, coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
+                            coalesce(col_description(a.attrelid, a.attnum), ''),
+                            coalesce(a.attnum = any(select unnest(i.indkey) from pg_index i where i.indrelid = a.attrelid and i.indisprimary), false)::text
+                       from pg_attribute a left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+                      where a.attrelid = $1::text::regclass and a.attnum > 0 and not a.attisdropped order by a.attnum",
+                    &[&rel],
+                )?;
+                let cols = cols.into_iter().map(|r| Column { name: r[0].clone(), ty: r[1].clone(), nullable: r[2] == "true", default: r[3].clone(), comment: r[4].clone(), pk: r[5] == "true" }).collect();
+                let comment = self.one("select coalesce(obj_description($1::text::regclass, 'pg_class'), '')", &[&rel])?;
+                let info = self.rows("select conname::text, pg_get_constraintdef(oid, true) from pg_constraint where conrelid = $1::text::regclass and contype <> 'n' order by contype = 'p' desc, 1", &[&rel])?.into_iter().map(|r| (r[0].clone(), r[1].clone())).collect();
+                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: t.to_string(), cols, comment, info }))
+            }
+            _ => Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here"))),
+        }
+    }
+
     fn source(&mut self, path: &[String], kind: ObjKind) -> Res<String> {
         let p: Vec<&str> = path.iter().map(String::as_str).collect();
         let (s, name) = match p.as_slice() {

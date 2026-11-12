@@ -19,7 +19,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   workspace's scripts, the editor and the results. Tabs and their text
   live in the session and come back on start. The side panel runs the
   full height, its top row holding the panel switch (objects / files) and
-  the menus as icons.
+  the menus as icons; the list lies on a rounded card of its own, level
+  with the sheet beside it.
 - **Transactions** (PostgreSQL, Oracle, SQLite): auto-commit per
   connection (off by default), switchable from the toolbar. A SQLite
   transaction that only read is ended at once. With it off, changes gather
@@ -32,10 +33,29 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   materialized views, functions, procedures, packages, sequences, triggers,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,
   keys, indexes. Double-click opens an object's DDL; "first 200 rows",
-  "insert SELECT with all columns", copy / insert names.
+  "insert SELECT with all columns", copy / insert names. **Ctrl+click**
+  opens an object in a tab right beside the current one: a table or a job
+  as a designer (Designer | Code over it), anything else as its code.
+- **Table designer**: the columns as a grid — name, type (common ones in a
+  list), NULL, default, comment; columns added, renamed, changed, dropped
+  (and undropped); the table's comment. The ALTER / COMMENT statements it
+  takes are shown as they're made (per database: PostgreSQL, Oracle,
+  ClickHouse, SQLite — where SQLite can't change a column it says so), then
+  applied, reset or opened as a script; keys, indexes and the engine are
+  listed below.
+- **Jobs** (Oracle Scheduler, pg_cron): double-click opens a window with
+  the job's schedule set by hand — every N minutes, hourly, daily, on days
+  of the week, on days of the month (the last one too), at one or several
+  times — written as `repeat_interval` or cron, in words, with the next five
+  runs; an expression the designer can't read is edited as text. Also
+  enabled, what it runs, the comment, its state and last / next run.
+  Designer | SQL: the script it makes (CREATE_JOB / SET_ATTRIBUTE,
+  `cron.schedule` / `cron.alter_job`) can be edited before it's applied.
+  "New job…" on the Jobs folder; the same designer in a tab by Ctrl+click.
 - **Packages in two parts.** An Oracle package (opened from the tree or a
   file) shows its specification and body as two sub-tabs (Alt+1 / Alt+2),
-  each run (compiled) on its own and saved together.
+  each run (compiled) on its own and saved together; the script's "/"
+  after each is left out on screen and put back when they're joined.
 - **Structure panel** (Ctrl+Shift+O) beside the editor: the script's
   statements and the objects they create; in a package its functions,
   procedures, types, subtypes, cursors, exceptions, constants, variables
@@ -76,7 +96,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   bands under the indents: one per construct a line is nested in —
   brackets, CASE…END, BEGIN / DECLARE / IS…END, IF, LOOP, and the clauses
   SELECT / FROM / JOIN / WHERE / GROUP BY…, inside SQL strings and `$$`
-  bodies too. The block (bracket, CASE, BEGIN…END, IF, LOOP) at the caret
+  bodies too (painted edge to edge on whole pixels: no hairline gaps at
+  any scale). The block (bracket, CASE, BEGIN…END, IF, LOOP) at the caret
   gets a frame in its band's colour, the one under the pointer a fainter one.
 - **Tabs**: a script tab's ✕ always shown or only under the pointer (the
   tab grows to it) — in the settings; toolbar buttons in their colours (run

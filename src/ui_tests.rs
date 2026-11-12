@@ -102,7 +102,11 @@ fn settle(h: &mut Harness<'static, App>) {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    panic!("still busy");
+    let st = h.state();
+    let runs: Vec<_> = st.rt.iter().filter(|(_, r)| r.run.is_some() || r.check_due.is_some()).map(|(k, r)| (k.clone(), r.run.is_some())).collect();
+    let tree: Vec<_> = st.tree.iter().filter(|(_, n)| matches!(n, Node::Loading)).map(|(k, _)| k.clone()).collect();
+    let live: Vec<_> = st.live.iter().map(|(k, l)| (k.clone(), l.state == ConnState::Connecting, l.rels_loading)).collect();
+    panic!("still busy: {runs:?} {tree:?} {live:?}");
 }
 
 fn shot(h: &mut Harness<'static, App>, name: &str) {
@@ -489,6 +493,9 @@ fn package_parts_and_structure() {
     // Saved whole: specification first.
     let full = h.state().tab().full_text();
     assert!(full.find("package shop_pkg").unwrap() < full.find("package body shop_pkg").unwrap());
+    // Each part shown without its "/", the whole script with both.
+    assert!(!h.state().tab().text.trim_end().ends_with('/') && !h.state().tab().other.as_ref().unwrap().trim_end().ends_with('/'));
+    assert_eq!(full.matches("\n/\n").count(), 2, "{full}");
     h.state_mut().tab_mut().join_parts();
     assert!(h.state().tab().other.is_none() && h.state().tab().text == full);
 }
@@ -1158,4 +1165,212 @@ fn block_rectangle_cut() {
     h.step();
     h.step();
     assert_eq!(h.state().tab().text, "id,\nnote,\ntotal\n  from orders;\n");
+}
+
+pub const DEEP: &str = "begin\n  for a in 1..2 loop\n    for b in 1..2 loop\n      if a > b then\n        for c in (select x\n                    from (select y as x\n                            from (select z as y\n                                    from t\n                                   where z in (select q\n                                                 from u\n                                                where q > 0))))\n        loop\n          if c.x > 0 then\n            null;\n          end if;\n        end loop;\n      end if;\n    end loop;\n  end loop;\nend;\n";
+
+/// Columns of the sheet's colour between two bands' colours, `rows` tall
+/// or more (a hairline gap), in the picture's rect `area` (points).
+fn band_seams(img: &image::RgbaImage, k: f32, area: egui::Rect, rows: usize) -> Vec<(u32, usize)> {
+    let bg = *img.get_pixel((area.right() * k) as u32 - 2, (area.bottom() * k) as u32 - 2);
+    let band = |p: &image::Rgba<u8>| *p != bg && p.0[..3].iter().max().unwrap() < &140 && p.0[..3].iter().max().unwrap() - p.0[..3].iter().min().unwrap() < 40 && p.0[..3].iter().map(|&v| v as u32).sum::<u32>() > 150;
+    let mut hits = std::collections::HashMap::<u32, usize>::new();
+    for y in (area.top() * k) as u32..(area.bottom() * k) as u32 {
+        for x in (area.left() * k) as u32 + 1..(area.right() * k) as u32 - 1 {
+            if *img.get_pixel(x, y) == bg && band(img.get_pixel(x - 1, y)) && band(img.get_pixel(x + 1, y)) {
+                *hits.entry(x).or_default() += 1;
+            }
+        }
+    }
+    let mut v: Vec<(u32, usize)> = hits.into_iter().filter(|&(_, n)| n >= rows).collect();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn deep_bands_have_no_gaps_at_any_scale() {
+    for k in [1.0f32, 1.25, 1.5] {
+        let (mut h, _g) = harness_at("deep", DEEP, false, k);
+        let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: "127.0.0.1".into(), port: 1, save_password: false, ..Default::default() };
+        h.state_mut().conns.list.push(ora);
+        h.state_mut().tab_mut().conn = Some("ora".into());
+        h.state_mut().ask = None;
+        settle(&mut h);
+        h.state_mut().ask = None;
+        for _ in 0..3 {
+            h.step();
+        }
+        shot(&mut h, &format!("deep-bands-{k}"));
+        let id = h.state().tab().id.clone();
+        let r = h.state().rt[&id].ed.text_rect.unwrap();
+        let img = h.render().unwrap();
+        let area = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 420.0, r.top() + 320.0));
+        let seams = band_seams(&img, k, area, 12);
+        assert!(seams.is_empty(), "scale {k}: gaps between bands at {seams:?}");
+    }
+}
+
+/// Ctrl+click on a node of the tree (the label left-most of that name).
+fn ctrl_click_tree(h: &mut Harness<'static, App>, name: &str) {
+    let p = h.get_all_by_label(name).map(|n| n.rect().center()).min_by(|a, b| a.x.total_cmp(&b.x)).unwrap();
+    let p = egui::pos2(p.x as f32, p.y as f32);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::COMMAND });
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+}
+
+#[test]
+fn table_designer_beside_on_ctrl_click() {
+    let (mut h, _g) = harness("designer", SCRIPT, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    for p in [vec![], vec!["tables".to_string()]] {
+        h.state_mut().open_nodes.insert(("lite".into(), p));
+        settle(&mut h);
+    }
+    ctrl_click_tree(&mut h, "orders");
+    settle(&mut h);
+    // Beside the first tab, the designer with the table's columns.
+    let titles: Vec<String> = h.state().ws().tabs.iter().map(|t| t.title.clone()).collect();
+    assert_eq!(titles[1], "▦ orders", "{titles:?}");
+    assert_eq!(h.state().ws().active, 1);
+    let id = h.state().tab().id.clone();
+    let cols = |h: &Harness<'static, App>| match h.state().rt[&id].design.as_ref().map(|d| &d.loaded) {
+        Some(crate::design_ui::Loaded::Table(te)) => te.rows.iter().map(|r| r.col.name.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(cols(&h), ["id", "customer_id", "total", "note"]);
+    shot(&mut h, "designer-table");
+    // A column added by hand: its ALTER, applied.
+    h.get_by_label_contains("Колонка").click();
+    h.step();
+    if let Some(crate::design_ui::Loaded::Table(te)) = h.state_mut().rt.get_mut(&id).unwrap().design.as_mut().map(|d| &mut d.loaded) {
+        te.rows.last_mut().unwrap().col.name = "shipped".into();
+    }
+    settle(&mut h);
+    let script = h.state().rt[&id].design.as_ref().unwrap().script();
+    assert_eq!(script, "ALTER TABLE orders ADD COLUMN shipped INTEGER;\n");
+    shot(&mut h, "designer-table-changed");
+    h.get_by_label_contains("Применить").click();
+    for _ in 0..50 {
+        settle(&mut h);
+        if cols(&h).len() == 5 && !h.state().rt[&id].design.as_ref().unwrap().busy {
+            break;
+        }
+    }
+    assert_eq!(cols(&h), ["id", "customer_id", "total", "note", "shipped"]);
+    assert!(h.state().rt[&id].design.as_ref().unwrap().script().is_empty());
+    // Its code a switch away.
+    h.get_by_label_contains("Код").click();
+    settle(&mut h);
+    assert!(h.state().tab().text.contains("CREATE TABLE orders") || h.state().tab().text.contains("create table orders"), "{}", h.state().tab().text);
+    assert!(h.state().tab().text.contains("shipped"), "{}", h.state().tab().text);
+    shot(&mut h, "designer-table-code");
+    // Ctrl+click on it again: that tab, not a new one.
+    h.state_mut().ws_mut().active = 0;
+    ctrl_click_tree(&mut h, "orders");
+    settle(&mut h);
+    assert_eq!(h.state().ws().tabs.len(), 3);
+    assert_eq!(h.state().ws().active, 1);
+    // Another kind of object: its code, in a tab beside.
+    h.state_mut().open_nodes.insert(("lite".into(), vec!["views".into()]));
+    settle(&mut h);
+    ctrl_click_tree(&mut h, "big_orders");
+    settle(&mut h);
+    assert_eq!(h.state().ws().active, 2);
+    assert_eq!(h.state().tab().title, "big_orders");
+    assert!(h.state().tab().object.is_none());
+    assert!(h.state().tab().text.to_lowercase().contains("create view big_orders"), "{}", h.state().tab().text);
+}
+
+#[test]
+fn oracle_job_window_and_tab() {
+    let Ok(v) = std::env::var("ZAPROS_TEST_ORA") else { return };
+    let p: Vec<String> = v.split(':').map(String::from).collect();
+    let (mut h, _g) = harness("orajob", "", false);
+    let ora = Spec { id: "ora".into(), name: "ora".into(), kind: Kind::Oracle, host: p[0].clone(), port: p[1].parse().unwrap(), database: p[2].clone(), user: p[3].clone(), save_password: true, ..Default::default() };
+    crate::secrets::set("ora", &p[4]).unwrap();
+    h.state_mut().conns.list.push(ora);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "ora", None);
+    settle(&mut h);
+    let owner = p[3].to_uppercase();
+    // A job of our own to work on.
+    h.state_mut().open_job("ora", None, vec![owner.clone(), "jobs".into()]);
+    {
+        let w = h.state_mut().job_win.as_mut().unwrap();
+        if let crate::design_ui::Loaded::Job(je) = &mut w.d.loaded {
+            je.cur.name = "ZAPROS_TEST_JOB".into();
+            je.cur.enabled = false;
+        }
+    }
+    // (One left over from a run before goes first.)
+    let wait_job = |h: &mut Harness<'static, App>| {
+        for _ in 0..100 {
+            settle(h);
+            if h.state().job_win.as_ref().is_some_and(|w| !w.d.busy) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    if let Some(l) = h.state().live.get("ora") {
+        l.meta.send(crate::db::Req::Apply { key: "none".into(), stmts: vec!["BEGIN DBMS_SCHEDULER.DROP_JOB('ZAPROS_TEST_JOB'); EXCEPTION WHEN OTHERS THEN NULL; END;".into()] });
+    }
+    settle(&mut h);
+    shot(&mut h, "job-new");
+    h.get_by_label_contains("Применить").click();
+    wait_job(&mut h);
+    let w = h.state().job_win.as_ref().unwrap();
+    assert!(matches!(w.d.status, Some(Ok(_))), "{:?}", w.d.status);
+    let crate::design_ui::Loaded::Job(je) = &w.d.loaded else { panic!() };
+    assert_eq!(je.orig.as_ref().map(|j| j.name.as_str()), Some("ZAPROS_TEST_JOB"));
+    assert_eq!(je.cur.schedule, "FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0");
+    // Weekly on Monday and Friday at 09:30, by the designer.
+    {
+        let w = h.state_mut().job_win.as_mut().unwrap();
+        let crate::design_ui::Loaded::Job(je) = &mut w.d.loaded else { panic!() };
+        let p = je.plan.as_mut().unwrap();
+        p.freq = crate::sched::Freq::Weekly;
+        p.days = [true, false, false, false, true, false, false];
+        p.hours = vec![9];
+        p.minutes = vec![30];
+        je.cur.schedule = p.oracle();
+    }
+    settle(&mut h);
+    shot(&mut h, "job-weekly");
+    h.get_by_label("{ } SQL").click();
+    settle(&mut h);
+    let sql = h.state().job_win.as_ref().unwrap().sql.clone();
+    assert!(sql.contains("SET_ATTRIBUTE('ZAPROS.ZAPROS_TEST_JOB', 'repeat_interval', 'FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0')") || sql.contains("'repeat_interval', 'FREQ=WEEKLY;BYDAY=MON,FRI"), "{sql}");
+    shot(&mut h, "job-sql");
+    h.get_by_label_contains("Применить").click();
+    wait_job(&mut h);
+    let w = h.state().job_win.as_ref().unwrap();
+    assert!(matches!(w.d.status, Some(Ok(_))), "{:?}", w.d.status);
+    let crate::design_ui::Loaded::Job(je) = &w.d.loaded else { panic!() };
+    assert_eq!(je.orig.as_ref().unwrap().schedule, "FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=9;BYMINUTE=30;BYSECOND=0");
+    // In a tab beside: the same designer.
+    h.get_by_label_contains("Во вкладке").click();
+    settle(&mut h);
+    for _ in 0..50 {
+        settle(&mut h);
+        let id = h.state().tab().id.clone();
+        if matches!(h.state().rt.get(&id).and_then(|r| r.design.as_ref()).map(|d| &d.loaded), Some(crate::design_ui::Loaded::Job(_))) {
+            break;
+        }
+    }
+    assert!(h.state().job_win.is_none());
+    assert!(h.state().tab().object.as_ref().is_some_and(|o| o.kind == crate::db::ObjKind::Job));
+    shot(&mut h, "job-tab");
+    if let Some(l) = h.state().live.get("ora") {
+        l.meta.send(crate::db::Req::Apply { key: "none".into(), stmts: vec!["BEGIN DBMS_SCHEDULER.DROP_JOB('ZAPROS_TEST_JOB'); END;".into()] });
+    }
+    settle(&mut h);
 }

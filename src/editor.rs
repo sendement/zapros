@@ -44,6 +44,8 @@ pub struct EditorState {
     job: Option<(u64, LayoutJob)>,
     /// The text's brackets, CASEs and blocks, as of `job`.
     blocks: Vec<crate::sql::bands::Block>,
+    /// The rainbow bands as of `job` (painted under the text).
+    bands: Vec<(Range<usize>, Color32)>,
     /// (layout key, block start) → the x its lines' text starts at.
     frame_x: std::collections::HashMap<(u64, usize), f32>,
     /// What can be folded: (its first line's start, its end), as of `job`.
@@ -190,9 +192,61 @@ fn band_hues(dark: bool) -> Vec<Color32> {
     BAND_HUES.iter().map(|&h| Color32::from(egui::ecolor::Hsva::new(h / 360.0, s, v, 1.0))).collect()
 }
 
+/// The bands on the rows in sight, as one mesh: every edge on a whole
+/// pixel, the same one for the pieces either side of it (no seams, no
+/// overlaps), each row down to the next one's top.
+fn band_mesh(text: &str, bands: &[(Range<usize>, Color32)], galley: &egui::Galley, at: egui::Pos2, clip: egui::Rect, ppp: f32) -> egui::Mesh {
+    let px = |v: f32| (v * ppp).round() / ppp;
+    let mut mesh = egui::Mesh::default();
+    let rows = &galley.rows;
+    if rows.is_empty() {
+        return mesh;
+    }
+    // The rows in sight (one per line: nothing wraps).
+    let first = rows.partition_point(|r| at.y + r.max_y() < clip.top());
+    let last = rows.partition_point(|r| at.y + r.min_y() <= clip.bottom());
+    if first >= last {
+        return mesh;
+    }
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    if starts.len() != rows.len() {
+        return mesh;
+    }
+    let lo = starts[first];
+    let hi = starts.get(last).copied().unwrap_or(text.len());
+    let mut i = bands.partition_point(|(r, _)| r.end <= lo);
+    while let Some((r, c)) = bands.get(i) {
+        if r.start >= hi {
+            break;
+        }
+        i += 1;
+        let mut a = r.start.max(lo);
+        while a < r.end.min(hi) {
+            let l = starts.partition_point(|&s| s <= a) - 1;
+            let ls = starts[l];
+            let le = text[ls..].find('\n').map_or(text.len(), |k| ls + k);
+            let b = r.end.min(le);
+            let row = &rows[l];
+            if b > a && row.row.size.y > 0.0 && text.is_char_boundary(a) && text.is_char_boundary(b) {
+                let c0 = text[ls..a].chars().count();
+                let c1 = c0 + text[a..b].chars().count();
+                let x = |c: usize| px(at.x + row.pos.x + row.row.x_offset(egui::text::CharIndex(c)));
+                let top = px(at.y + row.min_y());
+                let bottom = px(at.y + rows.get(l + 1).map_or(row.max_y(), |n| n.min_y().max(row.max_y())));
+                let rect = egui::Rect::from_min_max(egui::pos2(x(c0), top), egui::pos2(x(c1), bottom));
+                if rect.width() > 0.0 {
+                    mesh.add_colored_rect(rect, *c);
+                }
+            }
+            a = le + 1;
+        }
+    }
+    mesh
+}
+
 /// The text laid out with colours.
 pub fn layout(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool) -> LayoutJob {
-    layout_blocks(text, cx, pair, font, mono_bold, &[]).0
+    layout_blocks(text, cx, pair, font, mono_bold, &[], false).0
 }
 
 /// What a text lays out with besides its colours: its blocks (for the
@@ -202,10 +256,15 @@ struct Found {
     blocks: Vec<crate::sql::bands::Block>,
     /// (the start of its first line, its end).
     foldable: Vec<(usize, usize)>,
+    /// The rainbow bands, when the editor paints them itself.
+    bands: Vec<(Range<usize>, Color32)>,
 }
 
 /// The text laid out with colours, and its blocks (for the frames).
-fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool, hidden: &[Range<usize>]) -> (LayoutJob, Found) {
+/// `own_bands`: the bands come back to be painted by the caller (as text
+/// backgrounds egui rounds each piece's edges on its own: hairline gaps
+/// between neighbours at most scales).
+fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool, hidden: &[Range<usize>], own_bands: bool) -> (LayoutJob, Found) {
     use crate::sql::embed::Class;
     let pal: &Palette = if cx.dark { &cx.settings.dark } else { &cx.settings.light };
     // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
@@ -316,7 +375,7 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         while bi < bands.len() && bands[bi].0.end <= a {
             bi += 1;
         }
-        if let Some((_, c)) = bands.get(bi).filter(|(r, _)| r.start <= a && b <= r.end) {
+        if let Some((_, c)) = bands.get(bi).filter(|(r, _)| !own_bands && r.start <= a && b <= r.end) {
             f.background = *c;
         }
         for (r, kind) in &over {
@@ -348,7 +407,7 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
     let mut foldable: Vec<(usize, usize)> = spans_.into_iter().map(|r| (line_starts[line_starts.partition_point(|&x| x <= r.start) - 1], r.end)).collect();
     foldable.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     foldable.dedup_by_key(|f| f.0);
-    (job, Found { blocks: if pal.frames { blocks } else { Vec::new() }, foldable })
+    (job, Found { blocks: if pal.frames { blocks } else { Vec::new() }, foldable, bands: if own_bands { bands } else { Vec::new() } })
 }
 
 /// Replaces `r` with `with` and puts the cursor after it (or at "$0").
@@ -801,10 +860,11 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let job = match &st.job {
             Some((kk, j)) if *kk == k => j.clone(),
             _ => {
-                let (j, found) = layout_blocks(s, cx, pair, font, mono_bold, &hidden);
+                let (j, found) = layout_blocks(s, cx, pair, font, mono_bold, &hidden, true);
                 st.job = Some((k, j.clone()));
                 st.blocks = found.blocks;
                 st.foldable = found.foldable;
+                st.bands = found.bands;
                 st.frame_x.clear();
                 j
             }
@@ -979,6 +1039,9 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     {
         let mut shapes: Vec<egui::Shape> = Vec::new();
         let gp = output.galley_pos.to_vec2();
+        if !st.bands.is_empty() {
+            shapes.push(egui::Shape::mesh(band_mesh(text, &st.bands, &output.galley, output.galley_pos, clip, ctx.pixels_per_point())));
+        }
         let has_focus = ctx.memory(|m| m.has_focus(id));
         let sel = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
         if has_focus {

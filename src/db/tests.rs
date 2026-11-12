@@ -312,3 +312,50 @@ fn oracle_batches() {
     let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) else { return };
     batches(sp, &pw, "select level from dual connect by level <= 1200");
 }
+
+/// The designer's view of a table, and a change made and undone through it.
+fn designer_round_trip(s: &mut dyn Session, kind: Kind, path: &[&str], first_col: &str) {
+    use crate::design::{ObjDef, edits_of, table_changes};
+    let path: Vec<String> = path.iter().map(|x| x.to_string()).collect();
+    let ObjDef::Table(t) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
+    assert_eq!(t.cols[0].name, first_col, "{t:?}");
+    let mut rows = edits_of(&t);
+    let k = rows.len() - 1;
+    rows[k].col.comment = "через конструктор".into();
+    rows.push(crate::design::ColEdit { from: None, col: crate::design::Column { name: "zz_added".into(), ty: if kind == Kind::ClickHouse { "Nullable(String)".into() } else if kind == Kind::Oracle { "VARCHAR2(10)".into() } else { "text".into() }, nullable: true, ..Default::default() }, dropped: false });
+    for sql in table_changes(kind, &t, &rows, &t.comment) {
+        s.run(&sql, &mut Fetch::limit(0), &mut |_| {}).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    }
+    let ObjDef::Table(t2) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
+    assert_eq!(t2.cols.len(), t.cols.len() + 1);
+    assert_eq!(t2.cols[k].comment, "через конструктор");
+    // Back as it was.
+    let mut rows = edits_of(&t2);
+    rows[k].col.comment = t.cols[k].comment.clone();
+    rows.last_mut().unwrap().dropped = true;
+    for sql in table_changes(kind, &t2, &rows, &t2.comment) {
+        s.run(&sql, &mut Fetch::limit(0), &mut |_| {}).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    }
+    let ObjDef::Table(t3) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
+    assert_eq!(t3, t);
+}
+
+#[test]
+fn designer_on_real_servers() {
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) {
+        let mut s = open(&sp, &pw).unwrap();
+        designer_round_trip(s.as_mut(), Kind::Postgres, &["public", "tables", "orders"], "id");
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) {
+        let mut s = open(&sp, &pw).unwrap();
+        let c = rows(s.run_limit("select name from system.columns where database = 'default' and table = 'events' order by position limit 1", 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
+        designer_round_trip(s.as_mut(), Kind::ClickHouse, &["default", "tables", "events"], &c);
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
+        let mut s = open(&sp, &pw).unwrap();
+        let owner = sp.user.to_uppercase();
+        let t = rows(s.run_limit("select table_name from user_tables order by table_name", 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
+        let c = rows(s.run_limit(&format!("select column_name from user_tab_columns where table_name = '{t}' order by column_id"), 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
+        designer_round_trip(s.as_mut(), Kind::Oracle, &[&owner, "tables", &t], &c);
+    }
+}

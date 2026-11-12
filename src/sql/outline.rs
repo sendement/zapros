@@ -399,7 +399,8 @@ pub fn split_package(src: &str) -> Option<(String, String)> {
     if !spec.name.eq_ignore_ascii_case(&body.name) {
         return None;
     }
-    let piece = |e: &Entity| format!("{}\n/\n", src[e.range.clone()].trim());
+    // (Shown without the script's "/": it's put back when they're joined.)
+    let piece = |e: &Entity| format!("{}\n", src[e.range.clone()].trim());
     Some((piece(spec), piece(body)))
 }
 
@@ -468,8 +469,8 @@ mod tests {
     #[test]
     fn splits_a_package() {
         let (spec, body) = split_package(PKG).unwrap();
-        assert!(spec.starts_with("CREATE OR REPLACE PACKAGE shop.shop_pkg") && spec.ends_with("END shop_pkg;\n/\n"), "{spec}");
-        assert!(body.starts_with("CREATE OR REPLACE PACKAGE BODY") && body.ends_with("END shop_pkg;\n/\n"), "{body}");
+        assert!(spec.starts_with("CREATE OR REPLACE PACKAGE shop.shop_pkg") && spec.ends_with("END shop_pkg;\n"), "{spec}");
+        assert!(body.starts_with("CREATE OR REPLACE PACKAGE BODY") && body.ends_with("END shop_pkg;\n"), "{body}");
         assert!(split_package("select 1 from dual;").is_none());
     }
 }
