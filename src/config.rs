@@ -143,6 +143,8 @@ pub struct Settings {
     /// Hints pop up while typing (else: Ctrl+Space).
     pub hints_auto: bool,
     pub hint_case: Case,
+    /// Schemas put in by hints always in quotes (`"sales".orders`).
+    pub hint_quote_schemas: bool,
     pub auto_pairs: bool,
     /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
     pub embedded_sql: bool,
@@ -172,6 +174,7 @@ impl Default for Settings {
             hints: true,
             hints_auto: true,
             hint_case: Case::Upper,
+            hint_quote_schemas: false,
             auto_pairs: true,
             format: FmtOptions::default(),
             dark: Palette::dark(),

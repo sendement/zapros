@@ -510,6 +510,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.label(t("Регистр ключевых слов в подсказках", "Keyword case in hints"));
                     case_pick(ui, &mut s.hint_case, "hint-case");
                 });
+                ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hint_quote_schemas, t("Схемы в кавычках (\"sales\".orders; в ClickHouse — `sales`.orders)", "Schemas in quotes (\"sales\".orders; in ClickHouse `sales`.orders)")));
             }
             3 => {
                 ui.horizontal(|ui| {

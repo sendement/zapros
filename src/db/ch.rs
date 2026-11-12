@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use super::*;
 
+/// How long a busy session is waited for before going on in a new one.
+const SESSION_WAIT: Duration = Duration::from_secs(4);
+
 pub struct Ch {
     agent: ureq::Agent,
     base: String,
@@ -128,12 +131,23 @@ impl Ch {
     }
 
     /// Like post, but waits a little while the session is still busy with
-    /// a query that was cut short or killed.
-    fn post_retry(&self, sql: &str, query_id: Option<&str>) -> Res<ureq::http::Response<ureq::Body>> {
+    /// a query that was cut short or killed; still busy after that (a query
+    /// the server won't let go of), it goes on in a new session — and says
+    /// so, as SET / USE / temporary tables stay behind in the old one.
+    fn post_retry(&mut self, sql: &str, query_id: Option<&str>, notes: &mut dyn FnMut(String)) -> Res<ureq::http::Response<ureq::Body>> {
         let start = std::time::Instant::now();
+        let mut renewed = false;
         loop {
             match self.post(sql, query_id, true) {
-                Err(f) if f.message.contains("SESSION_IS_LOCKED") && start.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(100)),
+                Err(f) if f.message.contains("SESSION_IS_LOCKED") && start.elapsed() < SESSION_WAIT => std::thread::sleep(Duration::from_millis(100)),
+                Err(f) if f.message.contains("SESSION_IS_LOCKED") && !renewed => {
+                    renewed = true;
+                    self.session = format!("zapros-{}", new_id());
+                    notes(crate::i18n::t(
+                        "Сессия ClickHouse занята другим запросом — открыта новая (SET, USE и временные таблицы прежней здесь не действуют)",
+                        "The ClickHouse session is busy with another query — a new one is opened (the old one's SET, USE and temporary tables don't apply here)",
+                    ).into());
+                }
                 r => return r,
             }
         }
@@ -141,7 +155,7 @@ impl Ch {
 
     /// Rows as text of a query of our own.
     fn rows(&mut self, sql: &str) -> Res<Vec<Vec<String>>> {
-        let mut resp = self.post_retry(&format!("{sql} FORMAT JSONCompactEachRow"), None)?;
+        let mut resp = self.post_retry(&format!("{sql} FORMAT JSONCompactEachRow"), None, &mut |_| {})?;
         let body = resp.body_mut().read_to_string().map_err(|e| Failure::lost(e.to_string()))?;
         let mut out = Vec::new();
         for line in body.lines().filter(|l| !l.trim().is_empty()) {
@@ -157,13 +171,13 @@ impl Ch {
 }
 
 impl Session for Ch {
-    fn run(&mut self, sql: &str, fetch: &mut Fetch, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
+    fn run(&mut self, sql: &str, fetch: &mut Fetch, notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         let sql = sql.trim().trim_end_matches(';').trim_end();
         let qid = format!("zapros-{}", new_id());
         let ours = returns_rows(sql) && !has_format(sql);
         let text = if ours { format!("{sql}\nFORMAT JSONCompactEachRowWithNamesAndTypes") } else { sql.to_string() };
         *self.running.lock().unwrap() = Some(qid.clone());
-        let resp = self.post_retry(&text, Some(&qid)).map_err(|f| if f.lost || f.at.is_some() { f } else { fail_in(&f.message, sql) });
+        let resp = self.post_retry(&text, Some(&qid), notes).map_err(|f| if f.lost || f.at.is_some() { f } else { fail_in(&f.message, sql) });
         let result = (|| {
             let mut resp = resp?;
             let summary = resp.headers().get("X-ClickHouse-Summary").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -294,5 +308,37 @@ impl Session for Ch {
 
     fn version(&mut self) -> String {
         self.one("SELECT version()").map(|v| format!("ClickHouse {v}")).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session held by a query that won't end soon: the next statement
+    /// goes on in a new session (and says so) instead of failing.
+    #[test]
+    fn busy_session_goes_on_in_a_new_one() {
+        let Ok(v) = std::env::var("ZAPROS_TEST_CH") else { return };
+        let p: Vec<&str> = v.split(':').collect();
+        let spec = Spec { kind: Kind::ClickHouse, host: p[0].into(), port: p[1].parse().unwrap(), database: p[2].into(), user: p[3].into(), ..Default::default() };
+        let mut ch = Ch::open(&spec, p[4]).unwrap();
+        let (agent, base, user, key, session) = (ch.agent.clone(), ch.base.clone(), ch.user.clone(), ch.password.clone(), ch.session.clone());
+        let holder = std::thread::spawn(move || {
+            let sql = "SELECT sleepEachRow(1) FROM numbers(9) SETTINGS max_block_size = 1";
+            agent.post(&base).header("X-ClickHouse-User", &user).header("X-ClickHouse-Key", &key).query("session_id", &session).send(sql).map(|mut r| r.body_mut().read_to_string().ok()).ok();
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let old = ch.session.clone();
+        let mut said = Vec::new();
+        let t0 = std::time::Instant::now();
+        let out = ch.run("select 7", &mut Fetch::new(10, |_| 0), &mut |m| said.push(m)).unwrap();
+        let Outcome::Rows(t) = out else { panic!("{out:?}") };
+        assert_eq!(t.rows[0][0].as_deref(), Some("7"));
+        assert_ne!(ch.session, old);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let took = t0.elapsed();
+        assert!(took >= SESSION_WAIT && took < SESSION_WAIT + Duration::from_secs(2), "{took:?}");
+        holder.join().ok();
     }
 }

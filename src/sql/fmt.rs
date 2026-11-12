@@ -85,6 +85,9 @@ fn tokens(src: &str, d: Dialect) -> Vec<Tok> {
             continue;
         }
         let up = out[j].s.to_uppercase();
+        if d == Dialect::ClickHouse && up == "DEFAULT" && ch_default_is_name(&out, j) {
+            continue;
+        }
         let called = out.get(j + 1).is_some_and(|t| t.k == K::Open);
         if called && (FUNCTIONS.contains(&up.as_str()) || super::functions(d).iter().any(|f| f.eq_ignore_ascii_case(&up))) {
             // ClickHouse's functions are case-sensitive: kept as written.
@@ -686,9 +689,39 @@ fn cased(orig: &str, formatted: &str, d: Dialect, o: Options) -> String {
     out
 }
 
+/// ClickHouse's `default` naming a database, user, cluster, profile…
+/// (`default.orders`, `USE default`, `GRANT … TO default`), not the keyword.
+fn ch_default_is_name(out: &[Tok], j: usize) -> bool {
+    if out.get(j + 1).is_some_and(|t| t.k == K::Dot) {
+        return true;
+    }
+    let before = out[..j].iter().rev().find(|t| !matches!(t.k, K::LineComment | K::BlockComment));
+    before.is_some_and(|t| {
+        matches!(
+            t.s.to_uppercase().as_str(),
+            "USE" | "DATABASE" | "DATABASES" | "USER" | "USERS" | "ROLE" | "TO" | "FROM" | "IN" | "CLUSTER" | "PROFILE" | "QUOTA" | "GRANTEES" | "EXISTS" | "IDENTIFIED"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clickhouse_default_as_a_name() {
+        let f = |s: &str| format(s, Dialect::ClickHouse, Options::default());
+        let a = f("select * from default.orders where x = 1");
+        assert!(a.contains("default.orders"), "{a}");
+        let b = f("create table t (x UInt8 default 0) engine = Memory");
+        assert!(b.contains("DEFAULT 0"), "{b}");
+        let c = f("grant select on default.* to default");
+        assert!(c.contains("ON default.*") && c.trim_end().trim_end_matches(';').ends_with("TO default"), "{c}");
+        let e = f("use default");
+        assert!(e.contains("USE default"), "{e}");
+        let g = f("insert into t values (default)");
+        assert!(g.contains("(DEFAULT)"), "{g}");
+    }
 
     fn fmt_pg(s: &str) -> String {
         format_one(s, Dialect::Postgres)

@@ -71,8 +71,21 @@ const SNIPPETS: &[(&str, &str, &str)] = &[
 
 /// How a table goes into the text: bare on the search path, else with
 /// its schema.
-fn qualified(r: &Relation, d: Dialect) -> String {
-    if r.qualify { format!("{}.{}", quote(&r.schema, d), quote(&r.name, d)) } else { quote(&r.name, d) }
+fn qualified(r: &Relation, d: Dialect, qs: bool) -> String {
+    if r.qualify { format!("{}.{}", schema_name(&r.schema, d, qs), quote(&r.name, d)) } else { quote(&r.name, d) }
+}
+
+/// A schema's name as it goes in: in quotes always when asked (the
+/// setting), else only when it must be.
+pub fn schema_name(name: &str, d: Dialect, always: bool) -> String {
+    if !always {
+        return quote(name, d);
+    }
+    if d == Dialect::ClickHouse {
+        format!("`{}`", name.replace('`', "\\`"))
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
 }
 
 fn ident_text(src: &str, t: &Tok) -> Option<String> {
@@ -184,7 +197,7 @@ fn join_guesses(rels: &[Relation], refs: &[Ref], d: Dialect) -> Vec<Item> {
 }
 
 /// Hints at `at` (None inside strings and comments, or with nothing to say).
-pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, forced: bool) -> Option<Hints> {
+pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
     let at = at.min(src.len());
     let toks = lex::lex(src, d);
     if toks.iter().any(|t| t.start < at && (at < t.end || t.open && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
@@ -217,8 +230,8 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, fo
     } else if matches!(prev.as_str(), "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" | "TRUNCATE" | "DESCRIBE" | "DESC") || (prev == "," && before.iter().rev().find(|t| t.kind == Tk::Keyword).is_some_and(|t| t.text(&src[stmt.start..start]).eq_ignore_ascii_case("FROM"))) {
         let mut schemas: Vec<&str> = rels.iter().map(|r| r.schema.as_str()).collect();
         schemas.dedup();
-        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d), kind: Kind::Table, detail: format!("{} · {}", r.schema, r.cols.len()) }));
-        items.extend(schemas.iter().map(|s| Item { label: s.to_string(), insert: quote(s, d), kind: Kind::Schema, detail: String::new() }));
+        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d, quote_schemas), kind: Kind::Table, detail: format!("{} · {}", r.schema, r.cols.len()) }));
+        items.extend(schemas.iter().map(|s| Item { label: s.to_string(), insert: schema_name(s, d, quote_schemas), kind: Kind::Schema, detail: String::new() }));
     } else {
         if prev == "ON" {
             items.extend(join_guesses(rels, &refs, d));
@@ -234,7 +247,7 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], case: Case, fo
             let name = if d == Dialect::ClickHouse { f.to_string() } else { case.apply(f) };
             Item { label: f.to_string(), insert: format!("{name}($0)"), kind: Kind::Function, detail: String::new() }
         }));
-        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d), kind: Kind::Table, detail: r.schema.clone() }));
+        items.extend(rels.iter().map(|r| Item { label: r.name.clone(), insert: qualified(r, d, quote_schemas), kind: Kind::Table, detail: r.schema.clone() }));
     }
     let p = prefix.to_lowercase();
     let mut scored: Vec<(u8, Item)> = items
@@ -295,12 +308,12 @@ mod tests {
     #[test]
     fn alias_columns() {
         let src = "select u. from users u";
-        let h = hints(src, 9, Dialect::Postgres, &rels(), Case::Upper, false).unwrap();
+        let h = hints(src, 9, Dialect::Postgres, &rels(), Case::Upper, false, false).unwrap();
         assert_eq!(h.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["id", "name"]);
-        let h = hints("select o. from orders o", 9, Dialect::Postgres, &rels(), Case::Upper, false).unwrap();
+        let h = hints("select o. from orders o", 9, Dialect::Postgres, &rels(), Case::Upper, false, false).unwrap();
         assert_eq!(h.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["id", "user_id", "total"]);
         let src = "select o.to from orders as o";
-        let h = hints(src, 11, Dialect::Postgres, &rels(), Case::Upper, false).unwrap();
+        let h = hints(src, 11, Dialect::Postgres, &rels(), Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "total");
         assert_eq!(h.range, 9..11);
     }
@@ -308,10 +321,10 @@ mod tests {
     #[test]
     fn tables_after_from_and_joins() {
         let src = "select * from us";
-        let h = hints(src, src.len(), Dialect::Postgres, &rels(), Case::Upper, false).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &rels(), Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "users");
         let src = "select * from users u join orders o on ";
-        let h = hints(src, src.len(), Dialect::Postgres, &rels(), Case::Upper, true).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &rels(), Case::Upper, true, false).unwrap();
         assert_eq!(h.items[0].insert, "o.user_id = u.id");
     }
 
@@ -320,18 +333,34 @@ mod tests {
         let mut r = rels();
         r.push(Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true });
         let src = "select * from inv";
-        let h = hints(src, src.len(), Dialect::Postgres, &r, Case::Upper, false).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &r, Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].insert, "sales.invoices");
         // Its columns by alias all the same.
-        let h = hints("select i. from sales.invoices i", 9, Dialect::Postgres, &r, Case::Upper, false).unwrap();
+        let h = hints("select i. from sales.invoices i", 9, Dialect::Postgres, &r, Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "id");
     }
 
     #[test]
     fn keywords_by_case_and_none_in_strings() {
-        let h = hints("sel", 3, Dialect::Postgres, &[], Case::Lower, false).unwrap();
+        let h = hints("sel", 3, Dialect::Postgres, &[], Case::Lower, false, false).unwrap();
         assert!(h.items.iter().any(|i| i.insert == "select"));
         assert_eq!(h.items[0].kind, Kind::Snippet);
-        assert!(hints("select 'fro", 11, Dialect::Postgres, &[], Case::Upper, false).is_none());
+        assert!(hints("select 'fro", 11, Dialect::Postgres, &[], Case::Upper, false, false).is_none());
     }
+
+    #[test]
+    fn schemas_quoted_when_asked() {
+        let r = vec![Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true }];
+        let src = "select * from inv";
+        let plain = hints(src, src.len(), Dialect::Postgres, &r, Case::Upper, false, false).unwrap();
+        assert!(plain.items.iter().any(|i| i.insert == "sales.invoices"));
+        let quoted = hints(src, src.len(), Dialect::Postgres, &r, Case::Upper, false, true).unwrap();
+        assert!(quoted.items.iter().any(|i| i.insert == "\"sales\".invoices"), "{:?}", quoted.items.iter().map(|i| &i.insert).collect::<Vec<_>>());
+        let ch = hints(src, src.len(), Dialect::ClickHouse, &r, Case::Upper, false, true).unwrap();
+        assert!(ch.items.iter().any(|i| i.insert == "`sales`.invoices"));
+        let s = "select * from sal";
+        let schema = hints(s, s.len(), Dialect::Postgres, &r, Case::Upper, false, true).unwrap();
+        assert!(schema.items.iter().any(|i| i.insert == "\"sales\""), "{:?}", schema.items.iter().map(|i| &i.insert).collect::<Vec<_>>());
+    }
+
 }

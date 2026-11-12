@@ -8,7 +8,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   dropped connections and long queries never block the window; a lost
   link is re-opened on the next request; a query can be stopped (PG cancel
   request, ClickHouse `KILL QUERY`, Oracle break, SQLite interrupt), and one
-  the server won't stop can be abandoned (its session is made anew).
+  the server won't stop can be abandoned (its session is made anew). A
+  ClickHouse session still busy a few seconds on (SESSION_IS_LOCKED) gives
+  way to a new one, with a note in Messages.
 - **Two rows of tabs.** Workspaces (named, coloured, each with its own
   default connection) are tabs over a sheet whose outline, in the
   workspace's colour, runs on from the active tab; on the sheet, the
@@ -48,7 +50,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   Hover for the reason. Running a script with errors asks first.
 - **Hints**: columns after `alias.`, tables after `FROM` / `JOIN`, a join
   condition guessed from column names after `ON`, keywords and functions of
-  the dialect, snippets (`sel`, `case`, `cte`, …).
+  the dialect, snippets (`sel`, `case`, `cte`, …). Schemas can be put in
+  quotes always (a setting).
 - **SQL inside strings.** Dynamic SQL (`EXECUTE IMMEDIATE`, PL/pgSQL
   `EXECUTE`, `OPEN … FOR`, `format()`, `DBMS_SQL.PARSE`), strings kept in
   variables that end up there, literals reading as a statement, and
@@ -63,7 +66,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   the formatter's settings, strings keep their lines and only get the
   keywords' case.
 - **Formatter** ("river" style, leading commas; keyword / function case
-  configurable). PL/SQL units and `$$` bodies are left as written.
+  configurable). PL/SQL units and `$$` bodies are left as written. In
+  ClickHouse `default` naming a database, user or cluster
+  (`default.orders`, `USE default`, `TO default`) keeps its case.
 - **Highlighting** with a palette per theme (colour pickers, bold keywords,
   italic comments, brackets coloured by depth) and, as in listok, rainbow
   bands under the indents: one per construct a line is nested in —

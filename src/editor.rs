@@ -1104,7 +1104,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let want = forced || (out.changed && st.popup.is_some()) || (cx.settings.hints_auto && word_char && out.changed);
         if want {
             let forced = forced || st.popup.as_ref().is_some_and(|p| p.forced);
-            match complete::hints(text, c, cx.dialect, cx.rels, cx.settings.hint_case, forced) {
+            match complete::hints(text, c, cx.dialect, cx.rels, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
                 Some(h) => {
                     let keep = st.popup.as_ref().and_then(|p| p.hints.items.get(p.sel)).and_then(|it| h.items.iter().position(|x| x == it)).unwrap_or(0);
                     st.popup = Some(Popup { hints: h, sel: keep, forced });
