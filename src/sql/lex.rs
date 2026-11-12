@@ -182,7 +182,9 @@ pub fn lex(src: &str, d: Dialect) -> Vec<Tok> {
             kind = Tk::Number;
         } else if is_word_start(src, i) {
             i = word_end(src, i);
-            kind = if super::is_keyword(&src[start..i], d) { Tk::Keyword } else { Tk::Word };
+            // Right by a dot it's a name, keyword or not (default.orders, t.date).
+            let dotted = b.get(i) == Some(&b'.') || (start > 0 && b[start - 1] == b'.');
+            kind = if !dotted && super::is_keyword(&src[start..i], d) { Tk::Keyword } else { Tk::Word };
         } else if (c == b':' && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic() || *x == b'_' || x.is_ascii_digit() && d != Dialect::Postgres) && !(i > 0 && b[i - 1] == b':'))
             || (c == b'$' && b.get(i + 1).is_some_and(u8::is_ascii_digit))
             || (c == b'@' && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic()))

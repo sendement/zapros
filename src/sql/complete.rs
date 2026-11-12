@@ -156,7 +156,9 @@ fn find<'a>(rels: &'a [Relation], r: &Ref) -> Option<&'a Relation> {
 
 /// A name as it must be written (quoted when it'd fold or clash).
 pub fn quote(name: &str, d: Dialect) -> String {
-    let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()) && !super::is_keyword(name, d);
+    // (ClickHouse's own database `default` reads fine bare.)
+    let keyword = super::is_keyword(name, d) && !(d == Dialect::ClickHouse && name == "default");
+    let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()) && !keyword;
     let folds = match d {
         Dialect::Postgres => name.chars().any(|c| c.is_uppercase()),
         Dialect::Oracle => name.chars().any(|c| c.is_lowercase()),
@@ -361,6 +363,23 @@ mod tests {
         let s = "select * from sal";
         let schema = hints(s, s.len(), Dialect::Postgres, &r, Case::Upper, false, true).unwrap();
         assert!(schema.items.iter().any(|i| i.insert == "\"sales\""), "{:?}", schema.items.iter().map(|i| &i.insert).collect::<Vec<_>>());
+    }
+
+
+    #[test]
+    fn clickhouse_default_database() {
+        let r = vec![Relation { schema: "default".into(), name: "orders".into(), cols: vec![("id".into(), "UInt64".into()), ("total".into(), "Float64".into())], qualify: true }];
+        let ins = |src: &str, at: usize| hints(src, at, Dialect::ClickHouse, &r, Case::Upper, false, false).map(|h| h.items.iter().map(|i| i.insert.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        // Put in bare: `default` is a fine name there.
+        let src = "select * from ord";
+        assert!(ins(src, src.len()).contains(&"default.orders".to_string()), "{:?}", ins(src, src.len()));
+        let src = "select * from def";
+        assert!(ins(src, src.len()).contains(&"default".to_string()), "{:?}", ins(src, src.len()));
+        // Written bare, the statement's hints still work.
+        let src = "select o. from default.orders o";
+        assert!(ins(src, 9).contains(&"total".to_string()), "{:?}", ins(src, 9));
+        let src = "select * from default.";
+        assert!(ins(src, src.len()).contains(&"orders".to_string()), "{:?}", ins(src, src.len()));
     }
 
 }
