@@ -213,6 +213,8 @@ pub struct App {
     pub save_as: Option<(String, String)>,
     pub project_input: Option<String>,
     pub toast: Option<(String, Instant)>,
+    /// When the last frame began (frames are paced by hand: see main.rs).
+    pub last_frame: Option<Instant>,
     /// The save-a-result window: (tab, result, what).
     pub export: Option<(String, usize, crate::export::Export)>,
     dirty: bool,
@@ -292,6 +294,7 @@ impl App {
             save_as: None,
             project_input: None,
             toast: None,
+            last_frame: None,
             export: None,
             dirty: false,
             last_save: Instant::now(),
@@ -1299,6 +1302,15 @@ pub fn fmt_took(d: Duration) -> String {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // At most ~120 frames a second when they come back to back (a
+        // caret, a running query's clock): without vsync nothing else holds them.
+        const FRAME: Duration = Duration::from_micros(8_333);
+        if let Some(t) = self.last_frame {
+            if let Some(rest) = FRAME.checked_sub(t.elapsed()) {
+                std::thread::sleep(rest);
+            }
+        }
+        self.last_frame = Some(Instant::now());
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.take_events(&ctx);

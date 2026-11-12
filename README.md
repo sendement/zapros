@@ -10,7 +10,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   request, ClickHouse `KILL QUERY`, Oracle break, SQLite interrupt), and one
   the server won't stop can be abandoned (its session is made anew). A
   ClickHouse session still busy a few seconds on (SESSION_IS_LOCKED) gives
-  way to a new one, with a note in Messages.
+  way to a new one, with a note in Messages. A window the compositor
+  doesn't show (another workspace or screen) no longer turns "not
+  responding": no vsync wait, frames paced by hand.
 - **Two rows of tabs.** Workspaces (named, coloured, each with its own
   default connection) are tabs over a sheet whose outline, in the
   workspace's colour, runs on from the active tab; on the sheet, the

@@ -423,6 +423,26 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
 }
 
 /// Inline Markdown: **bold**, *italic* / _italic_, `code`, [text](link).
+/// Whether `mark` at `i` opens (or, `closing`, closes) emphasis, as in
+/// CommonMark: `_` inside a word (my_table_name) is just a character, and
+/// nothing opens without a mark to close it further on.
+fn emphasis(text: &str, i: usize, mark: &str, closing: bool) -> bool {
+    let underscore = mark.starts_with('_');
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let can_close = |at: usize| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + mark.len()..].chars().next();
+        before.is_some_and(|c| !c.is_whitespace()) && !(underscore && word(after))
+    };
+    if closing {
+        return can_close(i);
+    }
+    let before = text[..i].chars().next_back();
+    let after = text[i + mark.len()..].chars().next();
+    let can_open = after.is_some_and(|c| !c.is_whitespace()) && !(underscore && word(before));
+    can_open && text[i + mark.len()..].match_indices(mark).any(|(j, _)| j > 0 && can_close(i + mark.len() + j))
+}
+
 fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJob) {
     let base = ui.visuals().text_color();
     let strong_c = ui.visuals().strong_text_color();
@@ -442,15 +462,30 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
         job.append(s, 0.0, f);
         s.clear();
     };
+    // Which mark opened the bold / italic now on (`**` / `__`, `*` / `_`).
+    let mut bold_by: Option<&str> = None;
+    let mut italic_by: Option<&str> = None;
     while let Some((i, c)) = chars.next() {
         let rest = &text[i..];
-        if rest.starts_with("**") || rest.starts_with("__") {
+        if c == '\\' && rest[1..].starts_with(|n: char| n.is_ascii_punctuation()) {
+            // \_ \* \` …: the mark itself.
+            let (_, n) = chars.next().unwrap();
+            run.push(n);
+        } else if let Some(mark) = ["**", "__"].into_iter().find(|m| rest.starts_with(m)).filter(|m| emphasis(text, i, m, bold_by == Some(*m))) {
             push(job, &mut run, bold, italic);
+            bold_by = if bold_by == Some(mark) { None } else { Some(mark) };
             bold = !bold;
             chars.next();
-        } else if (c == '*' || c == '_') && !(text[..i].ends_with(' ') && rest[1..].starts_with(' ')) {
+        } else if let Some(mark) = ["*", "_"].into_iter().find(|m| rest.starts_with(m)).filter(|m| emphasis(text, i, m, italic_by == Some(*m))) {
             push(job, &mut run, bold, italic);
+            italic_by = if italic_by == Some(mark) { None } else { Some(mark) };
             italic = !italic;
+        } else if c == '_' || c == '*' {
+            // Marks that open nothing: the whole run of them as written.
+            run.push(c);
+            while chars.peek().is_some_and(|&(_, n)| n == c) {
+                run.push(chars.next().unwrap().1);
+            }
         } else if c == '`' {
             if let Some(end) = rest[1..].find('`') {
                 push(job, &mut run, bold, italic);
@@ -559,5 +594,33 @@ pub fn markdown(ui: &mut egui::Ui, text: &str) {
     }
     if let Some(lines) = code {
         ui.label(RichText::new(lines.join("\n")).monospace());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The text as laid out, and which bits came out italic.
+    fn laid(md: &str) -> (String, Vec<String>) {
+        let ctx = egui::Context::default();
+        let mut job = LayoutJob::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| inline(ui, md, 14.0, false, &mut job));
+        out.textures_delta.clear();
+        let italic = job.sections.iter().filter(|s| s.format.italics).map(|s| job.text[s.byte_range.start.0..s.byte_range.end.0].to_string()).collect();
+        (job.text, italic)
+    }
+
+    #[test]
+    fn underscores_in_words_stay() {
+        assert_eq!(laid("my_table_name and t_1").0, "my_table_name and t_1");
+        assert_eq!(laid("a lone _ here").0, "a lone _ here");
+        assert_eq!(laid("_tmp table").0, "_tmp table");
+        let (text, it) = laid("this is _very_ nice, *so* sure");
+        assert_eq!(text, "this is very nice, so sure");
+        assert_eq!(it, vec!["very".to_string(), "so".to_string()]);
+        assert_eq!(laid("snake__case__name").0, "snake__case__name");
+        assert_eq!(laid(r"\_escaped\_ and \*star\*").0, "_escaped_ and *star*");
+        assert_eq!(laid("x * y * z").0, "x * y * z");
     }
 }
