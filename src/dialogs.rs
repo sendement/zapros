@@ -403,6 +403,70 @@ fn case_pick(ui: &mut egui::Ui, v: &mut Case, id: &str) -> bool {
     changed
 }
 
+/// A font family picked from those installed ("" — `default`); the
+/// monospaced ones first when `mono`.
+fn font_pick(ui: &mut egui::Ui, id: &str, family: &mut String, mono: bool, default: &str) {
+    let shown = if family.is_empty() { default.to_string() } else { family.clone() };
+    let fid = egui::Id::new((id, "filter"));
+    egui::ComboBox::from_id_salt(id).width(230.0).height(320.0).selected_text(shown).show_ui(ui, |ui| {
+        let mut q: String = ui.ctx().data(|d| d.get_temp(fid)).unwrap_or_default();
+        ui.add(egui::TextEdit::singleline(&mut q).hint_text(t("🔎 найти", "🔎 find")).desired_width(200.0)).request_focus();
+        ui.ctx().data_mut(|d| d.insert_temp(fid, q.clone()));
+        if ui.selectable_label(family.is_empty(), default).clicked() {
+            family.clear();
+        }
+        let q = q.to_lowercase();
+        let all = crate::fonts::families();
+        let list: Vec<&(String, bool)> = if mono { all.iter().filter(|f| f.1).chain(all.iter().filter(|f| !f.1)).collect() } else { all.iter().collect() };
+        for (name, is_mono) in list {
+            if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                continue;
+            }
+            let label = if mono && *is_mono { format!("{name}  ·  mono") } else { name.clone() };
+            if ui.selectable_label(family == name, label).clicked() {
+                *family = name.clone();
+            }
+        }
+    });
+}
+
+/// The fonts of the interface, the code and the tables, with their sizes.
+fn fonts_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
+    ui.label(RichText::new(t("Шрифты", "Fonts")).strong());
+    let f = &mut s.fonts;
+    egui::Grid::new("fonts").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
+        ui.label(t("Интерфейс", "Interface"));
+        font_pick(ui, "font-ui", &mut f.ui, false, t("системный", "system's"));
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut f.ui_size).range(9.0..=24.0).speed(0.1).suffix(" pt"));
+        });
+        ui.end_row();
+        ui.label(t("Код", "Code"));
+        font_pick(ui, "font-code", &mut f.code, true, t("системный моноширинный", "system's monospace"));
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut s.font_size).range(9.0..=28.0).speed(0.1).suffix(" pt"));
+            ui.label(t("межстрочный", "line gap"));
+            ui.add(egui::DragValue::new(&mut f.code_spacing).range(0.0..=12.0).speed(0.1).suffix(" pt"));
+        });
+        ui.end_row();
+        ui.label(t("Таблицы", "Tables"));
+        font_pick(ui, "font-table", &mut f.table, true, t("как у кода", "the code's"));
+        ui.add(egui::DragValue::new(&mut f.table_size).range(8.0..=24.0).speed(0.1).suffix(" pt"));
+        ui.end_row();
+    });
+    // How they look.
+    let text = ui.visuals().text_color();
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(RichText::new(t("Интерфейс: Подключения, Структура, Выполнить — 0123", "Interface: Connections, Structure, Run — 0123")).font(egui::FontId::proportional(f.ui_size)).color(text));
+        ui.label(RichText::new("SELECT name, count(*) FROM orders -- 0O 1lI {}").font(egui::FontId::monospace(s.font_size)).color(text));
+        ui.label(RichText::new("id │ customer_id │ total  925.5 │ NULL").font(egui::FontId::new(f.table_size, egui::FontFamily::Name("table".into()))).color(text));
+    });
+    if ui.button(t("Шрифты по умолчанию", "Default fonts")).clicked() {
+        s.fonts = crate::config::Fonts::default();
+        s.font_size = 14.0;
+    }
+}
+
 /// A gradient as a strip.
 fn gradient_strip(ui: &mut egui::Ui, b: &crate::themes::Backdrop, size: egui::Vec2) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -487,6 +551,8 @@ fn look(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
         }
     });
     ui.checkbox(&mut s.icon_colors, t("Значки дерева в цветах палитры (таблицы, функции, триггеры…)", "Tree icons in the palette's colours (tables, functions, triggers…)"));
+    ui.separator();
+    fonts_ui(ui, s);
     ui.separator();
     let b = &mut s.backdrop;
     ui.label(RichText::new(t("Фон окна", "Window backdrop")).strong());

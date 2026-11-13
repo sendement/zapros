@@ -164,6 +164,30 @@ pub struct Settings {
     pub icons: String,
     /// The tree's icons in their kinds' colours (else in the text's).
     pub icon_colors: bool,
+    /// Fonts of the interface and of the tables (the code's: `code_font`,
+    /// its size `font_size`).
+    pub fonts: Fonts,
+}
+
+/// Font families by name as fontconfig knows them ("" — the system's
+/// default sans / monospace).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fonts {
+    pub ui: String,
+    pub ui_size: f32,
+    pub code: String,
+    /// "" — the code's.
+    pub table: String,
+    pub table_size: f32,
+    /// Extra room between the code's lines (points).
+    pub code_spacing: f32,
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Self { ui: String::new(), ui_size: 12.5, code: String::new(), table: String::new(), table_size: 12.0, code_spacing: 0.0 }
+    }
 }
 
 impl Default for Settings {
@@ -195,6 +219,7 @@ impl Default for Settings {
             backdrop: crate::themes::Backdrop::default(),
             icons: "lucide".into(),
             icon_colors: true,
+            fonts: Fonts::default(),
         }
     }
 }

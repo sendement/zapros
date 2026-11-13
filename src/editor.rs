@@ -275,6 +275,8 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
     // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
     let spans = crate::sql::embed::classify(text, cx.dialect, cx.settings.embedded_sql);
     let mono = FontId::monospace(font);
+    // Extra room between lines, as set.
+    let spacing = cx.settings.fonts.code_spacing.clamp(0.0, 12.0);
     let bold = if mono_bold && pal.bold_keywords { FontId::new(font, FontFamily::Name("mono-bold".into())) } else { mono.clone() };
     let rainbow = if cx.dark { RAINBOW_DARK } else { RAINBOW_LIGHT };
     // SQL in a string: a faint wash of the string colour, deeper ones more.
@@ -401,6 +403,9 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
                     }
                 }
             }
+        }
+        if spacing > 0.0 {
+            f.line_height = Some((font * 1.2 + spacing).round());
         }
         job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: f });
     }
@@ -899,7 +904,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let text_len = text.len();
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (cx.dialect, cx.dark, cx.issues, cx.server_err, pair, font.to_bits(), mono_bold).hash(&mut h);
+        (cx.dialect, cx.dark, cx.issues, cx.server_err, pair, font.to_bits(), mono_bold, cx.settings.fonts.code_spacing.to_bits()).hash(&mut h);
         format!("{:?}{:?}", cx.settings.dark, cx.settings.light).hash(&mut h);
         h.finish()
     };

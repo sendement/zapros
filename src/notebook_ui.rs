@@ -128,8 +128,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         if ui.add_enabled(!running, tinted(lbl("▶", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
                             ops.push(Op::Run(cell.id.clone()));
                         }
-                        if running {
+                        if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
                             ui.add(egui::Spinner::new().size(14.0));
+                            crate::app::stopwatch_label(ui, since, true);
                         }
                         if crate::sql::notebook::parse_with(cell.text.trim().trim_end_matches(';'), dialect).is_some_and(|w| w.main.is_empty()) {
                             ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
@@ -277,8 +278,47 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         if md_edit.contains(&cell.id) {
                             let mut text = cell.text.clone();
                             let lines = text.lines().count().max(3);
-                            let r = ui.add(egui::TextEdit::multiline(&mut text).id(egui::Id::new(("md", &cell.id))).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(lines).hint_text(t("# Заголовок, **жирный**, *курсив*, `код`, - список", "# Heading, **bold**, *italic*, `code`, - list")));
-                            if r.changed() {
+                            let md_id = egui::Id::new(("md", &cell.id));
+                            let r = ui.add(egui::TextEdit::multiline(&mut text).id(md_id).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(lines).hint_text(t("# Заголовок, **жирный**, *курсив*, `код`, - список   (правый щелчок — ещё)", "# Heading, **bold**, *italic*, `code`, - list   (right click: more)")));
+                            let mut changed = r.changed();
+                            // What's picked as of before a right click (a press
+                            // moves egui's caret): the menu works on it.
+                            let sel_key = md_id.with("sel");
+                            if !ctx.input(|i| i.pointer.secondary_pressed() || i.pointer.secondary_down()) {
+                                if let Some(cr) = egui::TextEdit::load_state(&ctx, md_id).and_then(|s| s.cursor.char_range()) {
+                                    ctx.data_mut(|d| d.insert_temp(sel_key, (cr.primary.index.0, cr.secondary.index.0)));
+                                }
+                            }
+                            r.context_menu(|ui| {
+                                let (p, q) = ctx.data(|d| d.get_temp::<(usize, usize)>(sel_key)).unwrap_or((text.chars().count(), text.chars().count()));
+                                let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+                                let (a, b) = (byte(p.min(q)), byte(p.max(q)));
+                                for (k, group) in crate::md::MENU.iter().enumerate() {
+                                    if k > 0 {
+                                        ui.separator();
+                                    }
+                                    for op in group.iter() {
+                                        let row = ui.horizontal(|ui| {
+                                            let r = ui.button(op.label());
+                                            ui.label(RichText::new(op.hint()).monospace().weak());
+                                            r
+                                        });
+                                        if row.inner.clicked() {
+                                            let (s, x, y) = crate::md::apply(&text, a, b, *op);
+                                            let ch = |b: usize| s[..b].chars().count();
+                                            let (cx, cy) = (ch(x), ch(y));
+                                            text = s;
+                                            changed = true;
+                                            let mut st = egui::TextEdit::load_state(&ctx, md_id).unwrap_or_default();
+                                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(cx), egui::text::CCursor::new(cy))));
+                                            st.store(&ctx, md_id);
+                                            ctx.memory_mut(|m| m.request_focus(md_id));
+                                            ui.close();
+                                        }
+                                    }
+                                }
+                            });
+                            if changed {
                                 ops_text(app, &tab.id, &cell.id, text);
                             }
                             if r.has_focus() {
@@ -466,15 +506,20 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
     let link = ui.visuals().hyperlink_color;
     let mut bold = strong;
     let mut italic = false;
+    let mut strike = false;
     let mut chars = text.char_indices().peekable();
     let mut run = String::new();
-    let push = |job: &mut LayoutJob, s: &mut String, bold: bool, italic: bool| {
+    let push = |job: &mut LayoutJob, s: &mut String, bold: bool, italic: bool, strike: bool| {
         if s.is_empty() {
             return;
         }
         let font = if bold { FontId::new(size, egui::FontFamily::Name("bold".into())) } else { FontId::proportional(size) };
-        let mut f = egui::TextFormat::simple(font, if bold { strong_c } else { base });
+        let c = if bold { strong_c } else { base };
+        let mut f = egui::TextFormat::simple(font, c);
         f.italics = italic;
+        if strike {
+            f.strikethrough = Stroke::new(1.0, c);
+        }
         job.append(s, 0.0, f);
         s.clear();
     };
@@ -487,13 +532,17 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
             // \_ \* \` …: the mark itself.
             let (_, n) = chars.next().unwrap();
             run.push(n);
+        } else if rest.starts_with("~~") {
+            push(job, &mut run, bold, italic, strike);
+            strike = !strike;
+            chars.next();
         } else if let Some(mark) = ["**", "__"].into_iter().find(|m| rest.starts_with(m)).filter(|m| emphasis(text, i, m, bold_by == Some(*m))) {
-            push(job, &mut run, bold, italic);
+            push(job, &mut run, bold, italic, strike);
             bold_by = if bold_by == Some(mark) { None } else { Some(mark) };
             bold = !bold;
             chars.next();
         } else if let Some(mark) = ["*", "_"].into_iter().find(|m| rest.starts_with(m)).filter(|m| emphasis(text, i, m, italic_by == Some(*m))) {
-            push(job, &mut run, bold, italic);
+            push(job, &mut run, bold, italic, strike);
             italic_by = if italic_by == Some(mark) { None } else { Some(mark) };
             italic = !italic;
         } else if c == '_' || c == '*' {
@@ -504,7 +553,7 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
             }
         } else if c == '`' {
             if let Some(end) = rest[1..].find('`') {
-                push(job, &mut run, bold, italic);
+                push(job, &mut run, bold, italic, strike);
                 let mut f = egui::TextFormat::simple(FontId::monospace(size * 0.92), base);
                 f.background = code_bg;
                 job.append(&rest[1..1 + end], 0.0, f);
@@ -518,7 +567,7 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
             // [text](link): the text, as a link would look.
             match (rest.find("]("), rest.find(')')) {
                 (Some(a), Some(b)) if a < b => {
-                    push(job, &mut run, bold, italic);
+                    push(job, &mut run, bold, italic, strike);
                     let mut f = egui::TextFormat::simple(FontId::proportional(size), link);
                     f.underline = Stroke::new(1.0, link);
                     job.append(&rest[1..a], 0.0, f);
@@ -532,7 +581,7 @@ fn inline(ui: &egui::Ui, text: &str, size: f32, strong: bool, job: &mut LayoutJo
             run.push(c);
         }
     }
-    push(job, &mut run, bold, italic);
+    push(job, &mut run, bold, italic, strike);
 }
 
 /// Markdown laid out: headings, lists, quotes, code blocks, rules,
@@ -544,7 +593,42 @@ pub fn markdown(ui: &mut egui::Ui, text: &str) {
     }
     let body = 14.0;
     let mut code: Option<Vec<&str>> = None;
-    for line in text.lines() {
+    let all: Vec<&str> = text.lines().collect();
+    let mut at = 0;
+    while at < all.len() {
+        let line = all[at];
+        at += 1;
+        // A table: its lines of | cells | together (the --- line under the
+        // header left out).
+        if code.is_none() && line.trim_start().starts_with('|') {
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut l = line;
+            loop {
+                let cells: Vec<String> = l.trim().trim_matches('|').split('|').map(|c| c.trim().to_string()).collect();
+                if !cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':'))) {
+                    rows.push(cells);
+                }
+                if at < all.len() && all[at].trim_start().starts_with('|') {
+                    l = all[at];
+                    at += 1;
+                } else {
+                    break;
+                }
+            }
+            egui::Frame::NONE.stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                egui::Grid::new(ui.next_auto_id()).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
+                    for (k, r) in rows.iter().enumerate() {
+                        for c in r {
+                            let mut job = LayoutJob::default();
+                            inline(ui, c, body, k == 0, &mut job);
+                            ui.label(job);
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            continue;
+        }
         if line.trim_start().starts_with("```") {
             match code.take() {
                 Some(lines) => {
@@ -581,6 +665,20 @@ pub fn markdown(ui: &mut egui::Ui, text: &str) {
             }
         } else if l.trim() == "---" || l.trim() == "***" {
             ui.separator();
+        } else if let Some((done, rest)) = ["- [ ] ", "- [x] ", "- [X] "].iter().find_map(|m| l.trim_start().strip_prefix(m).map(|r| (m.as_bytes()[3] != b' ', r))) {
+            // A checklist's item: its box, ticked or not.
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(6.0);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                let v = ui.visuals();
+                ui.painter().rect_stroke(r.shrink(1.0), 3.0, Stroke::new(1.2, v.text_color()), egui::StrokeKind::Inside);
+                if done {
+                    let p = |x: f32, y: f32| egui::pos2(r.left() + x * r.width(), r.top() + y * r.height());
+                    ui.painter().add(egui::Shape::line(vec![p(0.25, 0.52), p(0.43, 0.7), p(0.76, 0.32)], Stroke::new(1.8, v.hyperlink_color)));
+                }
+                inline(ui, rest, body, false, &mut job);
+                ui.label(job);
+            });
         } else if let Some(rest) = l.trim_start().strip_prefix("- ").or_else(|| l.trim_start().strip_prefix("* ")) {
             let indent = (l.len() - l.trim_start().len()) as f32 * 6.0;
             ui.horizontal_wrapped(|ui| {

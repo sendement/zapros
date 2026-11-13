@@ -11,6 +11,7 @@ mod editor;
 mod export;
 mod fonts;
 mod i18n;
+mod md;
 mod icons;
 mod icons_data;
 mod notebook_ui;

@@ -71,6 +71,15 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   nor formatting touches them); the formatter's layout — the "river" or
   plain (clause words at the left, lists indented), commas leading or
   trailing, the indent per level.
+- **Fonts** (Settings → Look): the interface's, the code's (with its line
+  gap) and the tables', any installed family (searchable list, monospaced
+  first where it fits), each with its size; a preview of all three.
+- **A stopwatch** by every spinner of a running query (the toolbar, the
+  script's tab, a notebook cell, rows being fetched): 0:03.4, 12:05.0…
+- **Markdown cells**: a right click while editing gives bold, italic,
+  strikethrough, inline code, link, headings, lists (bulleted, numbered,
+  checklist), quote, code block, table, divider — on the picked text or
+  its lines (again: off). Shown: strikethrough, checklists' boxes, tables.
 - **Icon packs** (Settings → Look): Lucide, Tabler, Phosphor, Codicons,
   Fluent, Material Symbols, Iconoir, Bootstrap — or the font's symbols as
   before — in the object tree, the files panel and the toolbars; tinted by

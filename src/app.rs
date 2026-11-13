@@ -82,6 +82,8 @@ pub struct ResultView {
     pub cursor: Option<(u64, String)>,
     /// More rows asked for, not here yet (true: to the end).
     pub loading: Option<bool>,
+    /// Since when they're asked for (the stopwatch by the spinner).
+    pub loading_since: Option<Instant>,
     /// Saved once every row's in.
     pub export_after: Option<crate::export::Export>,
 }
@@ -223,6 +225,8 @@ pub struct App {
     last_save: Instant,
     pub results_max: bool,
     applied: Option<(ThemePref, u32, String)>,
+    /// The fonts as last put in.
+    fonts_applied: Option<config::Fonts>,
     pub about: bool,
     ctx: egui::Context,
     /// Connections started on their own once (not again after failing).
@@ -253,7 +257,6 @@ impl App {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let settings: Settings = config::load(&settings_path());
         crate::i18n::set_ru(settings.russian.unwrap_or_else(crate::i18n::system_is_ru));
-        crate::fonts::install(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let mut session: Session = config::load(&session_path());
         if session.workspaces.is_empty() {
@@ -272,6 +275,7 @@ impl App {
         }
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = Self {
+            fonts_applied: None,
             settings,
             conns: config::load(&conns_path()),
             session,
@@ -912,6 +916,7 @@ impl App {
         l.query.send(Req::More { run, n, all });
         if let Some(v) = self.rt.get_mut(tab).and_then(|r| r.results.get_mut(i)) {
             v.loading = Some(all);
+            v.loading_since = Some(Instant::now());
         }
     }
 
@@ -1341,6 +1346,13 @@ impl App {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
+        // Fonts changed (or none yet): put in, sizes with them.
+        if self.fonts_applied.as_ref() != Some(&self.settings.fonts) {
+            let f = self.settings.fonts.clone();
+            crate::fonts::install(ctx, &f);
+            ctx.all_styles_mut(|s| crate::fonts::sizes(s, &f));
+            self.fonts_applied = Some(f);
+        }
         // A new scale waits while the settings are open (the slider would
         // run away from under the pointer): it comes when they're closed.
         let scale = match &self.applied {
@@ -1374,6 +1386,8 @@ impl App {
         }
         ctx.set_zoom_factor(scale.clamp(0.5, 3.0));
         ctx.all_styles_mut(crate::ui::standard);
+        let f = self.settings.fonts.clone();
+        ctx.all_styles_mut(|s| crate::fonts::sizes(s, &f));
     }
 
     /// The active tab's connection starts in the background (when no
@@ -1466,6 +1480,22 @@ pub fn head(s: &str, n: usize) -> String {
     if one.chars().count() > n { format!("{}…", one.chars().take(n).collect::<String>()) } else { one }
 }
 
+/// A running query's stopwatch: 0:03.4, 12:05.0, 1:02:03.
+pub fn stopwatch(d: Duration) -> String {
+    let t = d.as_millis() / 100;
+    let (tenths, s) = (t % 10, t / 10);
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}.{tenths}", s / 60, s % 60) }
+}
+
+/// The stopwatch beside a spinner (digits that don't jump about).
+pub fn stopwatch_label(ui: &mut egui::Ui, since: Instant, small: bool) {
+    let mut t = egui::RichText::new(stopwatch(since.elapsed())).monospace();
+    if small {
+        t = t.small();
+    }
+    ui.label(t.color(ui.visuals().weak_text_color())).on_hover_text(crate::i18n::t("Сколько уже идёт", "How long it's been running"));
+}
+
 pub fn fmt_took(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 1000 { format!("{ms} ms") } else if ms < 60_000 { format!("{:.2} s", d.as_secs_f32()) } else { format!("{}m {}s", ms / 60_000, (ms / 1000) % 60) }
@@ -1490,8 +1520,10 @@ impl eframe::App for App {
         self.global_keys(&ctx);
         // Ticking clocks of running queries; checks waiting to happen.
         let busy = self.rt.values().any(|r| r.run.is_some()) || self.live.values().any(|l| l.state == ConnState::Connecting);
+        // (A tenth of a second: the stopwatches by the spinners tick.)
+        let busy = busy || self.rt.values().any(|r| r.results.iter().any(|v| v.loading.is_some()));
         if busy {
-            ctx.request_repaint_after(Duration::from_millis(200));
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
         if self.rt.values().any(|r| r.check_due.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(120));

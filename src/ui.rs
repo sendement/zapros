@@ -474,7 +474,7 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                 for i in 0..n {
                     let tab = &app.ws().tabs[i];
                     let active = i == app.ws().active;
-                    let running = app.rt.get(&tab.id).is_some_and(|r| r.run.is_some());
+                    let running_since = app.rt.get(&tab.id).and_then(|r| r.run.as_ref()).map(|r| r.since);
                     let errors = app.rt.get(&tab.id).is_some_and(|r| r.issues.iter().any(|x| x.sev == Sev::Error));
                     let conn_color = app.tab_conn(app.ws(), tab).and_then(|c| app.spec(&c)).and_then(|s| s.color).map(rgb);
                     let id = tab.id.clone();
@@ -497,8 +497,9 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                                     let (rect, _) = ui.allocate_exact_size(Vec2::new(4.0, 14.0), egui::Sense::hover());
                                     ui.painter().rect_filled(rect, 2.0, c);
                                 }
-                                if running {
+                                if let Some(since) = running_since {
                                     ui.add(egui::Spinner::new().size(12.0));
+                                    crate::app::stopwatch_label(ui, since, true);
                                 }
                                 let mut txt = RichText::new(title);
                                 if active {
@@ -779,9 +780,9 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
         }
-        if let Some(d) = running {
+        if let Some(since) = app.rt.get(&tab.id).and_then(|r| r.run.as_ref()).map(|r| r.since) {
             ui.add(egui::Spinner::new());
-            ui.label(crate::app::fmt_took(d));
+            crate::app::stopwatch_label(ui, since, false);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let nb = app.tab().is_notebook();

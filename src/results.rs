@@ -235,6 +235,9 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
             }
             if v.loading.is_some() {
                 ui.add(egui::Spinner::new().size(14.0));
+                if let Some(since) = v.loading_since {
+                    crate::app::stopwatch_label(ui, since, true);
+                }
             }
             let state = if open {
                 format!(" · {}", t("есть ещё", "more on the server"))
@@ -391,6 +394,19 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
 /// The table of a result. True when its columns were moved (the order is
 /// kept for the next runs with the same columns).
 fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
+    // In the tables' font (the cells and the headers).
+    ui.scope(|ui| {
+        if let Some(tf) = ui.style().text_styles.get(&egui::TextStyle::Name("table".into())).cloned() {
+            let st = ui.style_mut();
+            st.text_styles.insert(egui::TextStyle::Monospace, tf.clone());
+            st.text_styles.insert(egui::TextStyle::Body, tf);
+        }
+        table_in(ui, tab, i, v)
+    })
+    .inner
+}
+
+fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let ctx = ui.ctx().clone();
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));

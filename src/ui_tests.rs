@@ -1553,3 +1553,82 @@ fn keywords_take_the_case_while_typing() {
     settle(&mut h);
     shot(&mut h, "code-style");
 }
+
+#[test]
+fn fonts_for_each_place() {
+    let (mut h, _g) = harness("fonts", SCRIPT, false);
+    assert!(crate::fonts::families().iter().any(|f| f.1), "monospaced families found");
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    {
+        let f = &mut h.state_mut().settings.fonts;
+        f.ui = "DejaVu Serif".into();
+        f.ui_size = 14.0;
+        f.code = "Liberation Mono".into();
+        f.table = "DejaVu Sans".into();
+        f.table_size = 13.0;
+        f.code_spacing = 4.0;
+    }
+    settle(&mut h);
+    shot(&mut h, "fonts-applied");
+    assert_eq!(h.ctx.global_style().text_styles[&egui::TextStyle::Body].size, 14.0);
+    h.state_mut().settings_open = true;
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
+    settle(&mut h);
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(300.0, 300.0)));
+    h.step();
+    for _ in 0..7 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -120.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    settle(&mut h);
+    shot(&mut h, "fonts-settings");
+}
+
+#[test]
+fn stopwatch_by_the_spinner() {
+    assert_eq!(crate::app::stopwatch(Duration::from_millis(3_450)), "0:03.4");
+    assert_eq!(crate::app::stopwatch(Duration::from_millis(725_000)), "12:05.0");
+    assert_eq!(crate::app::stopwatch(Duration::from_secs(3_723)), "1:02:03");
+    if std::env::var("ZAPROS_TEST_PG").is_err() {
+        return;
+    }
+    let (mut h, _g) = harness("watch", "select pg_sleep(2);\n", true);
+    h.state_mut().ws_mut().conn = Some("pg".into());
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "pg", None);
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    // On the toolbar and on the tab.
+    let n = h.query_all_by_label_contains("0:01.").count() + h.query_all_by_label_contains("0:00.").count();
+    assert_eq!(n, 2, "stopwatches running");
+    shot(&mut h, "stopwatch");
+    settle(&mut h);
+}
+
+#[test]
+fn markdown_menu_and_new_marks() {
+    let (mut h, _g) = harness("mdmenu", "", false);
+    h.state_mut().tab_mut().text = "-- %% [markdown]\n-- ## Plan\n-- - [ ] first\n-- - [x] second\n--\n-- ~~old~~ and **new**\n--\n-- | name | rows |\n-- | --- | --- |\n-- | orders | 3000 |\n-- %%\nselect 1;\n".into();
+    let d = crate::sql::Dialect::Sqlite;
+    h.state_mut().tab_mut().set_notebook(true, d);
+    settle(&mut h);
+    shot(&mut h, "md-marks");
+    // Editing: a right click on the text, the menu.
+    let cell = h.state().tab().notebook.as_ref().unwrap().cells.iter().find(|c| c.kind == crate::config::CellKind::Markdown).map(|c| c.id.clone());
+    let cell = cell.expect("a Markdown cell");
+    let id = h.state().tab().id.clone();
+    h.state_mut().rt.entry(id).or_default().md_edit.insert(cell.clone());
+    settle(&mut h);
+    let r = h.ctx.read_response(egui::Id::new(("md", &cell))).expect("the text being edited").rect;
+    click_at(&mut h, r.left_top() + egui::vec2(40.0, 10.0), egui::PointerButton::Secondary);
+    settle(&mut h);
+    shot(&mut h, "md-menu");
+    assert!(h.query_by_label("Таблица").is_some() && h.query_by_label("Чек-лист").is_some());
+}
