@@ -64,6 +64,13 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   GitHub Dark / Light, Gruvbox, Catppuccin Mocha / Latte, Tokyo Night —
   window colours and the editor's palette together (Settings → Look); the
   standard look follows the system or is set dark / light.
+- **Code style** (Settings → Code style): keyword and function case;
+  keywords take that case as they're typed (only SQL's own words where they
+  are keywords — names, `x.word`, strings, comments and calls stay; in
+  ClickHouse, whose functions and names are case-sensitive, neither typing
+  nor formatting touches them); the formatter's layout — the "river" or
+  plain (clause words at the left, lists indented), commas leading or
+  trailing, the indent per level.
 - **Icon packs** (Settings → Look): Lucide, Tabler, Phosphor, Codicons,
   Fluent, Material Symbols, Iconoir, Bootstrap — or the font's symbols as
   before — in the object tree, the files panel and the toolbars; tinted by

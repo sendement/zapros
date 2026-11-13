@@ -571,7 +571,7 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         row(ui, t("Текст", "Text"), &mut p.text);
         ui.end_row();
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut p.bold_keywords, t("Ключевые слова жирным", "Bold keywords"));
         ui.checkbox(&mut p.italic_comments, t("Комментарии курсивом", "Italic comments"));
         ui.checkbox(&mut p.rainbow, t("Скобки цветом по глубине", "Brackets coloured by depth"));
@@ -592,7 +592,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     let size = egui::vec2(720.0, 560.0).min(ctx.content_rect().size() - egui::vec2(40.0, 60.0));
     egui::Window::new(t("Настройки", "Settings")).id(egui::Id::new("settings-window")).open(&mut open).fixed_size(size).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Бьютифаер", "Formatter"), t("Подсветка", "Colours"), t("Оформление", "Look")].iter().enumerate() {
+            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Стиль кода", "Code style"), t("Подсветка", "Colours"), t("Оформление", "Look")].iter().enumerate() {
                 if ui.selectable_label(page == i, *n).clicked() {
                     page = i;
                 }
@@ -665,6 +665,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hint_quote_schemas, t("Схемы в кавычках (\"sales\".orders; в ClickHouse — `sales`.orders)", "Schemas in quotes (\"sales\".orders; in ClickHouse `sales`.orders)")));
             }
             3 => {
+                ui.label(RichText::new(t("Регистр", "Case")).strong());
                 ui.horizontal(|ui| {
                     ui.label(t("Ключевые слова", "Keywords"));
                     case_pick(ui, &mut s.format.keywords, "fk");
@@ -673,12 +674,32 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.label(t("Функции", "Functions"));
                     case_pick(ui, &mut s.format.functions, "ff");
                 });
+                ui.checkbox(&mut s.format.case_while_typing, t("Менять регистр ключевых слов прямо при вводе («select» и пробел → «SELECT »)", "Keywords take the case as they're typed («select» and a space → «SELECT »)"));
+                ui.label(RichText::new(t(
+                    "Меняются только слова самого SQL и только там, где они ключевые: имена таблиц и колонок, x.поле, строки, комментарии и вызовы функций остаются как набраны. В ClickHouse функции и имена чувствительны к регистру (toDate, countIf) — их не трогает ни ввод, ни форматирование.",
+                    "Only SQL's own words, and only where they're keywords: table and column names, x.field, strings, comments and function calls stay as typed. In ClickHouse functions and names are case-sensitive (toDate, countIf): neither typing nor formatting touches them.",
+                )).weak().small());
+                ui.separator();
+                ui.label(RichText::new(t("Раскладка (форматирование, Ctrl+Shift+F)", "Layout (formatting, Ctrl+Shift+F)")).strong());
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut s.format.river, true, t("«река»: слова выровнены по SELECT", "\"river\": clause words end where SELECT does"));
+                    ui.radio_value(&mut s.format.river, false, t("обычная: слова слева, списки с отступом", "plain: clause words at the left, lists indented"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t("Запятые", "Commas"));
+                    ui.radio_value(&mut s.format.leading_commas, true, t("в начале строки", "at the line's start"));
+                    ui.radio_value(&mut s.format.leading_commas, false, t("в конце строки", "at the line's end"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t("Отступ уровня", "Indent per level"));
+                    ui.add(egui::Slider::new(&mut s.format.indent, 1..=8).suffix(t(" пр.", " sp.")));
+                });
                 ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
                 ui.add_enabled_ui(s.format.embedded, |ui| {
                     ui.checkbox(&mut s.format.split_strings, t("Разбивать строку с запросом на несколько строк", "Split a string holding a statement over several lines"))
                         .on_hover_text(t("Выключено: строка остаётся как была, меняется только регистр ключевых слов в ней", "Off: the string stays as it was, only its keywords' case changes"));
                 });
-                ui.label(RichText::new(t("Стиль «река»: ключевые слова выровнены по правому краю SELECT, запятые в начале строки. Сами PL/SQL-блоки и тела в $$ не перекладываются, но запросы в строках внутри них (EXECUTE IMMEDIATE, EXECUTE, format()) раскладываются: склейка через || — по куску на строку, кусок запроса — только регистр.", "\"River\" style: clause words end where SELECT does, leading commas. PL/SQL blocks and $$ bodies keep their layout, but statements in strings inside them (EXECUTE IMMEDIATE, EXECUTE, format()) are laid out: a || chain gets a piece per line, a piece of a statement only its case.")).weak().small());
+                ui.label(RichText::new(t("Сами PL/SQL-блоки и тела в $$ не перекладываются, но запросы в строках внутри них (EXECUTE IMMEDIATE, EXECUTE, format()) раскладываются: склейка через || — по куску на строку, кусок запроса — только регистр.", "PL/SQL blocks and $$ bodies keep their layout, but statements in strings inside them (EXECUTE IMMEDIATE, EXECUTE, format()) are laid out: a || chain gets a piece per line, a piece of a statement only its case.")).weak().small());
                 ui.separator();
                 ui.label(RichText::new(t("Пример", "Preview")).strong());
                 let f = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format);

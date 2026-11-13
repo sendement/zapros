@@ -1530,3 +1530,26 @@ fn icon_packs_in_the_tree_and_toolbar() {
     settle(&mut h);
     shot(&mut h, "icons-none");
 }
+
+#[test]
+fn keywords_take_the_case_while_typing() {
+    let (mut h, _g) = harness("autocase", "", false);
+    focus_editor(&mut h, 0);
+    type_text(&mut h, "select id, if from orders o where o.from in (1) ");
+    // Keywords up; names, x.word and the like as typed.
+    assert_eq!(h.state().tab().text, "SELECT id, if FROM orders o WHERE o.from IN (1) ");
+    // Off: as typed.
+    h.state_mut().settings.format.case_while_typing = false;
+    h.state_mut().tab_mut().text.clear();
+    focus_editor(&mut h, 0);
+    type_text(&mut h, "select 1 ");
+    assert_eq!(h.state().tab().text, "select 1 ");
+    // The style page.
+    h.state_mut().settings_open = true;
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 3usize));
+    h.state_mut().settings.format.river = false;
+    h.state_mut().settings.format.leading_commas = false;
+    h.state_mut().settings.format.indent = 4;
+    settle(&mut h);
+    shot(&mut h, "code-style");
+}

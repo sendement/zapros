@@ -486,6 +486,25 @@ fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text:
     ctx.request_repaint_after(std::time::Duration::from_millis(500));
 }
 
+/// A rounded frame a whole screen pixel wide, on the pixel grid (at any
+/// scale); its corners gone over again, faintly, so their smoothed pixels
+/// don't come out paler than the sides.
+pub fn crisp_frame(painter: &egui::Painter, rect: egui::Rect, radius: f32, color: Color32, ppp: f32) {
+    let px = 1.0 / ppp;
+    let w = px * ppp.round().max(1.0);
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let r = egui::Rect::from_min_max(egui::pos2(snap(rect.left()) + w / 2.0, snap(rect.top()) + w / 2.0), egui::pos2(snap(rect.right()) - w / 2.0, snap(rect.bottom()) - w / 2.0));
+    painter.rect_stroke(r, radius, Stroke::new(w, color), egui::StrokeKind::Middle);
+    // The corners once more, faintly: their smoothed pixels as strong as
+    // the sides'.
+    let k = radius + w;
+    let faint = color.gamma_multiply(0.5);
+    for (cx, cy) in [(r.left(), r.top()), (r.right(), r.top()), (r.left(), r.bottom()), (r.right(), r.bottom())] {
+        let clip = egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(k * 2.0, k * 2.0));
+        painter.with_clip_rect(clip.intersect(painter.clip_rect())).rect_stroke(r, radius, Stroke::new(w, faint), egui::StrokeKind::Middle);
+    }
+}
+
 /// The name at `at` (letters, digits, _ $ #, or a quoted one).
 fn name_at(text: &str, at: usize) -> Option<Range<usize>> {
     let at = floor(text, at.min(text.len()));
@@ -983,6 +1002,17 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         .inner;
     if *text != before {
         out.changed = true;
+        // One char typed after a word: a keyword takes the style's case
+        // (same length: the caret stays where it is).
+        let fo = cx.settings.format;
+        if fo.case_while_typing && text.len() == before.len() + 1 && st.block.is_none() {
+            let p = before.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
+            if text.is_char_boundary(p) && text.is_char_boundary(p + 1) && before.is_char_boundary(p) && text[p + 1..] == before[p..] {
+                if let Some((r, w)) = crate::sql::autocase::on_typed(text, p, cx.dialect, fo.keywords) {
+                    text.replace_range(r, &w);
+                }
+            }
+        }
         // Folds after the change move with the text.
         let p = before.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
         let delta = text.len() as isize - before.len() as isize;
@@ -1280,8 +1310,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 continue;
             }
             let c = hues[b.level % hues.len()];
-            let stroke = if strong { Stroke::new(1.0, c.gamma_multiply(0.85)) } else { Stroke::new(0.8, c.gamma_multiply(0.45)) };
-            painter.rect_stroke(rect, 3, stroke, egui::StrokeKind::Middle);
+            let c = if strong { c.gamma_multiply(0.95) } else { c.gamma_multiply(0.6) };
+            crisp_frame(&painter, rect, 3.0, c, ctx.pixels_per_point());
         }
     }
 

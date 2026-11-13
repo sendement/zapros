@@ -12,6 +12,30 @@ use super::{Case, Dialect};
 
 const RIVER: usize = 6;
 
+/// How a statement is laid out (set for the time of one `format`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Style {
+    /// Clause words right-aligned on a "river" (else at the left, items
+    /// `indent` in from it).
+    river: bool,
+    /// Commas start lines (else end them).
+    leading_commas: bool,
+    /// Spaces a level goes in (CASE's WHENs, a table's columns, subqueries).
+    indent: usize,
+}
+
+thread_local! {
+    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2 }) };
+}
+
+fn style() -> Style {
+    STYLE.with(|s| s.get())
+}
+
+fn ind() -> usize {
+    style().indent
+}
+
 const KEYWORDS: &[&str] = &[
     "ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC", "BETWEEN", "BY", "CASCADE", "CASE", "CHECK", "COLUMN", "CONFLICT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIMESTAMP", "DEFAULT", "DELETE", "DESC",
     "DISTINCT", "DO", "DROP", "ELSE", "END", "EXCEPT", "EXISTS", "FALSE", "FETCH", "FILTER", "FIRST", "FOLLOWING", "FOR", "FOREIGN", "FROM", "FULL", "GROUP", "HAVING", "IF", "ILIKE", "IN", "INDEX", "INNER", "INSERT",
@@ -273,7 +297,7 @@ fn clause_at(nodes: &[Node], i: usize) -> Option<Vec<String>> {
 /// Where a clause's word starts: on the river, but WITH at the statement's
 /// start (its queries two in from it).
 fn clause_indent(base: usize, lead: &str) -> usize {
-    if lead == "WITH" { base } else { (base + RIVER).saturating_sub(lead.len()).max(base) }
+    if lead == "WITH" || !style().river { base } else { (base + RIVER).saturating_sub(lead.len()).max(base) }
 }
 
 /// Clauses whose commas start lines (a list).
@@ -330,18 +354,18 @@ fn case_block(nodes: &[Node], at: usize, out: &mut Out) {
         if kw == "WHEN" && parts.get(k + 1).is_some_and(|(t, _)| t == "THEN") {
             let when = format!("WHEN {}", inline(body));
             let then = format!("THEN {}", inline(&parts[k + 1].1));
-            out.start(at + 2);
+            out.start(at + ind());
             if when.chars().count() + 1 + then.chars().count() <= WHEN_MAX {
                 out.cur += &format!("{when} {then}");
             } else {
                 out.cur += &when;
-                out.start(at + 2);
+                out.start(at + ind());
                 out.cur += &then;
             }
             k += 2;
             continue;
         }
-        out.start(at + 2);
+        out.start(at + ind());
         out.cur += &format!("{kw} {}", inline(body));
         k += 1;
     }
@@ -383,7 +407,8 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
             let phrase = words.join(" ");
             out.cur += &phrase;
             clause_left = indent;
-            item = indent + phrase.len() + 1;
+            // Items' further lines: under the first (river), or a level in.
+            item = if style().river { indent + phrase.len() + 1 } else { indent + ind() };
             let set_ops = matches!(lead.as_str(), "UNION" | "INTERSECT" | "EXCEPT" | "MINUS");
             clause = phrase;
             i += words.len();
@@ -403,9 +428,14 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
         }
         match n {
             Node::T(t) if t.k == K::Comma && is_list(&clause) => {
-                // WITH's next query: its comma at WITH's start.
-                out.start(if clause == "WITH" { clause_left } else { item.saturating_sub(2) });
-                out.cur += ", ";
+                if style().leading_commas {
+                    // WITH's next query: its comma at WITH's start.
+                    out.start(if clause == "WITH" { clause_left } else { item.saturating_sub(2) });
+                    out.cur += ", ";
+                } else {
+                    out.cur.push(',');
+                    out.start(if clause == "WITH" { clause_left } else { item });
+                }
             }
             Node::Group(g) if columns && clause.is_empty() && !is_subquery(g) => {
                 columns = false;
@@ -414,8 +444,16 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 let mut k = 0;
                 let column = |part: &mut Vec<Node>, out: &mut Out, k: &mut usize| {
                     if !part.is_empty() {
+                        let st = style();
+                        if !st.leading_commas && *k > 0 {
+                            out.cur.push(',');
+                        }
                         out.start(base);
-                        out.cur += if *k == 0 { "  " } else { ", " };
+                        out.cur += &if st.leading_commas {
+                            format!("{}{}", if *k == 0 { " " } else { "," }, " ".repeat(st.indent.saturating_sub(1)))
+                        } else {
+                            " ".repeat(st.indent)
+                        };
                         out.cur += &inline(part);
                         part.clear();
                         *k += 1;
@@ -428,7 +466,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                         Node::T(t) if matches!(t.k, K::LineComment | K::BlockComment) && t.own => {
                             column(&mut part, out, &mut k);
                             out.flush();
-                            out.lines.push(format!("{}{}", " ".repeat(base + 2), t.s));
+                            out.lines.push(format!("{}{}", " ".repeat(base + ind()), t.s));
                         }
                         // After a column (or its comma): at its line's end.
                         Node::T(t) if t.k == K::LineComment => {
@@ -443,7 +481,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 out.cur.push(')');
             }
             Node::T(t) if t.k == K::Keyword && (t.s == "AND" || t.s == "OR") && breaks_logic(&clause) && !(between && t.s == "AND") => {
-                out.start((base + RIVER).saturating_sub(t.s.len()));
+                out.start(if style().river { (base + RIVER).saturating_sub(t.s.len()) } else { clause_left + ind() });
                 out.cur += &t.s;
                 out.cur.push(' ');
             }
@@ -508,7 +546,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 if create_as {
                     out.word("(", true);
                     out.flush();
-                    statement(g, base + 2, base, out);
+                    statement(g, base + ind(), base, out);
                     out.start(base);
                     out.cur.push(')');
                 } else if opened_by_clause || as_in_with || by_operator {
@@ -517,7 +555,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                     let at = if opened_by_clause || as_in_with { clause_left } else { last_col };
                     out.word("(", true);
                     out.flush();
-                    statement(g, at + 2, at, out);
+                    statement(g, at + ind(), at, out);
                     out.start(at);
                     out.cur.push(')');
                 } else {
@@ -601,17 +639,26 @@ pub struct Options {
     /// SQL in a string may be laid out over several lines (else only its
     /// keywords' case changes, the string stays as it was).
     pub split_strings: bool,
+    /// Clause words on a "river" (right-aligned), else at the left.
+    pub river: bool,
+    /// Commas at the lines' starts (else at their ends).
+    pub leading_commas: bool,
+    /// Spaces per level of nesting.
+    pub indent: u8,
+    /// Keywords take the case while typing (SQL's own words only).
+    pub case_while_typing: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true }
     }
 }
 
 /// Lays out a script statement by statement; PL/SQL units and bodies in
 /// $$ are left as written. Comments between statements stay.
 pub fn format(src: &str, d: Dialect, o: Options) -> String {
+    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8) }));
     let ranges = super::split(src, d, false);
     let mut s = String::new();
     let mut prev = 0;
@@ -935,5 +982,43 @@ SELECT u.name
         assert_eq!(fmt_pg(&fmt_pg(q)), fmt_pg(q));
         // UNION on its own line between the two.
         assert_eq!(fmt_pg("select a from x union all select a from y"), "SELECT a\n  FROM x\n UNION ALL\nSELECT a\n  FROM y");
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    const Q: &str = "select c.name, count(o.id) as orders, case when sum(o.total) > 1000 then 'vip' else 'regular' end kind from customers c join orders o on o.customer_id = c.id where c.active = 1 and o.total > 0 group by c.name order by 2 desc";
+
+    #[test]
+    fn standard_layout_trailing_commas() {
+        let o = Options { river: false, leading_commas: false, indent: 4, ..Options::default() };
+        let f = format(Q, Dialect::Postgres, o);
+        assert_eq!(
+            f,
+            "SELECT c.name,\n    COUNT(o.id) AS orders,\n    CASE\n        WHEN SUM(o.total) > 1000 THEN 'vip'\n        ELSE 'regular'\n    END kind\nFROM customers c\nJOIN orders o ON o.customer_id = c.id\nWHERE c.active = 1\n    AND o.total > 0\nGROUP BY c.name\nORDER BY 2 DESC"
+        );
+        // The river, as before.
+        let r = format(Q, Dialect::Postgres, Options::default());
+        assert!(r.starts_with("SELECT c.name\n     , COUNT(o.id) AS orders"), "{r}");
+        assert!(r.contains("\n  FROM customers c\n  JOIN orders o"), "{r}");
+        let t = format("create table t (id int primary key, name text not null)", Dialect::Postgres, o);
+        assert_eq!(t, "CREATE TABLE t (\n    id int PRIMARY KEY,\n    name text NOT NULL\n)", "{t}");
+    }
+}
+
+#[cfg(test)]
+mod ch_case_tests {
+    use super::*;
+
+    #[test]
+    fn clickhouse_functions_keep_their_case() {
+        for o in [Options::default(), Options { keywords: Case::Lower, functions: Case::Lower, ..Options::default() }] {
+            let f = format("select toDate(ts), if(a > 1, 'x', 'y'), countIf(x > 0), any(y), uniqExact(id), sum(v) from events where startsWith(name, 'a') group by toStartOfHour(ts)", Dialect::ClickHouse, o);
+            for w in ["toDate(", "if(", "countIf(", "any(", "uniqExact(", "startsWith(", "toStartOfHour("] {
+                assert!(f.contains(w), "{w} in {f}");
+            }
+        }
     }
 }
