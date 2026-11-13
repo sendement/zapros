@@ -38,6 +38,12 @@ const TABS_FROM: f32 = 16.0;
 /// One look for every field, button, list and menu: corners, height,
 /// padding (the painted tabs and icons use the same radius).
 pub const RADIUS: u8 = 6;
+/// Scroll bars: their full width (under the pointer) and at rest.
+pub const SCROLL_W: f32 = 8.0;
+pub const SCROLL_THIN: f32 = 3.0;
+/// Right of a result's table: its scroll bar's room (kept always, so the
+/// table, the notebook's code and the lines over them end alike).
+pub const TABLE_BAR_ROOM: f32 = SCROLL_W + 4.0;
 
 pub fn standard(s: &mut egui::Style) {
     let r = egui::CornerRadius::same(RADIUS);
@@ -49,18 +55,23 @@ pub fn standard(s: &mut egui::Style) {
     s.spacing.combo_width = 120.0;
     // Scroll bars in room of their own (not over the text when they grow
     // under the pointer).
-    // Always seen (solid() hides the handle until the mouse is over the area),
-    // in the text's colour so it shows on light themes as well.
+    // Always seen, but thin and quiet (a dim line in the text's colour);
+    // under the pointer it grows to its full width. Its room is kept, so
+    // it never covers the text.
     s.spacing.scroll = egui::style::ScrollStyle {
-        bar_width: 8.0,
+        floating: true,
+        bar_width: SCROLL_W,
+        floating_width: SCROLL_THIN,
+        floating_allocated_width: SCROLL_W + 3.0,
         bar_inner_margin: 3.0,
+        bar_outer_margin: 1.0,
         foreground_color: true,
-        dormant_background_opacity: 0.5,
-        active_background_opacity: 0.7,
-        interact_background_opacity: 0.9,
-        dormant_handle_opacity: 0.28,
-        active_handle_opacity: 0.4,
-        interact_handle_opacity: 0.6,
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.25,
+        dormant_handle_opacity: 0.22,
+        active_handle_opacity: 0.32,
+        interact_handle_opacity: 0.55,
         ..egui::style::ScrollStyle::solid()
     };
     let v = &mut s.visuals;
@@ -401,7 +412,8 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     }
     // Thin; drawn twice so its rounded corners hold the colour.
     for _ in 0..2 {
-        painter.add(egui::Shape::closed_line(outline(sheet, tab), Stroke::new(1.0, color)));
+        // (Inside the sheet's edge: its outside lines up with the side card.)
+        painter.add(egui::Shape::closed_line(outline(sheet.shrink(0.5), tab), Stroke::new(1.0, color)));
     }
     painter.extend(active_text);
     // "+": a new workspace.
@@ -847,7 +859,8 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ui, |ui| {
         let full = ui.max_rect();
         let row = Rect::from_min_size(full.min + Vec2::new(0.0, 6.0), Vec2::new(full.width() - 6.0, ROW_H));
-        let sheet = Rect::from_min_max(Pos2::new(full.left() + 2.0, row.bottom()), Pos2::new(full.right() - 6.0, full.bottom() - 2.0));
+        // (Its gap to the side card as wide as the one to the window's edge.)
+        let sheet = Rect::from_min_max(Pos2::new(full.left(), row.bottom()), Pos2::new(full.right() - 6.0, full.bottom() - 2.0));
         if ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))) != Some(sheet) {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
             ui.ctx().request_repaint();
@@ -938,6 +951,27 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         app.rt.insert(tab_id, rt);
     });
     actions
+}
+
+/// A ">" of two strokes at `c`, turned down by `t` (0…1) — the tree's,
+/// the folds'.
+pub fn paint_chevron(painter: &egui::Painter, c: Pos2, size: f32, t: f32, color: Color32) {
+    let (w, h) = (size * 0.32, size * 0.5);
+    let a = t * std::f32::consts::FRAC_PI_2;
+    let rot = |v: Vec2| c + egui::vec2(v.x * a.cos() - v.y * a.sin(), v.x * a.sin() + v.y * a.cos());
+    let pts = vec![rot(egui::vec2(-w, -h)), rot(egui::vec2(w, 0.0)), rot(egui::vec2(-w, h))];
+    painter.add(egui::Shape::line(pts, Stroke::new(1.5, color)));
+}
+
+/// The tree's open / closed mark: a chevron that turns as it opens.
+pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(14.0, h), egui::Sense::click());
+    let t = ui.ctx().animate_bool_responsive(r.id.with("turn"), open);
+    let v = ui.visuals();
+    let color = if r.hovered() { v.strong_text_color() } else { v.weak_text_color() };
+    paint_chevron(ui.painter(), rect.center(), 11.0, t, color);
+    r
 }
 
 /// A pointing hand over whatever clicks (buttons, arrows, tabs, squares…),

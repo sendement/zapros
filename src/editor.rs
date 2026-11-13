@@ -1060,7 +1060,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                     let resp = ui.interact(hit, id.with(("fold", lb)), egui::Sense::click());
                     if folded || gutter_hot {
                         let color = if resp.hovered() || folded { strong } else { weak };
-                        painter.text(c, egui::Align2::CENTER_CENTER, if folded { "▸" } else { "▾" }, FontId::proportional(font * 0.8), color);
+                        crate::ui::paint_chevron(&painter, c, font * 0.75, if folded { 0.0 } else { 1.0 }, color);
                     }
                     if resp.clicked() {
                         toggle = Some(lb);

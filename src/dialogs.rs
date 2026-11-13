@@ -621,6 +621,9 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     ui.label(t("Масштаб интерфейса", "UI scale"));
                     ui.add(egui::Slider::new(&mut s.ui_scale, 0.7..=2.0).step_by(0.05));
+                    if (ui.ctx().zoom_factor() - s.ui_scale).abs() > 0.001 {
+                        ui.label(RichText::new(t("— после закрытия настроек", "— once the settings are closed")).weak().small());
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label(t("Крестик закрытия вкладки", "Tab's close button"));

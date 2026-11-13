@@ -225,7 +225,15 @@ fn settings_and_workspace_windows() {
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 3usize));
     settle(&mut h);
     shot(&mut h, "settings-formatter");
+    // A new scale waits while the settings are open, comes once closed.
+    h.state_mut().settings.ui_scale = 1.25;
+    settle(&mut h);
+    assert_eq!(h.ctx.zoom_factor(), 1.0);
     h.state_mut().settings_open = false;
+    settle(&mut h);
+    assert_eq!(h.ctx.zoom_factor(), 1.25);
+    h.state_mut().settings.ui_scale = 1.0;
+    settle(&mut h);
     h.state_mut().ws_edit = Some(1);
     settle(&mut h);
     shot(&mut h, "workspace");
@@ -1498,6 +1506,17 @@ fn icon_packs_in_the_tree_and_toolbar() {
         settle(&mut h);
         shot(&mut h, &format!("icons-{id}"));
     }
+    // No line at the side panel's edge under the pointer: the edge looks
+    // the same with the pointer there as without.
+    let x = h.state().session.side_width;
+    let row = |img: &image::RgbaImage| (x as u32 - 6..x as u32 + 6).map(|px| *img.get_pixel(px, 600)).collect::<Vec<_>>();
+    let before = row(&h.render().unwrap());
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(x, 400.0)));
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "edge-hover");
+    assert_eq!(row(&h.render().unwrap()), before, "a line at the panel's edge");
     // The symbols as before.
     h.state_mut().settings.icons.clear();
     settle(&mut h);

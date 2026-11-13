@@ -99,7 +99,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
                 // Its header: kind, run, what it gave; moving, adding, deleting.
                 ui.horizontal(|ui| {
-                    let fold = ui.add(egui::Button::new(RichText::new(if cell.collapsed { "▸" } else { "▾" })).min_size(egui::vec2(24.0, 24.0))).on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
+                    let fold = ui.add(egui::Button::new("").min_size(egui::vec2(24.0, 24.0)));
+                    crate::ui::paint_chevron(ui.painter(), fold.rect.center(), 11.0, if cell.collapsed { 0.0 } else { 1.0 }, if fold.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
+                    let fold = fold.on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
                     if fold.clicked() {
                         ops.push(Op::Fold(i));
                     }
@@ -198,7 +200,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         let rows = text.lines().count().max(2) + 1;
                         let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows };
                         let id = egui::Id::new(("cell", &tab.id, &cell.id));
-                        let out = egui::ScrollArea::horizontal().id_salt(("cell-h", &cell.id)).show(ui, |ui| editor::show(ui, id, &mut text, &mut rt.ed, &cx)).inner;
+                        // The code on a rounded ground of its own, as wide as
+                        // the output's table, edged as it is.
+                        let v = ui.visuals();
+                        let ground = crate::themes::mix(v.panel_fill, v.extreme_bg_color, 0.45);
+                        let edge = v.widgets.noninteractive.bg_stroke;
+                        let out = egui::Frame::NONE
+                            .fill(ground)
+                            .stroke(edge)
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin { left: 0, right: 4, top: 2, bottom: 2 })
+                            .outer_margin(egui::Margin { left: 0, right: crate::ui::TABLE_BAR_ROOM as i8, top: 0, bottom: 0 })
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                egui::ScrollArea::horizontal().id_salt(("cell-h", &cell.id)).show(ui, |ui| editor::show(ui, id, &mut text, &mut rt.ed, &cx)).inner
+                            })
+                            .inner;
                         rt.issues = issues;
                         if ctx.memory(|m| m.has_focus(id)) || !out.actions.is_empty() {
                             new_focus = Some(cell.id.clone());
@@ -222,7 +239,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             let (edge, top) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
                             let top = top.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода", "Drag: the output's height"));
                             let c = if top.hovered() || top.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
-                            ui.painter().hline(edge.x_range().shrink(4.0), edge.center().y, Stroke::new(if top.hovered() || top.dragged() { 2.0 } else { 1.0 }, c));
+                            // (From where the grounds' roundings start.)
+                            ui.painter().hline(egui::Rangef::new(edge.left() + 6.0, edge.right() - 6.0 - crate::ui::TABLE_BAR_ROOM), edge.center().y, Stroke::new(if top.hovered() || top.dragged() { 2.0 } else { 1.0 }, c));
                             if top.dragged() {
                                 let dy = top.drag_delta().y;
                                 let nh = (h - dy).clamp(80.0, 1600.0);

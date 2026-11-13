@@ -246,7 +246,9 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
             ui.label(RichText::new(format!("{} / {} {}{state} · {}", v.order.len(), v.table.rows.len(), t("строк", "rows"), crate::app::fmt_took(v.took))).small().weak());
         });
     }
-    ui.separator();
+    // A line under the bar, from where the table's rounding starts.
+    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
+    ui.painter().hline(egui::Rangef::new(line.left() + 6.0, line.right() - 6.0 - crate::ui::TABLE_BAR_ROOM), line.center().y, ui.visuals().widgets.noninteractive.bg_stroke);
     let mut goto = None;
     match rt.shown {
         Pane::Result(i) => {
@@ -487,7 +489,7 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
     let stride = 20.0 + ui.spacing().item_spacing.y;
     let content_h = order.len() as f32 * stride;
     let need_bar = content_h > size.y - 30.0;
-    let bar_room = if need_bar { ui.spacing().scroll.bar_width + 4.0 } else { 0.0 };
+    let bar_room = crate::ui::TABLE_BAR_ROOM;
     size.x -= bar_room;
     let mut body_scroll_id = egui::Id::NULL;
     let mut body_clip = egui::Rect::NOTHING;
@@ -885,10 +887,14 @@ fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
             } else {
                 (sc.dormant_background_opacity, sc.dormant_handle_opacity)
             };
+            // Thin at rest, its full width under the pointer (at the right).
+            let k = ctx.animate_bool_responsive(id.with("wide"), r.hovered() || r.dragged());
+            let w = egui::lerp(crate::ui::SCROLL_THIN..=track.width(), k);
+            let thin = |x: egui::Rect| egui::Rect::from_min_max(egui::pos2(x.right() - w, x.top()), x.max);
             let p = ui.painter();
-            let rad = (track.width() / 2.0) as u8;
-            p.rect_filled(track, rad, ui.visuals().extreme_bg_color.gamma_multiply(bg));
-            p.rect_filled(at(st.offset.y), rad, ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(handle));
+            let rad = (w / 2.0) as u8;
+            p.rect_filled(thin(track), rad, ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(bg * 0.4));
+            p.rect_filled(thin(at(st.offset.y)), rad, ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(handle));
         }
     }
     // A header being dragged: where it would land.

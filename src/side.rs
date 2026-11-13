@@ -34,7 +34,17 @@ pub fn folder_label(key: &str) -> &'static str {
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     // Full height, its top row (icons) level with the workspace tabs.
     let frame = egui::Frame::NONE.fill(crate::ui::backdrop(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
+    // (No line drawn at its edge under the pointer: egui takes its look
+    // from the parent's hovered / active strokes, hidden here meanwhile.)
+    let own = ui.style().clone();
+    {
+        let w = &mut ui.style_mut().visuals.widgets;
+        w.hovered.fg_stroke = egui::Stroke::NONE;
+        w.active.fg_stroke = egui::Stroke::NONE;
+    }
+    let inner_style = own.clone();
     let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
+        ui.set_style(inner_style);
         crate::ui::icon_bar(app, ui);
         // The list on a card of its own: no edge, rounded, as tall as the
         // sheet beside it (its top and bottom from the last frame).
@@ -53,6 +63,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         if app.session.side_files { files(app, &mut inner) } else { databases(app, &mut inner) }
         ui.allocate_rect(egui::Rect::from_min_max(ui.cursor().min, egui::pos2(max.right(), card.bottom())), egui::Sense::hover());
     });
+    ui.set_style(own);
     let w = r.response.rect.width();
     if (w - app.session.side_width).abs() > 1.0 {
         app.session.side_width = w;
@@ -116,7 +127,7 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
             let (dot, tip) = crate::ui::conn_dot(app, &spec.id);
             let r = ui
                 .horizontal(|ui| {
-                    let arrow = ui.add(egui::Label::new(if open { "⏷" } else { "⏵" }).sense(egui::Sense::click()));
+                    let arrow = crate::ui::chevron(ui, open);
                     ui.colored_label(dot, "●");
                     if let Some(c) = spec.color {
                         ui.colored_label(crate::editor::rgb(c), "▌");
@@ -273,7 +284,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                     ui.add_space(14.0);
                     None
                 } else {
-                    Some(ui.add(egui::Label::new(if open { "⏷" } else { "⏵" }).sense(egui::Sense::click())))
+                    Some(crate::ui::chevron(ui, open))
                 };
                 kind_icon(app, ui, o.kind);
                 let n = ui.add(egui::Label::new(&label).sense(egui::Sense::click()).selectable(false));
@@ -435,13 +446,14 @@ fn dir(app: &mut App, ui: &mut egui::Ui, d: &Path) {
             let r = ui
                 .horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
-                    ui.label(if open { "⏷" } else { "⏵" });
+                    let chev = crate::ui::chevron(ui, open);
                     let c = ui.visuals().text_color();
                     file_icon(ui, crate::icons::Ic::Folder, "📁", c);
-                    ui.add(egui::Label::new(&name).sense(egui::Sense::click()).selectable(false))
+                    let n = ui.add(egui::Label::new(&name).sense(egui::Sense::click()).selectable(false));
+                    (chev, n)
                 })
                 .inner;
-            if r.clicked() {
+            if r.0.clicked() || r.1.clicked() {
                 if open {
                     app.open_dirs.remove(&p);
                 } else {

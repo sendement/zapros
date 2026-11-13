@@ -25,6 +25,8 @@ pub struct Scheme {
     pub text: Rgb,
     pub weak: Rgb,
     pub accent: Rgb,
+    /// What's picked (selected tabs, toggles, text).
+    pub select: Rgb,
     /// keyword, function, type, string, number, comment, quoted, param,
     /// operator, text.
     pub words: [Rgb; 10],
@@ -39,45 +41,45 @@ impl Scheme {
 }
 
 macro_rules! scheme {
-    ($id:literal, $name:literal, $dark:literal, bg $bg:expr, back $back:expr, field $field:expr, surface $surface:expr, border $border:expr, text $text:expr, weak $weak:expr, accent $accent:expr, words $words:expr) => {
-        Scheme { id: $id, name: $name, dark: $dark, bg: $bg, back: $back, field: $field, surface: $surface, border: $border, text: $text, weak: $weak, accent: $accent, words: $words }
+    ($id:literal, $name:literal, $dark:literal, bg $bg:expr, back $back:expr, field $field:expr, surface $surface:expr, border $border:expr, text $text:expr, weak $weak:expr, accent $accent:expr, select $select:expr, words $words:expr) => {
+        Scheme { id: $id, name: $name, dark: $dark, bg: $bg, back: $back, field: $field, surface: $surface, border: $border, text: $text, weak: $weak, accent: $accent, select: $select, words: $words }
     };
 }
 
 pub const SCHEMES: &[Scheme] = &[
-    scheme!("win11-dark", "Windows 11 Dark", true, bg [39, 39, 39], back [32, 32, 32], field [29, 29, 29], surface [55, 55, 55], border [64, 64, 64], text [255, 255, 255], weak [190, 190, 190], accent [96, 205, 255],
+    scheme!("win11-dark", "Windows 11 Dark", true, bg [39, 39, 39], back [32, 32, 32], field [29, 29, 29], surface [55, 55, 55], border [64, 64, 64], text [255, 255, 255], weak [190, 190, 190], accent [96, 205, 255], select [0, 84, 138],
         words [[86, 156, 214], [220, 220, 170], [78, 201, 176], [206, 145, 120], [181, 206, 168], [106, 153, 85], [156, 220, 254], [156, 220, 254], [212, 212, 212], [212, 212, 212]]),
-    scheme!("win11-light", "Windows 11 Light", false, bg [251, 251, 251], back [238, 240, 244], field [255, 255, 255], surface [253, 253, 253], border [222, 222, 222], text [27, 27, 27], weak [96, 96, 96], accent [0, 95, 184],
+    scheme!("win11-light", "Windows 11 Light", false, bg [251, 251, 251], back [238, 240, 244], field [255, 255, 255], surface [253, 253, 253], border [222, 222, 222], text [27, 27, 27], weak [96, 96, 96], accent [0, 95, 184], select [204, 228, 247],
         words [[0, 0, 255], [121, 94, 38], [38, 127, 153], [163, 21, 21], [9, 134, 88], [0, 128, 0], [0, 16, 128], [0, 16, 128], [0, 0, 0], [0, 0, 0]]),
-    scheme!("dracula", "Dracula", true, bg [40, 42, 54], back [33, 34, 44], field [30, 31, 41], surface [68, 71, 90], border [60, 63, 82], text [248, 248, 242], weak [160, 165, 195], accent [189, 147, 249],
+    scheme!("dracula", "Dracula", true, bg [40, 42, 54], back [33, 34, 44], field [30, 31, 41], surface [68, 71, 90], border [60, 63, 82], text [248, 248, 242], weak [160, 165, 195], accent [189, 147, 249], select [98, 80, 140],
         words [[255, 121, 198], [80, 250, 123], [139, 233, 253], [241, 250, 140], [189, 147, 249], [98, 114, 164], [255, 184, 108], [255, 184, 108], [255, 121, 198], [248, 248, 242]]),
-    scheme!("ubuntu", "Ubuntu", true, bg [48, 10, 36], back [38, 6, 28], field [42, 8, 32], surface [84, 32, 68], border [98, 42, 84], text [238, 238, 236], weak [190, 168, 184], accent [233, 84, 32],
+    scheme!("ubuntu", "Ubuntu", true, bg [48, 10, 36], back [38, 6, 28], field [42, 8, 32], surface [84, 32, 68], border [98, 42, 84], text [238, 238, 236], weak [190, 168, 184], accent [233, 84, 32], select [119, 33, 111],
         words [[255, 138, 80], [114, 159, 207], [252, 233, 79], [138, 226, 52], [173, 127, 168], [150, 128, 145], [52, 226, 226], [239, 41, 41], [211, 215, 207], [238, 238, 236]]),
-    scheme!("ubuntu-light", "Ubuntu Light", false, bg [250, 250, 250], back [236, 233, 235], field [255, 255, 255], surface [242, 242, 242], border [214, 214, 214], text [61, 61, 61], weak [118, 118, 118], accent [233, 84, 32],
+    scheme!("ubuntu-light", "Ubuntu Light", false, bg [250, 250, 250], back [236, 233, 235], field [255, 255, 255], surface [242, 242, 242], border [214, 214, 214], text [61, 61, 61], weak [118, 118, 118], accent [233, 84, 32], select [250, 214, 196],
         words [[196, 64, 10], [52, 101, 164], [143, 89, 2], [78, 154, 6], [117, 80, 123], [136, 138, 133], [6, 152, 154], [204, 0, 0], [85, 87, 83], [46, 52, 54]]),
-    scheme!("one-dark", "One Dark", true, bg [40, 44, 52], back [33, 37, 43], field [35, 39, 46], surface [50, 56, 66], border [62, 68, 81], text [220, 223, 228], weak [127, 132, 142], accent [97, 175, 239],
+    scheme!("one-dark", "One Dark", true, bg [40, 44, 52], back [33, 37, 43], field [35, 39, 46], surface [50, 56, 66], border [62, 68, 81], text [220, 223, 228], weak [127, 132, 142], accent [97, 175, 239], select [52, 72, 110],
         words [[198, 120, 221], [97, 175, 239], [229, 192, 123], [152, 195, 121], [209, 154, 102], [110, 118, 129], [86, 182, 194], [224, 108, 117], [171, 178, 191], [220, 223, 228]]),
-    scheme!("darcula", "JetBrains Darcula", true, bg [43, 43, 43], back [49, 51, 53], field [40, 40, 40], surface [76, 80, 82], border [85, 85, 85], text [187, 187, 187], weak [128, 128, 128], accent [75, 110, 175],
+    scheme!("darcula", "JetBrains Darcula", true, bg [43, 43, 43], back [49, 51, 53], field [40, 40, 40], surface [76, 80, 82], border [85, 85, 85], text [187, 187, 187], weak [128, 128, 128], accent [75, 110, 175], select [33, 66, 131],
         words [[204, 120, 50], [255, 198, 109], [152, 118, 170], [106, 135, 89], [104, 151, 187], [128, 128, 128], [152, 118, 170], [187, 181, 41], [169, 183, 198], [169, 183, 198]]),
-    scheme!("monokai", "Monokai", true, bg [39, 40, 34], back [30, 31, 26], field [34, 35, 30], surface [62, 61, 50], border [73, 72, 62], text [248, 248, 242], weak [160, 156, 135], accent [166, 226, 46],
+    scheme!("monokai", "Monokai", true, bg [39, 40, 34], back [30, 31, 26], field [34, 35, 30], surface [62, 61, 50], border [73, 72, 62], text [248, 248, 242], weak [160, 156, 135], accent [166, 226, 46], select [86, 92, 48],
         words [[249, 38, 114], [166, 226, 46], [102, 217, 239], [230, 219, 116], [174, 129, 255], [117, 113, 94], [253, 151, 31], [253, 151, 31], [249, 38, 114], [248, 248, 242]]),
-    scheme!("nord", "Nord", true, bg [46, 52, 64], back [39, 44, 54], field [41, 46, 57], surface [59, 66, 82], border [76, 86, 106], text [229, 233, 240], weak [140, 150, 170], accent [136, 192, 208],
+    scheme!("nord", "Nord", true, bg [46, 52, 64], back [39, 44, 54], field [41, 46, 57], surface [59, 66, 82], border [76, 86, 106], text [229, 233, 240], weak [140, 150, 170], accent [136, 192, 208], select [76, 106, 130],
         words [[129, 161, 193], [136, 192, 208], [143, 188, 187], [163, 190, 140], [180, 142, 173], [97, 110, 136], [235, 203, 139], [208, 135, 112], [129, 161, 193], [216, 222, 233]]),
-    scheme!("solarized-dark", "Solarized Dark", true, bg [0, 43, 54], back [0, 34, 43], field [0, 38, 48], surface [7, 54, 66], border [20, 75, 88], text [147, 161, 161], weak [101, 123, 131], accent [38, 139, 210],
+    scheme!("solarized-dark", "Solarized Dark", true, bg [0, 43, 54], back [0, 34, 43], field [0, 38, 48], surface [7, 54, 66], border [20, 75, 88], text [147, 161, 161], weak [101, 123, 131], accent [38, 139, 210], select [22, 82, 110],
         words [[133, 153, 0], [38, 139, 210], [181, 137, 0], [42, 161, 152], [211, 54, 130], [88, 110, 117], [203, 75, 22], [220, 50, 47], [147, 161, 161], [147, 161, 161]]),
-    scheme!("solarized-light", "Solarized Light", false, bg [253, 246, 227], back [238, 232, 213], field [255, 251, 238], surface [238, 232, 213], border [210, 203, 180], text [88, 110, 117], weak [147, 161, 161], accent [38, 139, 210],
+    scheme!("solarized-light", "Solarized Light", false, bg [253, 246, 227], back [238, 232, 213], field [255, 251, 238], surface [238, 232, 213], border [210, 203, 180], text [88, 110, 117], weak [147, 161, 161], accent [38, 139, 210], select [203, 222, 228],
         words [[133, 153, 0], [38, 139, 210], [181, 137, 0], [42, 161, 152], [211, 54, 130], [147, 161, 161], [203, 75, 22], [220, 50, 47], [101, 123, 131], [88, 110, 117]]),
-    scheme!("github-dark", "GitHub Dark", true, bg [13, 17, 23], back [1, 4, 9], field [10, 13, 18], surface [33, 38, 45], border [48, 54, 61], text [230, 237, 243], weak [125, 133, 144], accent [47, 129, 247],
+    scheme!("github-dark", "GitHub Dark", true, bg [13, 17, 23], back [1, 4, 9], field [10, 13, 18], surface [33, 38, 45], border [48, 54, 61], text [230, 237, 243], weak [125, 133, 144], accent [47, 129, 247], select [27, 60, 110],
         words [[255, 123, 114], [210, 168, 255], [255, 166, 87], [165, 214, 255], [121, 192, 255], [139, 148, 158], [121, 192, 255], [255, 166, 87], [255, 123, 114], [230, 237, 243]]),
-    scheme!("github-light", "GitHub Light", false, bg [255, 255, 255], back [246, 248, 250], field [255, 255, 255], surface [246, 248, 250], border [208, 215, 222], text [31, 35, 40], weak [101, 109, 118], accent [9, 105, 218],
+    scheme!("github-light", "GitHub Light", false, bg [255, 255, 255], back [246, 248, 250], field [255, 255, 255], surface [246, 248, 250], border [208, 215, 222], text [31, 35, 40], weak [101, 109, 118], accent [9, 105, 218], select [214, 236, 255],
         words [[207, 34, 46], [130, 80, 223], [149, 56, 0], [10, 48, 105], [5, 80, 174], [110, 119, 129], [5, 80, 174], [149, 56, 0], [207, 34, 46], [31, 35, 40]]),
-    scheme!("gruvbox", "Gruvbox", true, bg [40, 40, 40], back [29, 32, 33], field [32, 32, 32], surface [60, 56, 54], border [80, 73, 69], text [235, 219, 178], weak [168, 153, 132], accent [250, 189, 47],
+    scheme!("gruvbox", "Gruvbox", true, bg [40, 40, 40], back [29, 32, 33], field [32, 32, 32], surface [60, 56, 54], border [80, 73, 69], text [235, 219, 178], weak [168, 153, 132], accent [250, 189, 47], select [110, 92, 48],
         words [[251, 73, 52], [142, 192, 124], [250, 189, 47], [184, 187, 38], [211, 134, 155], [146, 131, 116], [131, 165, 152], [254, 128, 25], [235, 219, 178], [235, 219, 178]]),
-    scheme!("catppuccin-mocha", "Catppuccin Mocha", true, bg [30, 30, 46], back [24, 24, 37], field [27, 27, 41], surface [49, 50, 68], border [69, 71, 90], text [205, 214, 244], weak [166, 173, 200], accent [203, 166, 247],
+    scheme!("catppuccin-mocha", "Catppuccin Mocha", true, bg [30, 30, 46], back [24, 24, 37], field [27, 27, 41], surface [49, 50, 68], border [69, 71, 90], text [205, 214, 244], weak [166, 173, 200], accent [203, 166, 247], select [88, 70, 124],
         words [[203, 166, 247], [137, 180, 250], [249, 226, 175], [166, 227, 161], [250, 179, 135], [108, 112, 134], [148, 226, 213], [243, 139, 168], [137, 220, 235], [205, 214, 244]]),
-    scheme!("catppuccin-latte", "Catppuccin Latte", false, bg [239, 241, 245], back [230, 233, 239], field [248, 249, 251], surface [220, 224, 232], border [188, 192, 204], text [76, 79, 105], weak [108, 111, 133], accent [136, 57, 239],
+    scheme!("catppuccin-latte", "Catppuccin Latte", false, bg [239, 241, 245], back [230, 233, 239], field [248, 249, 251], surface [220, 224, 232], border [188, 192, 204], text [76, 79, 105], weak [108, 111, 133], accent [136, 57, 239], select [222, 208, 248],
         words [[136, 57, 239], [30, 102, 245], [223, 142, 29], [64, 160, 43], [254, 100, 11], [156, 160, 176], [23, 146, 153], [210, 15, 57], [4, 165, 229], [76, 79, 105]]),
-    scheme!("tokyo-night", "Tokyo Night", true, bg [26, 27, 38], back [22, 22, 30], field [22, 23, 33], surface [41, 46, 66], border [59, 66, 97], text [192, 202, 245], weak [130, 140, 180], accent [122, 162, 247],
+    scheme!("tokyo-night", "Tokyo Night", true, bg [26, 27, 38], back [22, 22, 30], field [22, 23, 33], surface [41, 46, 66], border [59, 66, 97], text [192, 202, 245], weak [130, 140, 180], accent [122, 162, 247], select [46, 60, 104],
         words [[187, 154, 247], [122, 162, 247], [42, 195, 222], [158, 206, 106], [255, 158, 100], [86, 95, 137], [115, 218, 202], [247, 118, 142], [137, 221, 255], [192, 202, 245]]),
 ];
 
@@ -108,7 +110,7 @@ pub fn visuals(s: &Scheme) -> egui::Visuals {
     v.window_stroke = Stroke::new(1.0, border);
     v.hyperlink_color = accent;
     v.weak_text_color = Some(weak);
-    v.selection.bg_fill = mix(bg, accent, if s.dark { 0.45 } else { 0.32 });
+    v.selection.bg_fill = c(s.select);
     v.selection.stroke = Stroke::new(1.0, strong);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = bg;
@@ -129,6 +131,14 @@ pub fn visuals(s: &Scheme) -> egui::Visuals {
     w.active.weak_bg_fill = mix(surface, accent, 0.35);
     w.active.bg_stroke = Stroke::new(1.0, accent);
     w.active.fg_stroke = Stroke::new(2.0, strong);
+    v
+}
+
+/// The standard look's own pick colour (egui's bright blue fits nothing).
+pub fn standard(dark: bool) -> egui::Visuals {
+    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    v.selection.bg_fill = if dark { Color32::from_rgb(44, 72, 104) } else { Color32::from_rgb(196, 220, 245) };
+    v.selection.stroke = egui::Stroke::new(1.0, if dark { Color32::from_rgb(235, 240, 248) } else { Color32::from_rgb(20, 30, 45) });
     v
 }
 

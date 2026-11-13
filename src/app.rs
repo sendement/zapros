@@ -1341,7 +1341,13 @@ impl App {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.settings.theme, self.settings.ui_scale.to_bits(), self.settings.scheme.clone());
+        // A new scale waits while the settings are open (the slider would
+        // run away from under the pointer): it comes when they're closed.
+        let scale = match &self.applied {
+            Some(a) if self.settings_open => f32::from_bits(a.1),
+            _ => self.settings.ui_scale,
+        };
+        let want = (self.settings.theme, scale.to_bits(), self.settings.scheme.clone());
         if self.applied.as_ref() == Some(&want) {
             return;
         }
@@ -1356,8 +1362,8 @@ impl App {
                 if s.dark { crate::themes::set_back(back, None) } else { crate::themes::set_back(None, back) }
             }
             None => {
-                ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
-                ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+                ctx.set_visuals_of(egui::Theme::Dark, crate::themes::standard(true));
+                ctx.set_visuals_of(egui::Theme::Light, crate::themes::standard(false));
                 crate::themes::set_back(None, None);
                 ctx.set_theme(match self.settings.theme {
                     ThemePref::System => egui::ThemePreference::System,
@@ -1366,7 +1372,7 @@ impl App {
                 });
             }
         }
-        ctx.set_zoom_factor(self.settings.ui_scale.clamp(0.5, 3.0));
+        ctx.set_zoom_factor(scale.clamp(0.5, 3.0));
         ctx.all_styles_mut(crate::ui::standard);
     }
 
