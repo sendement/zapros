@@ -2023,3 +2023,22 @@ fn margins_even_at_every_scale() {
         assert_eq!(above, below, "scale {z}: the icons {above} under the top, {below} over the card");
     }
 }
+
+#[test]
+fn label_dots_unfold_under_the_pointer() {
+    let (mut h, _g) = harness("chips", "-- %%\nselect 1\n", false);
+    h.state_mut().tab_mut().set_notebook(true, crate::sql::Dialect::Sqlite);
+    settle(&mut h);
+    shot(&mut h, "chips-folded");
+    // The stack: right of the filter field, left of the filter button.
+    let fb = h.query_all_by_label_contains("фильтр блоков").next().map(|n| n.rect());
+    let p = match fb {
+        Some(r) => egui::pos2(r.max.x as f32 + 20.0, ((r.min.y + r.max.y) / 2.0) as f32),
+        None => egui::pos2(1200.0, 124.0),
+    };
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "chips-open");
+}

@@ -386,6 +386,12 @@ fn searches_on_real_servers() {
         let c = s.search_code("counts the ORDERS").unwrap();
         assert!(c.iter().any(|x| x.kind == ObjKind::Package && x.lines.first().is_some_and(|l| l.0 == 2 && l.1.contains("counts the orders"))), "{c:?}");
         s.run("DROP PACKAGE zapros_search_pkg", &mut Fetch::limit(0), &mut |_| {}).unwrap();
+        // A unit's code: no "/" at its end.
+        s.run("CREATE OR REPLACE FUNCTION zapros_slash_fn RETURN NUMBER IS BEGIN RETURN 1; END;", &mut Fetch::limit(0), &mut |_| {}).unwrap();
+        let owner = sp.user.to_uppercase();
+        let src = s.source(&[owner, "functions".into(), "ZAPROS_SLASH_FN".into()], ObjKind::Function).unwrap();
+        assert!(!src.trim_end().ends_with('/') && src.contains("RETURN 1"), "{src}");
+        s.run("DROP FUNCTION zapros_slash_fn", &mut Fetch::limit(0), &mut |_| {}).unwrap();
     }
 }
 

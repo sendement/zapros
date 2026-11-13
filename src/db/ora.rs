@@ -33,6 +33,15 @@ fn connect_string(spec: &Spec) -> String {
     }
 }
 
+/// A script's text without the "/" (and blank lines) at its end.
+pub fn strip_slash(text: &str) -> String {
+    let mut t = text.trim_end();
+    while let Some(rest) = t.strip_suffix('/').filter(|r| r.is_empty() || r.ends_with('\n')) {
+        t = rest.trim_end();
+    }
+    t.to_string()
+}
+
 fn kind_folder(f: &str) -> Option<(&'static str, ObjKind)> {
     Some(match f {
         "functions" => ("FUNCTION", ObjKind::Function),
@@ -301,12 +310,16 @@ impl Session for Ora {
         };
         let r = self.rows("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual", &[&ty, &name, &schema])?;
         let mut text = r.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default().trim().to_string();
-        // PL/SQL units end with "/" for running them as a script.
+        // Two PL/SQL units (a spec and its body): a "/" between them, for
+        // running them as a script; none at the end (the last one runs to
+        // the text's end).
         if matches!(kind, ObjKind::Function | ObjKind::Procedure | ObjKind::Package | ObjKind::Trigger | ObjKind::Type) {
             text = text.replace("\n  CREATE OR REPLACE", "\n/\n\nCREATE OR REPLACE");
-            text += "\n/";
+            while text.contains("/\n/\n") {
+                text = text.replace("/\n/\n", "/\n");
+            }
         }
-        Ok(text + "\n")
+        Ok(strip_slash(&text) + "\n")
     }
 
     fn find_objects(&mut self, q: &str) -> Res<Vec<Found>> {
@@ -492,5 +505,15 @@ impl Session for Ora {
 
     fn alive(&mut self) -> bool {
         self.conn.status().is_ok_and(|s| s == oracle::ConnStatus::Normal)
+    }
+}
+
+#[cfg(test)]
+mod slash_tests {
+    #[test]
+    fn no_slash_at_the_end() {
+        assert_eq!(super::strip_slash("create function f return number is begin return 1; end;\n/\n"), "create function f return number is begin return 1; end;");
+        assert_eq!(super::strip_slash("begin null; end;\n/\n/\n"), "begin null; end;");
+        assert_eq!(super::strip_slash("select 4/2 from dual"), "select 4/2 from dual");
     }
 }

@@ -413,11 +413,13 @@ fn cards(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let mut open: Option<Found> = None;
-    let h = (ui.available_height() * 0.5).clamp(140.0, 420.0);
+    // One under another, scrolled when there are many (the window's height
+    // a little over half the screen at most).
+    let h = (ui.ctx().content_rect().height() * 0.55).clamp(160.0, 560.0);
     egui::ScrollArea::vertical().id_salt("find-cards").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-            let w = ((ui.available_width() - 16.0) / 3.0).clamp(260.0, 420.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+            let w = ui.available_width() - 18.0;
             for f in &hits {
                 let fr = egui::Frame::group(ui.style()).corner_radius(8).inner_margin(8).show(ui, |ui| ui.vertical(|ui| {
                     ui.set_width(w);

@@ -239,18 +239,43 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             };
             let fr = ui.add(fb.selected(active)).on_hover_text(t("Фильтр блоков: метки, исключения, дата создания; настройка меток", "The cells' filter: labels, left out, when made; the labels themselves"));
             egui::Popup::menu(&fr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| filter_menu(ui, rt, &mut labels, &mut removed));
-            for k in (0..labels.len()).rev() {
-                let id = k as u8;
-                let dot = if rt.nb_labels.contains(&id) { Dot::On } else if rt.nb_exclude.contains(&id) { Dot::Out } else { Dot::Off };
-                if label_dot(ui, color_of(&labels, k), dot, 13.0, egui::Sense::click()).on_hover_text(format!("{} · {}", label_name(&labels, k), t("щелчок: нужна → исключить → не важно", "click: wanted → left out → any"))).clicked() {
-                    rt.nb_labels.retain(|x| *x != id);
-                    rt.nb_exclude.retain(|x| *x != id);
-                    match dot {
-                        Dot::Off => rt.nb_labels.push(id),
-                        Dot::On => rt.nb_exclude.push(id),
-                        Dot::Out => {}
+            // The labels' dots: folded to a little stack (and those in use)
+            // until the pointer comes over them.
+            let open_id = ui.id().with("nb-chips-open");
+            let unfolded: bool = ui.ctx().data(|d| d.get_temp(open_id)).unwrap_or(false);
+            let chips = ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for k in (0..labels.len()).rev() {
+                    let id = k as u8;
+                    let dot = if rt.nb_labels.contains(&id) { Dot::On } else if rt.nb_exclude.contains(&id) { Dot::Out } else { Dot::Off };
+                    if !unfolded && dot == Dot::Off {
+                        continue;
+                    }
+                    if label_dot(ui, color_of(&labels, k), dot, 13.0, egui::Sense::click()).on_hover_text(format!("{} · {}", label_name(&labels, k), t("щелчок: нужна → исключить → не важно", "click: wanted → left out → any"))).clicked() {
+                        rt.nb_labels.retain(|x| *x != id);
+                        rt.nb_exclude.retain(|x| *x != id);
+                        match dot {
+                            Dot::Off => rt.nb_labels.push(id),
+                            Dot::On => rt.nb_exclude.push(id),
+                            Dot::Out => {}
+                        }
                     }
                 }
+                if !unfolded {
+                    // Three colours overlapping: "labels here".
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 14.0), egui::Sense::hover());
+                    for (j, k) in (0..labels.len().min(3)).rev().enumerate() {
+                        let c = color_of(&labels, k).unwrap_or(Color32::GRAY);
+                        let at = egui::pos2(rect.right() - 6.0 - j as f32 * 6.0, rect.center().y);
+                        ui.painter().circle_filled(at, 5.0, c);
+                        ui.painter().circle_stroke(at, 5.0, Stroke::new(1.0, ui.visuals().panel_fill));
+                    }
+                }
+            });
+            let over = ui.rect_contains_pointer(chips.response.rect.expand(6.0));
+            if over != unfolded {
+                ui.ctx().data_mut(|d| d.insert_temp(open_id, over));
+                ui.ctx().request_repaint();
             }
             ui.add(egui::TextEdit::singleline(&mut rt.nb_query).hint_text(t("🔎 фильтр блоков", "🔎 filter cells")).desired_width(150.0))
                 .on_hover_text(t("Подходящие блоки раскрыты, остальные скрыты", "The cells that fit are open, the rest hidden"));
