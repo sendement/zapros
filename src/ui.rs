@@ -934,7 +934,9 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // start), the row's empty room drags it, a double click maximizes.
         let own = !app.settings.system_titlebar;
         let look = crate::titlebar::Look::of(&app.settings);
-        let win_w = if own { crate::titlebar::buttons_width(look.style) } else { 0.0 };
+        // (They fit the room of a not-chosen tab: clear of the sheet's edge.)
+        let (btn_top, btn_bottom) = (row.top() + IDLE_TOP, sheet.top() - IDLE_GAP);
+        let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top) } else { 0.0 };
         let reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
         if own {
             let drag = ui.interact(row, ui.id().with("title-drag"), egui::Sense::click_and_drag());
@@ -947,8 +949,8 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
         workspaces(app, ui, row, sheet, reserve);
         if own {
-            let x = if look.left { sheet.left() + 4.0 } else { row.right() - win_w + 6.0 };
-            if let Some(b) = crate::titlebar::buttons(ui, look, x, row.center().y - 2.0) {
+            let x = if look.left { sheet.left() + 8.0 } else { row.right() - win_w + 8.0 };
+            if let Some(b) = crate::titlebar::buttons(ui, look, x, (btn_top + btn_bottom) / 2.0, btn_bottom - btn_top) {
                 crate::titlebar::press(ui.ctx(), b);
             }
         }

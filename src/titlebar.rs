@@ -119,8 +119,21 @@ impl Look {
 }
 
 /// Room the three buttons take on the top bar (with a little margin).
-pub fn buttons_width(style: Style) -> f32 {
-    group_width(style, 1.0) + 10.0
+pub fn buttons_width(style: Style, height: f32) -> f32 {
+    group_width(style, fit(style, height)) + 16.0
+}
+
+/// The scale the buttons take to fit `height` (a little room above and
+/// below their grounds; never larger than their own size).
+pub fn fit(style: Style, height: f32) -> f32 {
+    let (size, _) = style.metrics();
+    // (Their grounds reach about their size; the round ones less.)
+    let ground = match style.resolve() {
+        Style::Macos => size.y,
+        Style::Win11 => size.y,
+        _ => size.y * 0.75,
+    };
+    ((height - 6.0) / ground).min(1.0)
 }
 
 fn group_width(style: Style, scale: f32) -> f32 {
@@ -130,16 +143,17 @@ fn group_width(style: Style, scale: f32) -> f32 {
 
 /// The three buttons from `x` (their left edge) on the row's middle `cy`;
 /// the one clicked.
-pub fn buttons(ui: &mut Ui, look: Look, x: f32, cy: f32) -> Option<WinButton> {
+pub fn buttons(ui: &mut Ui, look: Look, x: f32, cy: f32, height: f32) -> Option<WinButton> {
     let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
-    let rects = layout(look.style, &look.order, x, cy, 1.0);
+    let scale = fit(look.style, height);
+    let rects = layout(look.style, &look.order, x, cy, scale);
     let resp: Vec<egui::Response> = rects.iter().map(|(b, r)| ui.interact(*r, ui.id().with(("win-button", *b as u8)), Sense::click())).collect();
     // (macOS shows its glyphs while the pointer is over any of them.)
     let over_group = resp.iter().any(|r| r.hovered());
     let mut hit = None;
     for ((b, rect), r) in rects.into_iter().zip(resp) {
         let hot = r.hovered() || r.is_pointer_button_down_on();
-        paint(ui, look.style, b, rect, maximized, hot, over_group, 1.0);
+        paint(ui, look.style, b, rect, maximized, hot, over_group, scale);
         let tip = match b {
             WinButton::Minimize => t("Свернуть", "Minimize"),
             WinButton::Maximize if maximized => t("Восстановить", "Restore"),

@@ -812,6 +812,18 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.label(t("Отступ уровня", "Indent per level"));
                     ui.add(egui::Slider::new(&mut s.format.indent, 1..=8).suffix(t(" пр.", " sp.")));
                 });
+                ui.horizontal(|ui| {
+                    ui.label(t("Ширина строки", "Line width"));
+                    ui.add(egui::Slider::new(&mut s.format.wrap, 0..=200).custom_formatter(|v, _| if v == 0.0 { t("не переносить", "no wrapping").to_string() } else { format!("{v:.0}") }));
+                })
+                .response
+                .on_hover_text(t("Длиннее: вызов функции раскладывается по аргументу на строку, цепочка || + − переносится перед оператором — с теми же отступами", "Longer: a call gets an argument per line, a || + − chain breaks before its operators — with the same indents"));
+                ui.horizontal(|ui| {
+                    ui.label(t("Короткие запросы в одну строку, до", "Short statements on one line, up to"));
+                    ui.add(egui::Slider::new(&mut s.format.one_line, 0..=160).custom_formatter(|v, _| if v == 0.0 { t("никогда", "never").to_string() } else { format!("{v:.0}") }));
+                })
+                .response
+                .on_hover_text(t("Например, select * from orders остаётся одной строкой", "E.g. select * from orders stays one line"));
                 ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
                 ui.add_enabled_ui(s.format.embedded, |ui| {
                     ui.checkbox(&mut s.format.split_strings, t("Разбивать строку с запросом на несколько строк", "Split a string holding a statement over several lines"))

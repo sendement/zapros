@@ -22,10 +22,15 @@ struct Style {
     leading_commas: bool,
     /// Spaces a level goes in (CASE's WHENs, a table's columns, subqueries).
     indent: usize,
+    /// A line longer than this: a long item's call or chain goes over
+    /// several lines (0: never).
+    wrap: usize,
+    /// A statement this short stays on one line (0: never).
+    one_line: usize,
 }
 
 thread_local! {
-    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2 }) };
+    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2, wrap: 0, one_line: 0 }) };
 }
 
 fn style() -> Style {
@@ -568,6 +573,58 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 }
                 fresh = false;
             }
+            // A call too long for the line: its arguments one to a line, a
+            // level in; its ")" back under the line's start.
+            Node::Group(g) if style().wrap > 0 && out.col() + inline(g).chars().count() + 2 > style().wrap && g.iter().any(|x| matches!(x, Node::T(t) if t.k == K::Comma)) => {
+                let lead = out.cur.len() - out.cur.trim_start().len();
+                let back = if is_list(&clause) { item } else { lead };
+                let col = back + ind();
+                out.cur.push('(');
+                let mut part: Vec<Node> = Vec::new();
+                let args: Vec<Vec<Node>> = {
+                    let mut v = Vec::new();
+                    for x in g {
+                        if matches!(x, Node::T(t) if t.k == K::Comma) {
+                            v.push(std::mem::take(&mut part));
+                        } else {
+                            part.push(x.clone());
+                        }
+                    }
+                    v.push(part);
+                    v
+                };
+                let n_args = args.len();
+                for (k, a) in args.iter().enumerate() {
+                    out.start(col);
+                    out.cur += &inline(a);
+                    if k + 1 < n_args {
+                        out.cur.push(',');
+                    }
+                }
+                out.start(back);
+                out.cur.push(')');
+                last_col = back;
+                fresh = false;
+            }
+            // A chain too long for the line: a new line before the operator,
+            // a level in.
+            Node::T(t)
+                if style().wrap > 0
+                    && t.k == K::Op
+                    && matches!(t.s.as_str(), "||" | "+" | "-" | "*" | "/")
+                    && i + 1 < nodes.len()
+                    && out.col() + t.s.len() + 2 + match &nodes[i + 1] {
+                        Node::T(x) => x.s.chars().count(),
+                        Node::Group(x) => inline(x).chars().count() + 2,
+                    } > style().wrap
+                    && !out.cur.trim().is_empty() =>
+            {
+                let lead = out.cur.len() - out.cur.trim_start().len();
+                let back = if is_list(&clause) { item } else { lead };
+                out.start(back + ind());
+                out.cur += &t.s;
+                fresh = false;
+            }
             _ => {
                 let piece = match n {
                     Node::T(t) => t.s.clone(),
@@ -608,10 +665,17 @@ fn format_one(src: &str, d: Dialect) -> String {
     let ended = toks.last().is_some_and(|t| t.k == K::Semi);
     let mut blocks = Vec::new();
     for (k, p) in stmts.iter().enumerate() {
-        let mut out = Out { lines: Vec::new(), cur: String::new(), cont: false };
-        statement(p, 0, 0, &mut out);
-        out.flush();
-        let mut text = out.lines.join("\n");
+        let one = style().one_line;
+        let short = inline(p);
+        let mut text = if one > 0 && short.chars().count() <= one && !has_line_comment(p) {
+            // Short: on one line.
+            short
+        } else {
+            let mut out = Out { lines: Vec::new(), cur: String::new(), cont: false };
+            statement(p, 0, 0, &mut out);
+            out.flush();
+            out.lines.join("\n")
+        };
         if k + 1 < stmts.len() || ended {
             // Before a comment that ends the statement, not inside it.
             match p.last() {
@@ -647,18 +711,22 @@ pub struct Options {
     pub indent: u8,
     /// Keywords take the case while typing (SQL's own words only).
     pub case_while_typing: bool,
+    /// Lines longer than this: a long item's call or chain is split (0: never).
+    pub wrap: u16,
+    /// Statements this short stay on one line (0: never).
+    pub one_line: u16,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0 }
     }
 }
 
 /// Lays out a script statement by statement; PL/SQL units and bodies in
 /// $$ are left as written. Comments between statements stay.
 pub fn format(src: &str, d: Dialect, o: Options) -> String {
-    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8) }));
+    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize }));
     let ranges = super::split(src, d, false);
     let mut s = String::new();
     let mut prev = 0;
@@ -1020,5 +1088,28 @@ mod ch_case_tests {
                 assert!(f.contains(w), "{w} in {f}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    #[test]
+    fn long_items_wrapped_short_statements_kept() {
+        let q = "select id, coalesce(customer_first_name_of_the_account, customer_last_name_of_the_account, 'unknown') as name, first_part_of_the_value || second_part_of_the_value || third_part_of_the_value as v from t";
+        let f = format(q, Dialect::Postgres, Options::default());
+        assert!(f.contains("COALESCE(\n"), "{f}");
+        assert!(f.lines().all(|l| l.chars().count() <= 84), "{f}");
+        assert!(f.lines().any(|l| l.trim_start().starts_with("|| ")), "{f}");
+        // Off: one long line as before.
+        let g = format(q, Dialect::Postgres, Options { wrap: 0, ..Options::default() });
+        assert!(g.lines().any(|l| l.chars().count() > 100), "{g}");
+        // Short statements on one line when asked.
+        let o = Options { one_line: 60, ..Options::default() };
+        assert_eq!(format("select * from orders", Dialect::Postgres, o), "SELECT * FROM orders");
+        assert_eq!(format("select * from orders;\nselect id, total from orders where total > 100 and note is not null order by total desc;", Dialect::Postgres, o).lines().next(), Some("SELECT * FROM orders;"));
+        assert!(format("select * from orders", Dialect::Postgres, Options::default()).contains('\n'));
+        println!("{f}");
     }
 }

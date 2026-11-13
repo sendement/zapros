@@ -70,7 +70,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   ClickHouse, whose functions and names are case-sensitive, neither typing
   nor formatting touches them); the formatter's layout — the "river" or
   plain (clause words at the left, lists indented), commas leading or
-  trailing, the indent per level.
+  trailing, the indent per level; a line width past which a long item is
+  split (a call's arguments one to a line, a || + − chain before its
+  operators, indents kept); short statements on one line up to a length.
 - **Title bar** (Settings → Look): the desktop's, or the window's own —
   the tabs' row drags the window (double click: maximize), the edges
   resize it, the window's buttons in a style (as the desktop's, Breeze,
@@ -78,7 +80,7 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   previews (as in Polka).
 - **Dragging tabs**: workspaces and scripts alike, a copy of the tab under
   the pointer, the tabs changing places as it passes them; notebook cells
-  lifted and carried by their grip.
+  lifted and carried by their grip, the others sliding aside to make room.
 - **Fonts** (Settings → Look): the interface's, the code's (with its line
   gap) and the tables', any installed family (searchable list, monospaced
   first where it fits), each with its size; a preview of all three.

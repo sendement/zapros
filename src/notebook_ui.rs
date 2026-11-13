@@ -96,6 +96,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     // (As of the drag's start: the cell and the pointer's height then.)
     let lift_id = egui::Id::new(("nb-lift", &tab.id));
     let lift: Option<(usize, f32)> = ctx.data(|d| d.get_temp(lift_id));
+    // Where the dragged cell would go (as of the last frame) and its height.
+    let drop_id = egui::Id::new(("nb-drop", &tab.id));
+    let drop_at: Option<(usize, f32)> = if lift.is_some() { ctx.data(|d| d.get_temp(drop_id)) } else { None };
     let mut rects: Vec<egui::Rect> = Vec::new();
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         for (i, cell) in nb.cells.iter().enumerate() {
@@ -390,28 +393,51 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             // The cell being dragged: lifted onto a layer of its own, moved
             // with the pointer (its place stays empty meanwhile).
             let lifted = lift.filter(|(k, _)| *k == i);
-            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new(("nb-lifted", &tab.id)));
-            // (Drawn the same way lifted or not: its widgets keep their ids,
-            // the drag goes on.)
-            let on = if lifted.is_some() { layer } else { ui.layer_id() };
-            let f = ui.scope_builder(egui::UiBuilder::new().layer_id(on), |ui| draw(ui)).inner;
-            let framed = match lifted {
+            // Cells between where the dragged one was and where it'd go:
+            // moved aside (smoothly) to make room for it.
+            let aside = match (lift, drop_at) {
+                (Some((li, _)), Some((to, h))) if lifted.is_none() => {
+                    if to <= i && i < li {
+                        h
+                    } else if li < i && i < to {
+                        -h
+                    } else {
+                        0.0
+                    }
+                }
+                _ => 0.0,
+            };
+            let aside = ctx.animate_value_with_time(egui::Id::new(("nb-aside", &cell.id)), aside, if lift.is_some() { 0.14 } else { 0.0 });
+            // (Drawn the same way whatever its layer: its widgets keep their
+            // ids, the drag goes on.)
+            let on = if lifted.is_some() {
+                egui::LayerId::new(egui::Order::Tooltip, egui::Id::new(("nb-lifted", &tab.id)))
+            } else if aside.abs() > 0.5 {
+                egui::LayerId::new(egui::Order::Middle, egui::Id::new(("nb-aside", &cell.id)))
+            } else {
+                ui.layer_id()
+            };
+            let framed = ui.scope_builder(egui::UiBuilder::new().layer_id(on), |ui| draw(ui)).inner;
+            rects.push(framed.response.rect);
+            // Its edge (drawn twice: the rounded corners as strong as the
+            // sides), on its layer before that's moved.
+            let edge = framed.response.rect.shrink(0.5);
+            let lp = ctx.layer_painter(on);
+            match lifted {
                 Some((_, y0)) => {
                     let dy = ctx.pointer_interact_pos().map_or(0.0, |p| p.y - y0);
-                    // (Its edge first: the move takes what's on the layer so far.)
-                    let e = f.response.rect.shrink(0.5);
-                    ctx.layer_painter(layer).rect_stroke(e, RADIUS, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
-                    ctx.transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(egui::vec2(0.0, dy)));
-                    f
+                    lp.rect_stroke(edge, RADIUS, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
+                    ctx.transform_layer_shapes(on, egui::emath::TSTransform::from_translation(egui::vec2(0.0, dy)));
                 }
-                None => f,
-            };
-            // The edge drawn twice: its rounded corners as strong as its
-            // sides (a thin line's corners come out paler).
-            let edge = framed.response.rect.shrink(0.5);
-            rects.push(framed.response.rect);
-            for _ in 0..2 {
-                ui.painter().rect_stroke(edge, RADIUS, stroke, egui::StrokeKind::Middle);
+                None => {
+                    let lp = lp.with_clip_rect(ui.clip_rect());
+                    for _ in 0..2 {
+                        lp.rect_stroke(edge, RADIUS, stroke, egui::StrokeKind::Middle);
+                    }
+                    if on != ui.layer_id() {
+                        ctx.transform_layer_shapes(on, egui::emath::TSTransform::from_translation(egui::vec2(0.0, aside)));
+                    }
+                }
             }
             ui.add_space(6.0);
         }
@@ -422,10 +448,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let to = target(p.y);
             if dropped.is_some() {
                 ops.push(Op::Move(from, to));
-            } else if to != from && to != from + 1 {
-                let y = if to == 0 { rects[0].top() - 3.0 } else { rects[to - 1].bottom() + 3.0 };
-                let x = rects.first().map_or(ui.max_rect().x_range(), |r| r.x_range());
-                ui.painter().hline(x, y, Stroke::new(3.0, accent));
+                ctx.data_mut(|d| d.remove::<(usize, f32)>(drop_id));
+            } else if let Some(r) = rects.get(from) {
+                // Where it'd go, and how far the others move aside for it.
+                ctx.data_mut(|d| d.insert_temp(drop_id, (to, r.height() + 6.0)));
             }
             if dragging.is_some() {
                 let clip = ui.clip_rect();
