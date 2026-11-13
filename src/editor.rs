@@ -36,8 +36,23 @@ pub enum Action {
 
 pub struct Popup {
     pub hints: Hints,
+    /// The row picked; with `typed_first`, row 0 is the word as typed and
+    /// the hints start at 1.
     pub sel: usize,
     pub forced: bool,
+    pub typed_first: bool,
+}
+
+impl Popup {
+    /// Rows shown.
+    fn rows(&self) -> usize {
+        self.hints.items.len() + self.typed_first as usize
+    }
+
+    /// The hint a row is (None: the word as typed).
+    fn item(&self, row: usize) -> Option<usize> {
+        if self.typed_first { row.checked_sub(1) } else { Some(row) }
+    }
 }
 
 /// What an editor keeps between frames.
@@ -761,7 +776,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         ui.input_mut(|i| {
             out.actions = shortcuts(i);
             if let Some(pop) = st.popup.as_mut() {
-                let n = pop.hints.items.len();
+                let n = pop.rows();
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     pop.sel = (pop.sel + 1) % n;
                 }
@@ -774,13 +789,20 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 if i.consume_key(Modifiers::NONE, Key::PageUp) {
                     pop.sel = pop.sel.saturating_sub(8);
                 }
+                let as_typed = pop.item(pop.sel).is_none();
                 if i.consume_key(Modifiers::NONE, Key::Escape) {
                     st.popup = None;
-                } else if i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Tab) {
-                    let c = accept(text, pop, pop.sel);
-                    new_sel = Some((c, c));
+                } else if as_typed && (i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab)) {
+                    // The word as typed: nothing put in; Enter / Tab do
+                    // what they'd do without hints (a new line, an indent).
                     st.popup = None;
-                    out.changed = true;
+                } else if i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Tab) {
+                    if let Some(k) = pop.item(pop.sel) {
+                        let c = accept(text, pop, k);
+                        new_sel = Some((c, c));
+                        out.changed = true;
+                    }
+                    st.popup = None;
                 }
             }
             if i.consume_key(Modifiers::COMMAND, Key::Space) {
@@ -1445,8 +1467,12 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             let forced = forced || st.popup.as_ref().is_some_and(|p| p.forced);
             match complete::hints(text, c, cx.dialect, cx.rels, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
                 Some(h) => {
-                    let keep = st.popup.as_ref().and_then(|p| p.hints.items.get(p.sel)).and_then(|it| h.items.iter().position(|x| x == it)).unwrap_or(0);
-                    st.popup = Some(Popup { hints: h, sel: keep, forced });
+                    let typed_first = cx.settings.hints_typed_first;
+                    // The same hint stays picked as the list changes (with
+                    // the word as typed first: that, unless a hint was).
+                    let was = st.popup.as_ref().and_then(|p| p.item(p.sel).and_then(|k| p.hints.items.get(k)));
+                    let keep = was.and_then(|it| h.items.iter().position(|x| x == it)).map_or(0, |k| k + typed_first as usize);
+                    st.popup = Some(Popup { hints: h, sel: keep, forced, typed_first });
                 }
                 None => st.popup = None,
             }
@@ -1461,11 +1487,28 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 ui.set_min_width(260.0);
                 ui.set_max_width(520.0);
                 egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                    for (k, it) in pop.hints.items.iter().enumerate() {
-                        let sel = k == pop.sel;
+                    if pop.typed_first {
+                        let typed = text.get(pop.hints.range.clone()).unwrap_or("");
+                        let sel = pop.sel == 0;
                         let r = ui
                             .horizontal(|ui| {
-                                let resp = ui.add(egui::Button::selectable(sel, egui::RichText::new(format!("{}  {}", it.kind.icon(), it.label)).monospace()).frame_when_inactive(false));
+                                let resp = ui.add(egui::Button::selectable(sel, egui::RichText::new(format!("↵  {typed}")).monospace()).frame_when_inactive(sel));
+                                ui.label(egui::RichText::new(t("как набрано", "as typed")).weak().small());
+                                resp
+                            })
+                            .inner;
+                        if sel {
+                            r.scroll_to_me(None);
+                        }
+                        if r.clicked() {
+                            picked = Some(usize::MAX);
+                        }
+                    }
+                    for (k, it) in pop.hints.items.iter().enumerate() {
+                        let sel = k + pop.typed_first as usize == pop.sel;
+                        let r = ui
+                            .horizontal(|ui| {
+                                let resp = ui.add(egui::Button::selectable(sel, egui::RichText::new(format!("{}  {}", it.kind.icon(), it.label)).monospace()).frame_when_inactive(sel));
                                 if !it.detail.is_empty() {
                                     ui.label(egui::RichText::new(&it.detail).weak().small());
                                 }
@@ -1480,16 +1523,20 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                         }
                     }
                 });
-                ui.label(egui::RichText::new(t("↑↓ выбор · Enter/Tab вставить · Esc закрыть", "↑↓ choose · Enter/Tab insert · Esc close")).weak().small());
+                let help = if pop.typed_first { t("↑↓ выбор · Enter/Tab вставить (на «как набрано» — перенос) · Esc закрыть", "↑↓ choose · Enter/Tab insert (on \"as typed\": a new line) · Esc close") } else { t("↑↓ выбор · Enter/Tab вставить · Esc закрыть", "↑↓ choose · Enter/Tab insert · Esc close") };
+                ui.label(egui::RichText::new(help).weak().small());
             });
         });
     }
     if let Some(k) = picked {
         let pop = st.popup.take().unwrap();
-        let c = accept(text, &pop, k);
-        set_cursor(&ctx, id, text, c, c);
+        // (The word as typed: just closed.)
+        if k != usize::MAX {
+            let c = accept(text, &pop, k);
+            set_cursor(&ctx, id, text, c, c);
+            out.changed = true;
+        }
         ctx.memory_mut(|m| m.request_focus(id));
-        out.changed = true;
     }
     out
 }

@@ -145,6 +145,9 @@ pub struct Settings {
     pub hint_case: Case,
     /// Schemas put in by hints always in quotes (`"sales".orders`).
     pub hint_quote_schemas: bool,
+    /// The hints' first row is the word as typed (picked at first): Enter
+    /// then just goes to a new line; a hint is taken by ↓ and Enter / Tab.
+    pub hints_typed_first: bool,
     pub auto_pairs: bool,
     /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
     pub embedded_sql: bool,
@@ -207,6 +210,7 @@ impl Default for Settings {
             hints_auto: true,
             hint_case: Case::Upper,
             hint_quote_schemas: false,
+            hints_typed_first: false,
             auto_pairs: true,
             format: FmtOptions::default(),
             dark: Palette::dark(),

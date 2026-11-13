@@ -115,6 +115,7 @@ fn elided(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -
 /// A square icon button of the side panel's row; `on`: shown pressed.
 fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(Vec2::splat(ROW_H - 2.0), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     let v = ui.visuals();
     let fill = if on {
         v.selection.bg_fill.gamma_multiply(if v.dark_mode { 0.55 } else { 0.35 })
@@ -149,9 +150,18 @@ fn icon_menu(ui: &mut egui::Ui, glyph: &str, tip: &str, add: impl FnOnce(&mut eg
 /// panel shows (objects / files), then the menus as icons.
 pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    ui.horizontal(|ui| {
+    // Centred on the panel: the row's width as of the last frame.
+    let wid = egui::Id::new("icon-bar-w");
+    let last: f32 = ctx.data(|d| d.get_temp(wid)).unwrap_or(0.0);
+    let row = ui.horizontal(|ui| {
         ui.set_height(ROW_H);
         ui.spacing_mut().item_spacing.x = 2.0;
+        let start = ui.cursor().left();
+        // (Not measured yet: no room before it — the panel mustn't widen.)
+        if last > 0.0 {
+            ui.add_space(((ui.available_width() - last) / 2.0).floor().max(0.0));
+        }
+        let from = ui.cursor().left() - start;
         if icon(ui, "🗄", !app.session.side_files, t("Подключения и объекты баз", "Connections and database objects")).clicked() {
             app.session.side_files = false;
             app.touch();
@@ -171,7 +181,13 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
         if icon(ui, "?", app.about, t("Клавиши и о программе", "Keys and about")).clicked() {
             app.about = true;
         }
+        ui.min_rect().width() - from
     });
+    let w = row.inner;
+    if (w - last).abs() > 0.5 {
+        ctx.data_mut(|d| d.insert_temp(wid, w));
+        ctx.request_repaint();
+    }
 }
 
 fn file_menu(app: &mut App, ui: &mut egui::Ui) {
@@ -511,7 +527,8 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                                 let lr = ui.add(egui::Label::new(txt).sense(egui::Sense::click_and_drag()).selectable(false));
                                 // On hover only: the tab grows to take it.
                                 let x = if close_always || hovered {
-                                    ui.add(egui::Button::new(RichText::new("🗙").small()).frame(false))
+                                    ui.add_space(4.0);
+                                    close_cross(ui)
                                 } else {
                                     ui.allocate_response(Vec2::ZERO, egui::Sense::hover())
                                 };
@@ -952,6 +969,22 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         app.rt.insert(tab_id, rt);
     });
     actions
+}
+
+/// A tab's ✕: thin strokes on a round ground under the pointer.
+pub fn close_cross(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "🗙"));
+    let v = ui.visuals();
+    if r.hovered() {
+        ui.painter().circle_filled(rect.center(), 8.5, v.widgets.hovered.weak_bg_fill);
+    }
+    let c = if r.hovered() { v.strong_text_color() } else { v.weak_text_color() };
+    let (m, k) = (rect.center(), 3.6);
+    let s = Stroke::new(1.15, c);
+    ui.painter().line_segment([m + Vec2::new(-k, -k), m + Vec2::new(k, k)], s);
+    ui.painter().line_segment([m + Vec2::new(-k, k), m + Vec2::new(k, -k)], s);
+    r.on_hover_text(t("Закрыть (средняя кнопка мыши — тоже)", "Close (the middle button too)"))
 }
 
 /// A ">" of two strokes at `c`, turned down by `t` (0…1) — the tree's,

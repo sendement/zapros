@@ -110,7 +110,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Hints**: columns after `alias.`, tables after `FROM` / `JOIN`, a join
   condition guessed from column names after `ON`, keywords and functions of
   the dialect, snippets (`sel`, `case`, `cte`, …). Schemas can be put in
-  quotes always (a setting).
+  quotes always (a setting). Another setting puts the word as typed first in the list,
+  picked: Enter then just starts a new line (an alias needs no hint), a
+  hint is taken with ↓ and Enter / Tab.
 - **SQL inside strings.** Dynamic SQL (`EXECUTE IMMEDIATE`, PL/pgSQL
   `EXECUTE`, `OPEN … FOR`, `format()`, `DBMS_SQL.PARSE`), strings kept in
   variables that end up there, literals reading as a statement, and

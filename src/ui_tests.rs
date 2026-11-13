@@ -1659,3 +1659,41 @@ fn starts_on_a_notebook_with_bold_markdown() {
     }
     assert!(h.state().tab().is_notebook());
 }
+
+#[test]
+fn hints_with_the_word_as_typed_first() {
+    let (mut h, _g) = harness("typed-first", "", false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    settle(&mut h);
+    h.state_mut().settings.hints_typed_first = true;
+    h.state_mut().settings.format.case_while_typing = false;
+    focus_editor(&mut h, 0);
+    // "o" opens hints (orders…); Enter: a new line, the word as typed.
+    type_text(&mut h, "select * from o");
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    assert!(h.state().rt[&id].ed.popup.is_some(), "hints open");
+    shot(&mut h, "typed-first");
+    key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(h.state().tab().text, "select * from o\n");
+    assert!(h.state().rt[&id].ed.popup.is_none());
+    // ↓ then Enter: the hint.
+    type_text(&mut h, "from ord");
+    settle(&mut h);
+    key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(h.state().tab().text, "select * from o\nfrom orders");
+    // Off: Enter takes the first hint, as before.
+    h.state_mut().settings.hints_typed_first = false;
+    type_text(&mut h, " join cust");
+    settle(&mut h);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(h.state().tab().text, "select * from o\nfrom orders join customers");
+    // The panel's icons centred on it.
+    let w = h.state().session.side_width;
+    let first = h.get_by_label("Подключения и объекты баз").rect();
+    let last = h.get_by_label("Клавиши и о программе").rect();
+    let (l, r) = (first.left() as f32, last.right() as f32);
+    assert!(((l - 6.0) - (w - 6.0 - r)).abs() < 3.0, "centred: {l} … {r} in {w}");
+}

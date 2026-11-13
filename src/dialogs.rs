@@ -728,6 +728,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.label(t("Регистр ключевых слов в подсказках", "Keyword case in hints"));
                     case_pick(ui, &mut s.hint_case, "hint-case");
                 });
+                ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hints_typed_first, t("Первая строка подсказок — набранное слово: Enter просто переносит строку (подсказка — стрелкой ↓ и Enter / Tab)", "The hints' first row is the word as typed: Enter just starts a new line (a hint: ↓, then Enter / Tab)")));
                 ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hint_quote_schemas, t("Схемы в кавычках (\"sales\".orders; в ClickHouse — `sales`.orders)", "Schemas in quotes (\"sales\".orders; in ClickHouse `sales`.orders)")));
             }
             3 => {
