@@ -33,7 +33,7 @@ pub fn folder_label(key: &str) -> &'static str {
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     // Full height, its top row (icons) level with the workspace tabs.
-    let frame = egui::Frame::NONE.fill(crate::ui::backdrop(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 4 });
+    let frame = egui::Frame::NONE.fill(crate::ui::backdrop(ui.visuals())).inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 4 });
     // (No line drawn at its edge under the pointer: egui takes its look
     // from the parent's hovered / active strokes, hidden here meanwhile.)
     let own = ui.style().clone();
@@ -45,6 +45,8 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let inner_style = own.clone();
     let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
         ui.set_style(inner_style);
+        // (The gap above the icons on a whole pixel: see icon_bar.)
+        ui.add_space(crate::ui::snap(ui.ctx(), 6.0));
         crate::ui::icon_bar(app, ui);
         // The list on a card of its own: no edge, rounded, as tall as the
         // sheet beside it (its top and bottom from the last frame).

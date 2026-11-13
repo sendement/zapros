@@ -1,4 +1,4 @@
-//! Search: Ctrl+F's bar (find and replace in the script, the workspace's
+//! Search: Ctrl+F's window (find and replace in the script, the workspace's
 //! scripts or all of them; or the database — the code of its views,
 //! functions, procedures, packages, triggers, jobs — as cards), and the
 //! object tree's search of the database by name.
@@ -192,7 +192,7 @@ pub fn open(app: &mut App) {
     app.find.focus = true;
 }
 
-/// The bar (under the toolbar) and what it found.
+/// The search window and what it found.
 pub fn bar(app: &mut App, ui: &mut egui::Ui) {
     if !app.find.open {
         return;
@@ -208,7 +208,10 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
     let mut replace_one = false;
     let mut replace_all = false;
     let before = (app.find.query.clone(), app.find.case, app.find.word, app.find.scope);
-    egui::Frame::NONE.fill(crate::themes::mix(ui.visuals().panel_fill, ui.visuals().text_color(), 0.045)).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+    // A window of its own (moved where it's handy), near the editor's top right.
+    let mut open = true;
+    let at = ui.max_rect().right_top() + egui::vec2(-600.0, 4.0);
+    egui::Window::new(t("Поиск", "Find")).id(egui::Id::new("find-window")).open(&mut open).collapsible(false).resizable(true).default_pos(at).default_width(580.0).show(&ctx, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             let f = &mut app.find;
@@ -260,11 +263,6 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.add(egui::Button::selectable(f.show_replace, "⇄")).on_hover_text(t("Замена", "Replace")).clicked().then(|| f.show_replace = !f.show_replace);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::close_cross(ui).clicked() {
-                    close = true;
-                }
-            });
         });
         if app.find.show_replace && !db {
             ui.horizontal(|ui| {
@@ -293,7 +291,13 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         }
+        if db {
+            cards(app, ui);
+        }
     });
+    if !open {
+        close = true;
+    }
     if (app.find.query.clone(), app.find.case, app.find.word, app.find.scope) != before {
         app.find.cur = 0;
         if app.find.scope == Scope::Database {
@@ -341,7 +345,6 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
     if db {
         unmark(app);
         ask_db(app, &ctx);
-        cards(app, ui);
     } else {
         let hs = hits(app);
         let cur = hs.get(app.find.cur).cloned();

@@ -90,6 +90,12 @@ pub fn standard(s: &mut egui::Style) {
 
 /// The window's backdrop: the side panel and around the sheet (a little
 /// darker than the sheet the editor and results lie on).
+/// `v` points as a whole number of screen pixels (in points).
+pub fn snap(ctx: &egui::Context, v: f32) -> f32 {
+    let ppp = ctx.pixels_per_point();
+    (v * ppp).round() / ppp
+}
+
 pub fn chrome(v: &egui::Visuals) -> Color32 {
     if let Some(b) = crate::themes::back(v.dark_mode) {
         return b;
@@ -118,9 +124,10 @@ fn elided(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -
 
 /// A square icon button of the side panel's row; `on`: shown pressed.
 fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
+    let size = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("icon-size"))).unwrap_or(ICON_H);
     // (Its lit square as far from the panel's card below as from the
     // window's top above.)
-    let (rect, r) = ui.allocate_exact_size(Vec2::splat(ICON_H), egui::Sense::click());
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     let v = ui.visuals();
     let fill = if on {
@@ -159,8 +166,14 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
     // Centred on the panel: the row's width as of the last frame.
     let wid = egui::Id::new("icon-bar-w");
     let last: f32 = ctx.data(|d| d.get_temp(wid)).unwrap_or(0.0);
+    // Its squares as far from the card below as from the window's top, on
+    // whole pixels: the gap above, then a square that leaves as much below.
+    let gap = snap(&ctx, 6.0);
+    let card_top = ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))).map_or(gap + ICON_H + gap, |s| s.top());
+    let size = (card_top - ui.cursor().top() - gap).max(16.0);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("icon-size"), size));
     let row = ui.horizontal(|ui| {
-        ui.set_height(ICON_H);
+        ui.set_height(size);
         ui.spacing_mut().item_spacing.x = 2.0;
         let start = ui.cursor().left();
         // (Not measured yet: no room before it — the panel mustn't widen.)
@@ -929,9 +942,12 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let bg = backdrop(ui.visuals());
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ui, |ui| {
         let full = ui.max_rect();
-        let row = Rect::from_min_size(full.min + Vec2::new(0.0, 6.0), Vec2::new(full.width() - 6.0, ROW_H));
+        // (Edges on whole screen pixels at any scale: the gaps come out
+        // alike, not one pixel here and two there.)
+        let gap = snap(ui.ctx(), 6.0);
+        let row = Rect::from_min_size(full.min + Vec2::new(0.0, gap), Vec2::new(full.width() - gap, ROW_H));
         // (Its gap to the side card as wide as the one to the window's edge.)
-        let sheet = Rect::from_min_max(Pos2::new(full.left(), row.bottom()), Pos2::new(full.right() - 6.0, full.bottom() - 2.0));
+        let sheet = Rect::from_min_max(Pos2::new(full.left(), snap(ui.ctx(), row.bottom())), Pos2::new(full.right() - gap, full.bottom() - snap(ui.ctx(), 2.0)));
         if ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))) != Some(sheet) {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
             ui.ctx().request_repaint();
@@ -942,10 +958,10 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let look = crate::titlebar::Look::of(&app.settings);
         // (Their grounds as far from the window's top as from its side, as
         // low as a not-chosen tab's bottom.)
-        const M: f32 = 6.0;
+        let m = snap(ui.ctx(), 6.0);
         let win = ui.ctx().content_rect();
-        let (btn_top, btn_bottom) = (win.top() + M, sheet.top() - IDLE_GAP);
-        let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top, M) - (win.right() - row.right()) } else { 0.0 };
+        let (btn_top, btn_bottom) = (win.top() + m, sheet.top() - snap(ui.ctx(), IDLE_GAP));
+        let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top, m) - (win.right() - row.right()) } else { 0.0 };
         let reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
         if own {
             let drag = ui.interact(row, ui.id().with("title-drag"), egui::Sense::click_and_drag());
@@ -959,7 +975,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         workspaces(app, ui, row, sheet, reserve);
         if own {
             let edge = if look.left { sheet.left() } else { win.right() };
-            let (x, cy, scale) = crate::titlebar::place(look.style, edge, btn_top, btn_bottom - btn_top, M, look.left);
+            let (x, cy, scale) = crate::titlebar::place(look.style, edge, btn_top, btn_bottom - btn_top, m, look.left);
             if let Some(b) = crate::titlebar::buttons(ui, look, x, cy, scale) {
                 crate::titlebar::press(ui.ctx(), b);
             }

@@ -1918,6 +1918,48 @@ fn notebook_labels_and_filter() {
     assert_eq!(shown(&h), 1);
     assert!(h.query_by_label_contains("⋯").is_none(), "shown open");
     shot(&mut h, "nb-filter");
+    // Left out: label 0 → only the middle cell.
+    {
+        let rt = h.state_mut().rt.get_mut(&id).unwrap();
+        rt.nb_query.clear();
+        rt.nb_exclude = vec![0];
+    }
+    settle(&mut h);
+    assert_eq!(shown(&h), 1);
+    // All of the wanted labels: 0 and 3 → the last one alone.
+    {
+        let rt = h.state_mut().rt.get_mut(&id).unwrap();
+        rt.nb_exclude.clear();
+        rt.nb_labels = vec![0, 3];
+        rt.nb_all = true;
+    }
+    settle(&mut h);
+    assert_eq!(shown(&h), 1);
+    // Made today: all; before last year: none.
+    {
+        let rt = h.state_mut().rt.get_mut(&id).unwrap();
+        rt.nb_labels.clear();
+        rt.nb_date = 1;
+    }
+    settle(&mut h);
+    assert_eq!(shown(&h), 3);
+    {
+        let rt = h.state_mut().rt.get_mut(&id).unwrap();
+        rt.nb_date = 4;
+        rt.nb_to = "2020-01-01".into();
+    }
+    settle(&mut h);
+    assert_eq!(shown(&h), 0);
+    h.state_mut().rt.get_mut(&id).unwrap().nb_date = 0;
+    settle(&mut h);
+    // A cell's labels: a click on them, the menu (named as set).
+    h.state_mut().settings.labels[0].name = "Срочно".into();
+    h.state_mut().settings.labels[0].color = [10, 200, 120];
+    settle(&mut h);
+    h.get_all_by_label("labels").next().unwrap().click();
+    settle(&mut h);
+    assert!(h.query_by_label("Срочно").is_some(), "the menu, the label renamed");
+    shot(&mut h, "nb-label-menu");
 }
 
 #[test]
@@ -1945,4 +1987,39 @@ fn schema_filter_in_the_tree() {
     h.get_by_label("Какие схемы / базы показывать").click();
     settle(&mut h);
     shot(&mut h, "schema-filter");
+}
+
+/// At any scale the window's own buttons stand as far from the top as
+/// from the side, and the side panel's icons as far from the card below as
+/// from the top — in screen pixels.
+#[test]
+fn margins_even_at_every_scale() {
+    for z in [1.0f32, 1.2, 1.25, 1.5] {
+        let (mut h, _g) = harness("margins", SCRIPT, false);
+        h.state_mut().settings.ui_scale = z;
+        h.state_mut().settings.system_titlebar = false;
+        h.state_mut().settings.win_style = crate::titlebar::Style::Win11;
+        settle(&mut h);
+        let c = h.get_by_label("Закрыть").rect();
+        let p = egui::pos2(((c.min.x + c.max.x) / 2.0) as f32, ((c.min.y + c.max.y) / 2.0) as f32);
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        for _ in 0..3 {
+            h.step();
+        }
+        let img = h.render().unwrap();
+        let (w, _) = img.dimensions();
+        let px = |x: u32, y: u32| img.get_pixel(x, y).0;
+        // The red of the close button lit.
+        let red: Vec<(u32, u32)> = (0..90).flat_map(|y| (w - 140..w).map(move |x| (x, y))).filter(|&(x, y)| { let p = px(x, y); p[0] > 150 && p[1] < 80 && p[2] < 60 }).collect();
+        let top = red.iter().map(|p| p.1).min().unwrap();
+        let right = w - 1 - red.iter().map(|p| p.0).max().unwrap();
+        assert_eq!(top, right, "scale {z}: the close button {top} from the top, {right} from the side");
+        // The side panel's chosen icon (blue-ish) and the card under it.
+        let bg = px(2, 2);
+        let k = z;
+        let card = (((36.0 * k) as u32)..200).find(|&y| px((140.0 * k) as u32, y) != bg).unwrap();
+        let ys: Vec<u32> = (0..card).filter(|&y| (0..(280.0 * k) as u32).any(|x| { let p = px(x, y); p[2] as i32 > p[0] as i32 + 15 })).collect();
+        let (above, below) = (*ys.first().unwrap(), card - 1 - ys.last().unwrap());
+        assert_eq!(above, below, "scale {z}: the icons {above} under the top, {below} over the card");
+    }
 }

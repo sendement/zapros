@@ -152,6 +152,14 @@ pub struct TabRt {
     /// A notebook's filter: cells holding this, with these labels.
     pub nb_query: String,
     pub nb_labels: Vec<u8>,
+    /// …without these labels; with all of `nb_labels` (else any).
+    pub nb_exclude: Vec<u8>,
+    pub nb_all: bool,
+    /// …made: 0 any time, 1 today, 2 in 7 days, 3 in 30 days, 4 between
+    /// these dates (YYYY-MM-DD, either may be empty).
+    pub nb_date: u8,
+    pub nb_from: String,
+    pub nb_to: String,
     /// An object's tab: its designer.
     pub design: Option<crate::design_ui::Designer>,
     pub results: Vec<ResultView>,

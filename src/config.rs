@@ -177,6 +177,8 @@ pub struct Settings {
     pub win_style: crate::titlebar::Style,
     pub win_order: u8,
     pub win_left: bool,
+    /// The notebook cells' colour labels.
+    pub labels: Vec<LabelDef>,
 }
 
 /// Font families by name as fontconfig knows them ("" — the system's
@@ -235,6 +237,7 @@ impl Default for Settings {
             win_style: crate::titlebar::Style::Auto,
             win_order: 0,
             win_left: false,
+            labels: default_labels(),
         }
     }
 }
@@ -314,7 +317,7 @@ pub struct Cell {
     /// such a thing).
     #[serde(default)]
     pub created: String,
-    /// Its colour labels (indexes into LABELS).
+    /// Its colour labels (indexes into the settings' labels).
     pub labels: Vec<u8>,
 }
 
@@ -324,7 +327,26 @@ impl Default for Cell {
     }
 }
 
-/// The cells' colour labels: colour and name.
+/// A cell label as set: its name ("" — the default one's) and colour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelDef {
+    pub name: String,
+    pub color: Rgb,
+}
+
+pub fn default_labels() -> Vec<LabelDef> {
+    LABELS.iter().map(|l| LabelDef { name: String::new(), color: l.0 }).collect()
+}
+
+/// A label's name as shown.
+pub fn label_name(labels: &[LabelDef], k: usize) -> String {
+    match labels.get(k) {
+        Some(l) if !l.name.trim().is_empty() => l.name.clone(),
+        _ => LABELS.get(k).map_or(format!("#{}", k + 1), |l| crate::i18n::t(l.1, l.2).to_string()),
+    }
+}
+
+/// The cells' colour labels to start with: colour and name.
 pub const LABELS: [(Rgb, &str, &str); 8] = [
     ([229, 57, 53], "Красная", "Red"),
     ([239, 108, 0], "Оранжевая", "Orange"),

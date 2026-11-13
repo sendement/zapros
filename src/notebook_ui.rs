@@ -31,28 +31,161 @@ enum Op {
     Move(usize, usize),
 }
 
-use crate::config::LABELS;
+use crate::config::{LabelDef, label_name};
 
-fn label_name(k: usize) -> &'static str {
-    LABELS.get(k).map_or("", |l| t(l.1, l.2))
+/// How a label's dot looks.
+#[derive(Clone, Copy, PartialEq)]
+enum Dot {
+    /// Filled: on.
+    On,
+    /// A ring: off (or, without a colour, "no labels").
+    Off,
+    /// Crossed: left out (the filter).
+    Out,
 }
 
-/// A label's dot (`k` past the labels: an empty ring, "no labels").
-fn label_dot(ui: &mut egui::Ui, k: usize, on: bool, size: f32) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
-    let c = LABELS.get(k).map_or(ui.visuals().weak_text_color(), |l| crate::editor::rgb(l.0));
+/// A label's dot in its colour (`color` None: an empty ring); `sense`:
+/// whether it takes clicks itself.
+fn label_dot(ui: &mut egui::Ui, color: Option<Color32>, dot: Dot, size: f32, sense: egui::Sense) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(size, size), sense);
+    let c = color.unwrap_or(ui.visuals().weak_text_color());
     let rad = size / 2.0 - 1.0;
-    if k >= LABELS.len() {
-        ui.painter().circle_stroke(rect.center(), rad - 0.5, Stroke::new(1.0, c));
-    } else if on {
-        ui.painter().circle_filled(rect.center(), rad, c);
-    } else {
-        ui.painter().circle_stroke(rect.center(), rad - 0.5, Stroke::new(1.2, c.gamma_multiply(0.8)));
+    let p = ui.painter();
+    match dot {
+        Dot::On => {
+            p.circle_filled(rect.center(), rad, c);
+        }
+        Dot::Off => {
+            p.circle_stroke(rect.center(), rad - 0.5, Stroke::new(if color.is_some() { 1.2 } else { 1.0 }, c.gamma_multiply(0.85)));
+        }
+        Dot::Out => {
+            p.circle_stroke(rect.center(), rad - 0.5, Stroke::new(1.2, c));
+            let d = rad * 0.7;
+            p.line_segment([rect.center() + egui::vec2(-d, d), rect.center() + egui::vec2(d, -d)], Stroke::new(1.4, c));
+        }
     }
-    if r.hovered() {
-        ui.painter().circle_stroke(rect.center(), rad + 1.0, Stroke::new(1.0, ui.visuals().strong_text_color()));
+    if r.hovered() && sense.senses_click() {
+        p.circle_stroke(rect.center(), rad + 1.0, Stroke::new(1.0, ui.visuals().strong_text_color()));
     }
     r
+}
+
+fn color_of(labels: &[LabelDef], k: usize) -> Option<Color32> {
+    labels.get(k).map(|l| crate::editor::rgb(l.color))
+}
+
+/// Whether a cell fits the notebook's filter.
+fn fits(rt: &crate::app::TabRt, c: &crate::config::Cell) -> bool {
+    let q = rt.nb_query.trim().to_lowercase();
+    if !q.is_empty() && !c.text.to_lowercase().contains(&q) {
+        return false;
+    }
+    if !rt.nb_labels.is_empty() {
+        let has = |l: &u8| c.labels.contains(l);
+        let ok = if rt.nb_all { rt.nb_labels.iter().all(has) } else { rt.nb_labels.iter().any(has) };
+        if !ok {
+            return false;
+        }
+    }
+    if rt.nb_exclude.iter().any(|l| c.labels.contains(l)) {
+        return false;
+    }
+    if rt.nb_date != 0 {
+        let Ok(made) = chrono::NaiveDateTime::parse_from_str(&c.created, "%Y-%m-%d %H:%M") else { return false };
+        let today = chrono::Local::now().date_naive();
+        let day = made.date();
+        let ok = match rt.nb_date {
+            1 => day == today,
+            2 => day > today - chrono::Duration::days(7),
+            3 => day > today - chrono::Duration::days(30),
+            _ => {
+                let from = chrono::NaiveDate::parse_from_str(rt.nb_from.trim(), "%Y-%m-%d").ok();
+                let to = chrono::NaiveDate::parse_from_str(rt.nb_to.trim(), "%Y-%m-%d").ok();
+                from.is_none_or(|f| day >= f) && to.is_none_or(|t| day <= t)
+            }
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+fn filtering(rt: &crate::app::TabRt) -> bool {
+    !rt.nb_query.trim().is_empty() || !rt.nb_labels.is_empty() || !rt.nb_exclude.is_empty() || rt.nb_date != 0
+}
+
+/// The filter's menu: labels wanted / left out, any or all, when made;
+/// and the labels themselves (colour, name, more, fewer).
+fn filter_menu(ui: &mut egui::Ui, rt: &mut crate::app::TabRt, labels: &mut Vec<LabelDef>, removed: &mut Option<u8>) {
+    ui.set_min_width(300.0);
+    ui.label(RichText::new(t("Метки", "Labels")).strong());
+    for k in 0..labels.len() {
+        let id = k as u8;
+        ui.horizontal(|ui| {
+            let c = color_of(labels, k);
+            label_dot(ui, c, Dot::On, 13.0, egui::Sense::hover());
+            ui.add_sized([110.0, 18.0], egui::Label::new(label_name(labels, k)).truncate());
+            let state = if rt.nb_labels.contains(&id) { 1 } else if rt.nb_exclude.contains(&id) { 2 } else { 0 };
+            let mut want = state;
+            ui.selectable_value(&mut want, 0, "—").on_hover_text(t("Не важно", "Any"));
+            ui.selectable_value(&mut want, 1, "✓").on_hover_text(t("Нужна", "Wanted"));
+            ui.selectable_value(&mut want, 2, "✕").on_hover_text(t("Исключить", "Left out"));
+            if want != state {
+                rt.nb_labels.retain(|x| *x != id);
+                rt.nb_exclude.retain(|x| *x != id);
+                match want {
+                    1 => rt.nb_labels.push(id),
+                    2 => rt.nb_exclude.push(id),
+                    _ => {}
+                }
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label(t("Нужные метки:", "Wanted labels:"));
+        ui.radio_value(&mut rt.nb_all, false, t("любая", "any"));
+        ui.radio_value(&mut rt.nb_all, true, t("все", "all"));
+    });
+    ui.separator();
+    ui.label(RichText::new(t("Создан", "Made")).strong());
+    ui.horizontal_wrapped(|ui| {
+        for (v, n) in [(0u8, t("когда угодно", "any time")), (1, t("сегодня", "today")), (2, t("за 7 дней", "in 7 days")), (3, t("за 30 дней", "in 30 days")), (4, t("между датами", "between dates"))] {
+            ui.selectable_value(&mut rt.nb_date, v, n);
+        }
+    });
+    if rt.nb_date == 4 {
+        ui.horizontal(|ui| {
+            ui.label(t("с", "from"));
+            ui.add(egui::TextEdit::singleline(&mut rt.nb_from).hint_text("2026-11-01").desired_width(90.0));
+            ui.label(t("по", "to"));
+            ui.add(egui::TextEdit::singleline(&mut rt.nb_to).hint_text("2026-11-30").desired_width(90.0));
+        });
+    }
+    if ui.button(t("Сбросить фильтр", "Clear the filter")).clicked() {
+        rt.nb_query.clear();
+        rt.nb_labels.clear();
+        rt.nb_exclude.clear();
+        rt.nb_date = 0;
+    }
+    ui.separator();
+    ui.label(RichText::new(t("Настройка меток", "The labels")).strong());
+    for k in 0..labels.len() {
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut labels[k].color);
+            let mut name = label_name(labels, k);
+            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0)).changed() {
+                labels[k].name = name;
+            }
+            if labels.len() > 1 && ui.small_button("🗑").on_hover_text(t("Убрать метку (и с блоков)", "Remove the label (from the cells too)")).clicked() {
+                *removed = Some(k as u8);
+            }
+        });
+    }
+    if ui.button(format!("➕ {}", t("Метка", "Label"))).clicked() {
+        let palette = [[0, 150, 136], [233, 30, 99], [121, 85, 72], [63, 81, 181]];
+        labels.push(LabelDef { name: format!("{} {}", t("Метка", "Label"), labels.len() + 1), color: palette[labels.len() % palette.len()] });
+    }
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
@@ -93,21 +226,61 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // The cells' filter: by what they hold and their labels.
+            // The cells' filter: what they hold, labels (a click: wanted,
+            // again: left out, again: any), more in its menu.
             let tab_id = app.tab().id.clone();
+            let mut labels = app.settings.labels.clone();
+            let mut removed: Option<u8> = None;
             let rt = app.rt.entry(tab_id).or_default();
-            for k in (0..LABELS.len()).rev() {
-                let on = rt.nb_labels.contains(&(k as u8));
-                if label_dot(ui, k, on, 13.0).on_hover_text(format!("{}: {}", t("Блоки с меткой", "Cells labelled"), label_name(k))).clicked() {
-                    if on {
-                        rt.nb_labels.retain(|x| *x != k as u8);
-                    } else {
-                        rt.nb_labels.push(k as u8);
+            let active = filtering(rt);
+            let fb = match crate::icons::image(crate::icons::Ic::Filter, 15.0, if active { ui.visuals().hyperlink_color } else { ui.visuals().text_color() }) {
+                Some(img) => egui::Button::image(img),
+                None => egui::Button::new("⛃"),
+            };
+            let fr = ui.add(fb.selected(active)).on_hover_text(t("Фильтр блоков: метки, исключения, дата создания; настройка меток", "The cells' filter: labels, left out, when made; the labels themselves"));
+            egui::Popup::menu(&fr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| filter_menu(ui, rt, &mut labels, &mut removed));
+            for k in (0..labels.len()).rev() {
+                let id = k as u8;
+                let dot = if rt.nb_labels.contains(&id) { Dot::On } else if rt.nb_exclude.contains(&id) { Dot::Out } else { Dot::Off };
+                if label_dot(ui, color_of(&labels, k), dot, 13.0, egui::Sense::click()).on_hover_text(format!("{} · {}", label_name(&labels, k), t("щелчок: нужна → исключить → не важно", "click: wanted → left out → any"))).clicked() {
+                    rt.nb_labels.retain(|x| *x != id);
+                    rt.nb_exclude.retain(|x| *x != id);
+                    match dot {
+                        Dot::Off => rt.nb_labels.push(id),
+                        Dot::On => rt.nb_exclude.push(id),
+                        Dot::Out => {}
                     }
                 }
             }
             ui.add(egui::TextEdit::singleline(&mut rt.nb_query).hint_text(t("🔎 фильтр блоков", "🔎 filter cells")).desired_width(150.0))
-                .on_hover_text(t("Подходящие блоки раскрыты, остальные скрыты (и по меткам справа)", "The cells that fit are open, the rest hidden (by the labels beside too)"));
+                .on_hover_text(t("Подходящие блоки раскрыты, остальные скрыты", "The cells that fit are open, the rest hidden"));
+            if labels != app.settings.labels || removed.is_some() {
+                if let Some(k) = removed {
+                    labels.remove(k as usize);
+                    // Off every cell; the later ones a place back.
+                    for ws in app.session.workspaces.iter_mut() {
+                        for tb in ws.tabs.iter_mut() {
+                            if let Some(nb) = tb.notebook.as_mut() {
+                                for c in nb.cells.iter_mut() {
+                                    c.labels.retain(|x| *x != k);
+                                    for x in c.labels.iter_mut() {
+                                        if *x > k {
+                                            *x -= 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for r in app.rt.values_mut() {
+                        r.nb_labels.clear();
+                        r.nb_exclude.clear();
+                    }
+                    app.touch();
+                }
+                app.settings.labels = labels;
+                app.save_settings();
+            }
             // Only in the room left (cut short, never over the buttons).
             ui.add(egui::Label::new(RichText::new(t("Ctrl+Enter — выполнить блок · блок из одного WITH отдаёт свои CTE блокам ниже", "Ctrl+Enter: run the cell · a cell of a WITH alone lends its CTEs to the cells below")).weak().small()).truncate());
         });
@@ -115,10 +288,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     ui.add_space(4.0);
     let tab = app.tab().clone();
     let Some(nb) = tab.notebook.as_ref() else { return actions };
-    // The filter: what the cells hold, their labels.
-    let (nb_q, nb_labels) = app.rt.get(&tab.id).map_or((String::new(), Vec::new()), |r| (r.nb_query.trim().to_lowercase(), r.nb_labels.clone()));
-    let filtering = !nb_q.is_empty() || !nb_labels.is_empty();
-    let fits = |c: &crate::config::Cell| (nb_q.is_empty() || c.text.to_lowercase().contains(&nb_q)) && (nb_labels.is_empty() || c.labels.iter().any(|l| nb_labels.contains(l)));
+    // The filter: what the cells hold, their labels, when made.
+    let frt = app.rt.get(&tab.id).map(|r| crate::app::TabRt { nb_query: r.nb_query.clone(), nb_labels: r.nb_labels.clone(), nb_exclude: r.nb_exclude.clone(), nb_all: r.nb_all, nb_date: r.nb_date, nb_from: r.nb_from.clone(), nb_to: r.nb_to.clone(), ..Default::default() }).unwrap_or_default();
+    let filtering = filtering(&frt);
+    let nb_q = frt.nb_query.trim().to_lowercase();
+    let fits = |c: &crate::config::Cell| fits(&frt, c);
+    let labels = app.settings.labels.clone();
     let conn = app.tab_conn(app.ws(), &tab);
     let dialect = app.dialect_of(conn.as_deref());
     let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
@@ -198,25 +373,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                     ui.label(RichText::new(format!("[{}]", i + 1)).weak().small().monospace());
                     // Its labels (a click: the menu to set them) and when it was made.
-                    let r = ui
-                        .horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for &k in &cell.labels {
-                                label_dot(ui, k as usize, true, 10.0);
-                            }
-                            if cell.labels.is_empty() {
-                                label_dot(ui, usize::MAX, false, 10.0);
-                            }
-                        })
-                        .response
-                        .interact(egui::Sense::click())
-                        .on_hover_text(t("Метки блока", "The cell's labels"));
+                    // (The dots only draw; their row as a whole takes the click.)
+                    let shown = ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for &k in &cell.labels {
+                            label_dot(ui, color_of(&labels, k as usize), Dot::On, 11.0, egui::Sense::hover());
+                        }
+                        if cell.labels.is_empty() {
+                            label_dot(ui, None, Dot::Off, 11.0, egui::Sense::hover());
+                        }
+                    });
+                    let r = ui.interact(shown.response.rect.expand(2.0), ui.id().with(("cell-labels", &cell.id)), egui::Sense::click());
+                    if r.hovered() {
+                        ui.painter().rect_stroke(shown.response.rect.expand(2.0), 4.0, Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color), egui::StrokeKind::Inside);
+                    }
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "labels"));
+                    let r = r.on_hover_text(t("Метки блока", "The cell's labels"));
                     egui::Popup::menu(&r).show(|ui| {
-                        for k in 0..LABELS.len() {
+                        for k in 0..labels.len() {
                             let mut on = cell.labels.contains(&(k as u8));
                             ui.horizontal(|ui| {
-                                label_dot(ui, k, true, 12.0);
-                                if ui.checkbox(&mut on, label_name(k)).changed() {
+                                label_dot(ui, color_of(&labels, k), Dot::On, 12.0, egui::Sense::hover());
+                                if ui.checkbox(&mut on, label_name(&labels, k)).changed() {
                                     ops.push(Op::Label(i, k as u8));
                                 }
                             });
