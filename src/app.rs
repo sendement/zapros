@@ -230,6 +230,8 @@ pub struct App {
     applied: Option<(ThemePref, u32, String)>,
     /// The fonts as last put in.
     fonts_applied: Option<config::Fonts>,
+    /// The window's frame as last set (the desktop's title bar or not).
+    decorations: Option<bool>,
     pub about: bool,
     ctx: egui::Context,
     /// Connections started on their own once (not again after failing).
@@ -283,6 +285,7 @@ impl App {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = Self {
             fonts_applied,
+            decorations: None,
             settings,
             conns: config::load(&conns_path()),
             session,
@@ -1570,6 +1573,17 @@ impl eframe::App for App {
         }
         self.closing(&ctx);
         crate::icons::set_pack(&self.settings.icons);
+        // The title bar switched: the window's frame follows; without the
+        // desktop's, the window's edges resize it.
+        if self.decorations != Some(self.settings.system_titlebar) {
+            if self.decorations.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.settings.system_titlebar));
+            }
+            self.decorations = Some(self.settings.system_titlebar);
+        }
+        if !self.settings.system_titlebar {
+            crate::titlebar::resize_edges(&ctx);
+        }
         // The backdrop's gradient, under the panels (they leave it bare).
         crate::themes::set_gradient(self.settings.backdrop.on);
         if self.settings.backdrop.on {

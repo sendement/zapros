@@ -93,6 +93,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     // A cell being dragged by its grip, the one let go; where the cells are.
     let mut dragging: Option<usize> = None;
     let mut dropped: Option<usize> = None;
+    // (As of the drag's start: the cell and the pointer's height then.)
+    let lift_id = egui::Id::new(("nb-lift", &tab.id));
+    let lift: Option<(usize, f32)> = ctx.data(|d| d.get_temp(lift_id));
     let mut rects: Vec<egui::Rect> = Vec::new();
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         for (i, cell) in nb.cells.iter().enumerate() {
@@ -100,7 +103,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let key = App::cell_key(&tab.id, &cell.id);
             let focused = focus.as_deref() == Some(cell.id.as_str());
             let stroke = if focused { Stroke::new(1.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
-            let framed = egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
+            let mut draw = |ui: &mut egui::Ui| egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
@@ -114,12 +117,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         ui.painter().text(gr.center(), egui::Align2::CENTER_CENTER, "⠿", egui::FontId::proportional(14.0), gc);
                     }
                     let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(t("Тянуть — переставить блок", "Drag: move the cell"));
+                    if grip.drag_started() {
+                        if let Some(p) = ctx.pointer_interact_pos() {
+                            ctx.data_mut(|d| d.insert_temp(lift_id, (i, p.y)));
+                        }
+                    }
                     if grip.dragged() {
                         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                         dragging = Some(i);
                     }
                     if grip.drag_stopped() {
                         dropped = Some(i);
+                        ctx.data_mut(|d| d.remove::<(usize, f32)>(lift_id));
                     }
                     let fold = ui.add(egui::Button::new("").min_size(egui::vec2(24.0, 24.0)));
                     crate::ui::paint_chevron(ui.painter(), fold.rect.center(), 11.0, if cell.collapsed { 0.0 } else { 1.0 }, if fold.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
@@ -378,6 +387,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                 }
             });
+            // The cell being dragged: lifted onto a layer of its own, moved
+            // with the pointer (its place stays empty meanwhile).
+            let lifted = lift.filter(|(k, _)| *k == i);
+            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new(("nb-lifted", &tab.id)));
+            // (Drawn the same way lifted or not: its widgets keep their ids,
+            // the drag goes on.)
+            let on = if lifted.is_some() { layer } else { ui.layer_id() };
+            let f = ui.scope_builder(egui::UiBuilder::new().layer_id(on), |ui| draw(ui)).inner;
+            let framed = match lifted {
+                Some((_, y0)) => {
+                    let dy = ctx.pointer_interact_pos().map_or(0.0, |p| p.y - y0);
+                    // (Its edge first: the move takes what's on the layer so far.)
+                    let e = f.response.rect.shrink(0.5);
+                    ctx.layer_painter(layer).rect_stroke(e, RADIUS, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
+                    ctx.transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(egui::vec2(0.0, dy)));
+                    f
+                }
+                None => f,
+            };
             // The edge drawn twice: its rounded corners as strong as its
             // sides (a thin line's corners come out paler).
             let edge = framed.response.rect.shrink(0.5);

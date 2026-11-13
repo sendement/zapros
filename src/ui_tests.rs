@@ -1757,3 +1757,46 @@ fn notebook_cells_dragged_formatted_copied_timed() {
     assert!(ran, "the last run's time kept");
     shot(&mut h, "nb-timed");
 }
+
+#[test]
+fn workspace_tabs_dragged_and_own_title_bar() {
+    let (mut h, _g) = harness("wsdrag", SCRIPT, false);
+    let names = |h: &Harness<'static, App>| h.state().session.workspaces.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&h), ["Отчёты", "Миграции", "Прод"]);
+    let at = |h: &Harness<'static, App>, n: &str| {
+        let r = h.get_by_label(n).rect();
+        egui::pos2(((r.min.x + r.max.x) / 2.0) as f32, ((r.min.y + r.max.y) / 2.0) as f32)
+    };
+    let from = at(&h, "Отчёты");
+    let to = at(&h, "Прод") + egui::vec2(20.0, 0.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=12 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 12.0)));
+        h.step();
+    }
+    shot(&mut h, "ws-dragging");
+    h.input_mut().events.push(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    assert_eq!(names(&h), ["Миграции", "Прод", "Отчёты"]);
+    assert_eq!(h.state().ws().name, "Отчёты", "the dragged one stays the chosen one");
+    // The window's own title bar: its buttons at the row's end.
+    h.state_mut().settings.system_titlebar = false;
+    h.state_mut().settings.win_style = crate::titlebar::Style::Macos;
+    settle(&mut h);
+    assert!(h.query_by_label("Закрыть").is_some() || h.query_all_by_label_contains("Закрыть").count() > 0);
+    shot(&mut h, "own-titlebar");
+    h.state_mut().settings_open = true;
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
+    settle(&mut h);
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(300.0, 300.0)));
+    h.step();
+    for _ in 0..4 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -120.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    settle(&mut h);
+    shot(&mut h, "titlebar-settings");
+}

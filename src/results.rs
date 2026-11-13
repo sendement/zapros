@@ -249,9 +249,7 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
             ui.label(RichText::new(format!("{} / {} {}{state} · {}", v.order.len(), v.table.rows.len(), t("строк", "rows"), crate::app::fmt_took(v.took))).small().weak());
         });
     }
-    // A line under the bar, from where the table's rounding starts.
-    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
-    ui.painter().hline(egui::Rangef::new(line.left() + 6.0, line.right() - 6.0 - crate::ui::TABLE_BAR_ROOM), line.center().y, ui.visuals().widgets.noninteractive.bg_stroke);
+    ui.add_space(6.0);
     let mut goto = None;
     match rt.shown {
         Pane::Result(i) => {

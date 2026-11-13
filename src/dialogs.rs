@@ -430,6 +430,55 @@ fn font_pick(ui: &mut egui::Ui, id: &str, family: &mut String, mono: bool, defau
     });
 }
 
+/// The desktop's title bar, or the window's own: its buttons' look, order
+/// and side (as in Polka).
+fn titlebar_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
+    use crate::titlebar::{ORDERS, STYLES, preview};
+    ui.label(RichText::new(t("Заголовок окна", "Title bar")).strong());
+    ui.checkbox(&mut s.system_titlebar, t("Системный заголовок окна", "The desktop's title bar"))
+        .on_hover_text(t("Выключено: строка вкладок сама служит заголовком — тянуть за пустое место, двойной щелчок разворачивает, свои кнопки окна; края окна меняют размер", "Off: the tabs' row is the title bar — drag its empty room, double-click to maximize, the window's own buttons; the edges resize it"));
+    if s.system_titlebar {
+        return;
+    }
+    let order = ORDERS[s.win_order as usize % ORDERS.len()];
+    ui.label(RichText::new(t("Кнопки окна", "Window buttons")).weak());
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for st in STYLES {
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(132.0, 52.0), egui::Sense::click());
+            let v = ui.visuals();
+            let on = s.win_style == st;
+            ui.painter().rect_filled(rect, 8.0, if on { v.selection.bg_fill.gamma_multiply(0.5) } else { v.extreme_bg_color });
+            ui.painter().rect_stroke(rect, 8.0, if on { egui::Stroke::new(1.5, v.selection.stroke.color) } else { v.widgets.noninteractive.bg_stroke }, egui::StrokeKind::Inside);
+            preview(ui, st, &order, egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + 34.0)), 0.8);
+            ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, st.name(), egui::FontId::proportional(11.0), v.text_color());
+            if r.clicked() {
+                s.win_style = st;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(t("Сторона", "Side"));
+        ui.radio_value(&mut s.win_left, false, t("справа", "right"));
+        ui.radio_value(&mut s.win_left, true, t("слева", "left"));
+    });
+    ui.label(RichText::new(t("Порядок", "Order")).weak());
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for (k, o) in ORDERS.iter().enumerate() {
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(132.0, 36.0), egui::Sense::click());
+            let v = ui.visuals();
+            let on = s.win_order as usize % ORDERS.len() == k;
+            ui.painter().rect_filled(rect, 8.0, if on { v.selection.bg_fill.gamma_multiply(0.5) } else { v.extreme_bg_color });
+            ui.painter().rect_stroke(rect, 8.0, if on { egui::Stroke::new(1.5, v.selection.stroke.color) } else { v.widgets.noninteractive.bg_stroke }, egui::StrokeKind::Inside);
+            preview(ui, s.win_style, o, rect, 0.8);
+            if r.clicked() {
+                s.win_order = k as u8;
+            }
+        }
+    });
+}
+
 /// The fonts of the interface, the code and the tables, with their sizes.
 fn fonts_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
     ui.label(RichText::new(t("Шрифты", "Fonts")).strong());
@@ -551,6 +600,8 @@ fn look(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
         }
     });
     ui.checkbox(&mut s.icon_colors, t("Значки дерева в цветах палитры (таблицы, функции, триггеры…)", "Tree icons in the palette's colours (tables, functions, triggers…)"));
+    ui.separator();
+    titlebar_ui(ui, s);
     ui.separator();
     fonts_ui(ui, s);
     ui.separator();

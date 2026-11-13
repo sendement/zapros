@@ -19,6 +19,7 @@ mod outline_ui;
 mod results;
 mod sched;
 mod themes;
+mod titlebar;
 mod secrets;
 mod side;
 mod sql;
@@ -27,8 +28,10 @@ mod ui;
 mod ui_tests;
 
 fn main() -> eframe::Result {
+    // The desktop's title bar, or the window's own (a setting).
+    let settings: config::Settings = config::load(&config::config_dir().join("settings.json"));
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("zapros").with_app_id("zapros").with_inner_size([1400.0, 900.0]).with_min_inner_size([700.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_title("zapros").with_app_id("zapros").with_inner_size([1400.0, 900.0]).with_min_inner_size([700.0, 400.0]).with_decorations(settings.system_titlebar),
         // No waiting for the display in eglSwapBuffers: on Wayland a window
         // the compositor doesn't show (another workspace or screen, behind a
         // full-screen one) gets no frame callbacks, so the wait never ended

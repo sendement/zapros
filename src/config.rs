@@ -170,6 +170,13 @@ pub struct Settings {
     /// Fonts of the interface and of the tables (the code's: `code_font`,
     /// its size `font_size`).
     pub fonts: Fonts,
+    /// The desktop's title bar on the window; else the tabs' row is it,
+    /// with the window's own buttons (look, order — one of
+    /// titlebar::ORDERS — and side).
+    pub system_titlebar: bool,
+    pub win_style: crate::titlebar::Style,
+    pub win_order: u8,
+    pub win_left: bool,
 }
 
 /// Font families by name as fontconfig knows them ("" — the system's
@@ -224,6 +231,10 @@ impl Default for Settings {
             icons: "lucide".into(),
             icon_colors: true,
             fonts: Fonts::default(),
+            system_titlebar: true,
+            win_style: crate::titlebar::Style::Auto,
+            win_order: 0,
+            win_left: false,
         }
     }
 }

@@ -312,7 +312,8 @@ fn foot(painter: &egui::Painter, corner: Pos2, c: Pos2, a0: f32, a1: f32, color:
 
 /// The workspaces as tabs over the sheet; the active one's outline (in its
 /// colour) runs on into the sheet's.
-fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
+/// `reserve`: room kept at the row's left and right (the window's buttons).
+fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect, reserve: (f32, f32)) {
     let v = ui.visuals().clone();
     let font = FontId::proportional(14.0);
     let small = FontId::proportional(11.5);
@@ -324,8 +325,8 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
     // feet keep clear of the edges).
     let plus_w = ROW_H - 6.0;
     let gap = 4.0;
-    let lo = sheet.left() + TABS_FROM;
-    let hi = sheet.right() - SHEET_R - FILLET - plus_w - 6.0 - gap;
+    let lo = sheet.left() + TABS_FROM + reserve.0;
+    let hi = sheet.right() - SHEET_R - FILLET - plus_w - 6.0 - gap - reserve.1;
     let painter0 = ui.painter().clone();
     let extras: Vec<f32> = (0..n).map(|i| 30.0 + painter0.layout_no_wrap(counts[i].clone(), small.clone(), v.text_color()).size().x + if running[i] { 18.0 } else { 0.0 }).collect();
     let extra = |i: usize| extras[i];
@@ -350,12 +351,29 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
         x += w + gap;
     }
     let mut close: Option<usize> = None;
+    let mut ws_drag: Option<(usize, usize)> = None;
     let mut active_rect = None;
     let mut active_text = Vec::new();
     for i in 0..n {
         let rect = rects[i];
         let color = rgb(app.session.workspaces[i].color);
-        let r = ui.interact(rect, ui.id().with(("ws-tab", i)), egui::Sense::click());
+        // (By the workspace's id, not its place: a drag goes on after a swap.)
+        let r = ui.interact(rect, ui.id().with(("ws-tab", &app.session.workspaces[i].id)), egui::Sense::click_and_drag());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &names[i]));
+        // Dragged: a copy under the pointer; past a neighbour's middle, the
+        // two change places.
+        if r.dragged() {
+            if let Some(p) = ui.ctx().pointer_interact_pos() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                if i + 1 < n && p.x > rects[i + 1].center().x {
+                    ws_drag = Some((i, i + 1));
+                } else if i > 0 && p.x < rects[i - 1].center().x {
+                    ws_drag = Some((i, i - 1));
+                }
+                let ghost = Rect::from_center_size(Pos2::new(p.x, rect.center().y - 2.0), Vec2::new(rect.width(), rect.height() - 8.0));
+                tab_ghost(ui.ctx(), ghost, &names[i], rgb(app.session.workspaces[i].color));
+            }
+        }
         let is_active = i == active;
         // Not chosen: a rounded box clear of the sheet's edge.
         let body = if is_active { rect } else { Rect::from_min_max(rect.min + Vec2::new(0.0, IDLE_TOP), rect.max - Vec2::new(0.0, IDLE_GAP)) };
@@ -448,6 +466,15 @@ fn workspaces(app: &mut App, ui: &mut egui::Ui, row: Rect, sheet: Rect) {
         app.ws_edit = Some(app.session.active);
         app.touch();
     }
+    if let Some((a, b)) = ws_drag {
+        app.session.workspaces.swap(a, b);
+        if app.session.active == a {
+            app.session.active = b;
+        } else if app.session.active == b {
+            app.session.active = a;
+        }
+        app.touch();
+    }
     if let Some(i) = close {
         let ids: Vec<String> = app.session.workspaces[i].tabs.iter().map(|t| t.id.clone()).collect();
         for id in ids {
@@ -506,7 +533,8 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                     let path = tab.path.clone();
                     let title = tab_title(tab);
                     let fr = egui::Frame::NONE.fill(fill).corner_radius(RADIUS).inner_margin(egui::Margin { left: 9, right: 5, top: 2, bottom: 2 }).stroke(stroke);
-                    let shown = fr
+                    // (Its id by the tab's, not its place: a drag goes on after a swap.)
+                    let shown = ui.push_id(("script-tab", &id), |ui| fr
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 if let Some(c) = conn_color {
@@ -535,7 +563,7 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                                 (lr, x)
                             })
                             .inner
-                        });
+                        })).inner;
                     tab_h = shown.response.rect.height();
                     let now_hovered = ui.rect_contains_pointer(shown.response.rect);
                     if now_hovered != hovered {
@@ -556,6 +584,10 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if lr.dragged() {
                         if let Some(p) = ui.ctx().pointer_interact_pos() {
+                            // A copy of the tab under the pointer.
+                            let r = shown.response.rect;
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            tab_ghost(ui.ctx(), Rect::from_center_size(Pos2::new(p.x, r.center().y), r.size()), &tab_title(&app.ws().tabs[i]), if active { color } else { v.text_color() });
                             let dx = p.x - lr.rect.center().x;
                             if dx > lr.rect.width() * 0.6 && i + 1 < n {
                                 drag = Some((i, i + 1));
@@ -898,7 +930,28 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
             ui.ctx().request_repaint();
         }
-        workspaces(app, ui, row, sheet);
+        // The window's own title bar: its buttons at the row's end (or
+        // start), the row's empty room drags it, a double click maximizes.
+        let own = !app.settings.system_titlebar;
+        let look = crate::titlebar::Look::of(&app.settings);
+        let win_w = if own { crate::titlebar::buttons_width(look.style) } else { 0.0 };
+        let reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
+        if own {
+            let drag = ui.interact(row, ui.id().with("title-drag"), egui::Sense::click_and_drag());
+            if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if drag.double_clicked() {
+                crate::titlebar::toggle_maximized(ui.ctx());
+            }
+        }
+        workspaces(app, ui, row, sheet, reserve);
+        if own {
+            let x = if look.left { sheet.left() + 4.0 } else { row.right() - win_w + 6.0 };
+            if let Some(b) = crate::titlebar::buttons(ui, look, x, row.center().y - 2.0) {
+                crate::titlebar::press(ui.ctx(), b);
+            }
+        }
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(sheet.shrink2(Vec2::new(8.0, 7.0))).layout(egui::Layout::top_down(egui::Align::Min)));
         let ui = &mut ui;
         ui.set_clip_rect(sheet.shrink(1.0));
@@ -927,17 +980,25 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
         let full = ui.available_height();
         let h = if app.results_max { full - 60.0 } else { app.session.results_height.clamp(80.0, (full - 80.0).max(80.0)) };
-        let r = egui::Panel::bottom("results").frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 0 })).resizable(!app.results_max).default_size(h).size_range(60.0..=(full - 60.0).max(61.0)).show(ui, |ui| crate::results::panel(app, ui));
+        // (No line at its edge, none under the pointer either: egui takes
+        // that from the parent's hovered / active strokes, hidden meanwhile.)
+        let own = ui.style().clone();
+        {
+            let w = &mut ui.style_mut().visuals.widgets;
+            w.hovered.fg_stroke = Stroke::NONE;
+            w.active.fg_stroke = Stroke::NONE;
+        }
+        let inner = own.clone();
+        let r = egui::Panel::bottom("results").frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 0 })).show_separator_line(false).resizable(!app.results_max).default_size(h).size_range(60.0..=(full - 60.0).max(61.0)).show(ui, |ui| {
+            ui.set_style(inner);
+            crate::results::panel(app, ui)
+        });
+        ui.set_style(own);
         let got = r.response.rect.height();
         if !app.results_max && (got - app.session.results_height).abs() > 1.0 {
             app.session.results_height = got;
             app.touch();
         }
-        // The line over the results: from where the grounds' roundings start
-        // (as in a notebook).
-        let top = ui.cursor().top();
-        let lr = ui.max_rect();
-        ui.painter().hline(egui::Rangef::new(lr.left() + 6.0, lr.right() - 6.0 - TABLE_BAR_ROOM), top - 2.0, ui.visuals().widgets.noninteractive.bg_stroke);
         if app.session.outline {
             let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
             let r = egui::Panel::right("outline")
@@ -998,6 +1059,18 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         app.rt.insert(tab_id, rt);
     });
     actions
+}
+
+/// A tab being dragged: its look, half see-through, over everything.
+fn tab_ghost(ctx: &egui::Context, rect: Rect, title: &str, color: Color32) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tab-ghost")));
+    let v = ctx.global_style().visuals.clone();
+    p.rect_filled(rect, TAB_R, v.panel_fill.gamma_multiply(0.92));
+    p.rect_filled(rect, TAB_R, color.gamma_multiply(0.22));
+    p.rect_stroke(rect, TAB_R, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    let font = FontId::proportional(14.0);
+    let g = p.layout(title.to_string(), font, v.strong_text_color(), rect.width() - 16.0);
+    p.galley(Pos2::new(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, v.strong_text_color());
 }
 
 /// A tab's ✕: thin strokes on a round ground under the pointer.
