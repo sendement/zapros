@@ -286,6 +286,44 @@ impl Session for Ch {
         }
     }
 
+    fn find_objects(&mut self, q: &str) -> Res<Vec<Found>> {
+        let mut out = Vec::new();
+        for r in self.rows(&format!("SELECT database, name, engine FROM system.tables WHERE positionCaseInsensitive(name, {}) > 0 AND database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND NOT is_temporary ORDER BY database, name LIMIT 500", literal(q)))? {
+            let (folder, kind) = match r[2].as_str() {
+                "View" => ("views", ObjKind::View),
+                "MaterializedView" => ("matviews", ObjKind::MatView),
+                "Dictionary" => ("dictionaries", ObjKind::Dictionary),
+                _ => ("tables", ObjKind::Table),
+            };
+            out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: Vec::new() });
+        }
+        for r in self.rows(&format!("SELECT name FROM system.functions WHERE origin = 'SQLUserDefined' AND positionCaseInsensitive(name, {}) > 0", literal(q)))? {
+            out.push(Found { path: vec!["functions".into(), r[0].clone()], kind: ObjKind::Function, schema: String::new(), name: r[0].clone(), lines: Vec::new() });
+        }
+        Ok(out)
+    }
+
+    fn search_code(&mut self, q: &str) -> Res<Vec<Found>> {
+        let mut out = Vec::new();
+        for r in self.rows(&format!(
+            "SELECT database, name, engine, create_table_query FROM system.tables WHERE engine IN ('View', 'MaterializedView', 'Dictionary', 'LiveView', 'WindowView') AND positionCaseInsensitive(create_table_query, {}) > 0 AND database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY database, name LIMIT 300",
+            literal(q)
+        ))? {
+            let (folder, kind) = match r[2].as_str() {
+                "MaterializedView" => ("matviews", ObjKind::MatView),
+                "Dictionary" => ("dictionaries", ObjKind::Dictionary),
+                _ => ("views", ObjKind::View),
+            };
+            // (One line as stored: laid out for the snippet.)
+            let text = crate::sql::fmt::format(&r[3], crate::sql::Dialect::ClickHouse, crate::sql::fmt::Options { one_line: 0, ..Default::default() });
+            out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: lines_with(&text, q, 3) });
+        }
+        for r in self.rows(&format!("SELECT name, create_query FROM system.functions WHERE origin = 'SQLUserDefined' AND positionCaseInsensitive(create_query, {}) > 0", literal(q)))? {
+            out.push(Found { path: vec!["functions".into(), r[0].clone()], kind: ObjKind::Function, schema: String::new(), name: r[0].clone(), lines: lines_with(&r[1], q, 3) });
+        }
+        Ok(out)
+    }
+
     fn locate(&mut self, schema: Option<&str>, name: &str, call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
         if call {
             let f = self.rows(&format!("SELECT name FROM system.functions WHERE origin = 'SQLUserDefined' AND name = {}", literal(name)))?;

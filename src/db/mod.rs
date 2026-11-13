@@ -354,6 +354,16 @@ pub trait Session: Send {
     fn locate(&mut self, _schema: Option<&str>, _name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
         Ok(None)
     }
+    /// Objects whose names hold `q` (any case), every schema the session
+    /// sees but the system's.
+    fn find_objects(&mut self, _q: &str) -> Res<Vec<Found>> {
+        Ok(Vec::new())
+    }
+    /// Objects whose code holds `q` (views, functions, procedures,
+    /// packages, triggers…), with the lines it's on.
+    fn search_code(&mut self, _q: &str) -> Res<Vec<Found>> {
+        Ok(Vec::new())
+    }
     /// Tables and their columns of the schemas given (empty: the current).
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>>;
     /// Stops what `run` is doing, from another thread.
@@ -424,6 +434,72 @@ pub fn open(spec: &Spec, password: &str) -> Res<Box<dyn Session>> {
     }
 }
 
+/// An object found by a search: where it is in the tree, and (a code
+/// search) the lines that hold what was looked for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    pub path: Vec<String>,
+    pub kind: ObjKind,
+    pub schema: String,
+    pub name: String,
+    /// (Line number from 1, its text.)
+    pub lines: Vec<(usize, String)>,
+}
+
+/// The lines of `text` holding `q` (any case): at most `n`, with their
+/// numbers.
+pub fn lines_with(text: &str, q: &str, n: usize) -> Vec<(usize, String)> {
+    let ql = q.to_lowercase();
+    text.lines().enumerate().filter(|(_, l)| l.to_lowercase().contains(&ql)).take(n).map(|(i, l)| (i + 1, around(l.trim(), q))).collect()
+}
+
+/// A long line cut to a stretch round the first `q` in it (… at the cuts).
+pub fn around(line: &str, q: &str) -> String {
+    around_n(line, q, 90)
+}
+
+/// As [`around`], at most `max` chars (the match about a third in).
+pub fn around_n(line: &str, q: &str, max: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= max {
+        return line.to_string();
+    }
+    let low: String = line.to_lowercase();
+    // (Char index of the match; lower case may shift bytes: count chars.)
+    let at = low.find(&q.to_lowercase()).map_or(0, |b| low[..b].chars().count());
+    let before = max / 3;
+    let from = at.saturating_sub(before).min(chars.len().saturating_sub(max));
+    let to = (from + max).min(chars.len());
+    let mut s = String::new();
+    if from > 0 {
+        s.push('…');
+    }
+    s.extend(&chars[from..to]);
+    if to < chars.len() {
+        s.push('…');
+    }
+    s
+}
+
+/// A tree folder and kind for a kind's name as the databases call it.
+pub fn folder_of(kind: &str) -> Option<(&'static str, ObjKind)> {
+    Some(match kind.to_ascii_uppercase().as_str() {
+        "TABLE" | "R" | "P" | "F" | "BASE TABLE" => ("tables", ObjKind::Table),
+        "VIEW" | "V" => ("views", ObjKind::View),
+        "MATERIALIZED VIEW" | "M" | "MATERIALIZEDVIEW" => ("matviews", ObjKind::MatView),
+        "FUNCTION" => ("functions", ObjKind::Function),
+        "PROCEDURE" => ("procedures", ObjKind::Procedure),
+        "PACKAGE" | "PACKAGE BODY" => ("packages", ObjKind::Package),
+        "SEQUENCE" | "S" => ("sequences", ObjKind::Sequence),
+        "TRIGGER" => ("triggers", ObjKind::Trigger),
+        "TYPE" | "TYPE BODY" => ("types", ObjKind::Type),
+        "DICTIONARY" => ("dictionaries", ObjKind::Dictionary),
+        "JOB" => ("jobs", ObjKind::Job),
+        "INDEX" => ("indexes", ObjKind::Index),
+        _ => return None,
+    })
+}
+
 /// What a worker is asked.
 pub enum Req {
     Connect,
@@ -443,6 +519,8 @@ pub enum Req {
     Describe { key: String, path: Vec<String>, kind: ObjKind },
     /// Where a name in the code leads (Ctrl+click).
     Locate { schema: Option<String>, name: String, call: bool },
+    /// Objects by name (`code`: false) or by what their code holds.
+    Search { q: String, code: bool },
     /// A designer's statements, one after another (stops at a failure).
     Apply { key: String, stmts: Vec<String> },
     Relations { schemas: Vec<String> },
@@ -494,6 +572,7 @@ pub enum What {
     Source { path: Vec<String>, open_as: String, into: Option<String>, text: Result<String, String> },
     Described { key: String, def: Result<crate::design::ObjDef, String> },
     Located { name: String, found: Result<Option<(Vec<String>, ObjKind)>, String> },
+    Searched { q: String, code: bool, found: Result<Vec<Found>, String> },
     /// How many ran, or the failure (with the statement).
     Applied { key: String, result: Result<usize, String> },
     Relations(Result<Vec<Relation>, String>),
@@ -740,6 +819,15 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                     session = None;
                 }
                 tell(What::Described { key, def: def.map_err(|f| f.message) });
+            }
+            Req::Search { q, code } => {
+                let found = if ensure(&mut session) {
+                    let s = session.as_mut().unwrap();
+                    if code { s.search_code(&q) } else { s.find_objects(&q) }
+                } else {
+                    Err(Failure::new("no connection"))
+                };
+                tell(What::Searched { q, code, found: found.map_err(|f| f.message) });
             }
             Req::Locate { schema, name, call } => {
                 let found = if ensure(&mut session) { session.as_mut().unwrap().locate(schema.as_deref(), &name, call) } else { Err(Failure::new("no connection")) };

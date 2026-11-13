@@ -53,6 +53,26 @@ impl Lite {
     }
 }
 
+impl Lite {
+    /// Objects of sqlite_master matching `cond` (?1: what's looked for).
+    fn master_hits(&self, cond: &str, q: &str) -> Res<Vec<Found>> {
+        Ok(self
+            .rows(&format!("SELECT name, type FROM sqlite_master WHERE {cond} AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 500"), &[q])?
+            .into_iter()
+            .filter_map(|r| {
+                let (folder, kind) = match r[1].as_str() {
+                    "table" => ("tables", ObjKind::Table),
+                    "view" => ("views", ObjKind::View),
+                    "index" => ("indexes", ObjKind::Index),
+                    "trigger" => ("triggers", ObjKind::Trigger),
+                    _ => return None,
+                };
+                Some(Found { path: vec![folder.into(), r[0].clone()], kind, schema: String::new(), name: r[0].clone(), lines: Vec::new() })
+            })
+            .collect())
+    }
+}
+
 impl Session for Lite {
     fn run(&mut self, sql: &str, fetch: &mut Fetch, _notes: &mut dyn FnMut(String)) -> Res<Outcome> {
         let mut st = self.conn.prepare(sql).map_err(fail)?;
@@ -103,6 +123,19 @@ impl Session for Lite {
         let name = path.last().ok_or_else(|| Failure::new("nothing to show"))?;
         let r = self.rows("SELECT sql FROM sqlite_master WHERE name = ?1", &[name])?;
         Ok(r.into_iter().next().and_then(|r| r.into_iter().next()).map(|s| s + ";\n").unwrap_or_default())
+    }
+
+    fn find_objects(&mut self, q: &str) -> Res<Vec<Found>> {
+        self.master_hits("instr(lower(name), lower(?1)) > 0", q)
+    }
+
+    fn search_code(&mut self, q: &str) -> Res<Vec<Found>> {
+        let mut v = self.master_hits("type IN ('view', 'trigger') AND instr(lower(sql), lower(?1)) > 0", q)?;
+        for f in v.iter_mut() {
+            let sql = self.rows("SELECT sql FROM sqlite_master WHERE name = ?1", &[&f.name])?.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default();
+            f.lines = lines_with(&sql, q, 3);
+        }
+        Ok(v)
     }
 
     fn locate(&mut self, _schema: Option<&str>, name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {

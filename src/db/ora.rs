@@ -309,6 +309,55 @@ impl Session for Ora {
         Ok(text + "\n")
     }
 
+    fn find_objects(&mut self, q: &str) -> Res<Vec<Found>> {
+        let rows = self.rows(
+            "SELECT owner, object_name, object_type FROM all_objects
+              WHERE INSTR(UPPER(object_name), UPPER(:1)) > 0
+                AND object_type IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'FUNCTION', 'PROCEDURE', 'PACKAGE', 'SEQUENCE', 'TRIGGER', 'TYPE', 'JOB', 'SYNONYM')
+                AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')
+                AND ROWNUM <= 500
+              ORDER BY owner, object_name",
+            &[&q],
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let (folder, kind) = if r[2] == "SYNONYM" { ("synonyms", ObjKind::Synonym) } else { folder_of(&r[2])? };
+                Some(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: Vec::new() })
+            })
+            .collect())
+    }
+
+    fn search_code(&mut self, q: &str) -> Res<Vec<Found>> {
+        let mut out: Vec<Found> = Vec::new();
+        // PL/SQL: line by line in ALL_SOURCE (each unit once, its lines).
+        let rows = self.rows(
+            "SELECT owner, name, type, line, text FROM all_source
+              WHERE INSTR(UPPER(text), UPPER(:1)) > 0
+                AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')
+                AND ROWNUM <= 3000
+              ORDER BY owner, name, type, line",
+            &[&q],
+        )?;
+        for r in rows {
+            let Some((folder, kind)) = folder_of(&r[2]) else { continue };
+            let line = (r[3].parse().unwrap_or(0), around(r[4].trim(), q));
+            match out.iter_mut().find(|f| f.schema == r[0] && f.name == r[1] && f.kind == kind) {
+                Some(f) if f.lines.len() < 3 => f.lines.push(line),
+                Some(_) => {}
+                None => out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: vec![line] }),
+            }
+        }
+        // Views (their first 4000 chars), jobs' actions.
+        for r in self.rows("SELECT owner, view_name, text_vc FROM all_views WHERE INSTR(UPPER(text_vc), UPPER(:1)) > 0 AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N') AND ROWNUM <= 300", &[&q])? {
+            out.push(Found { path: vec![r[0].clone(), "views".into(), r[1].clone()], kind: ObjKind::View, schema: r[0].clone(), name: r[1].clone(), lines: lines_with(&r[2], q, 3) });
+        }
+        for r in self.rows("SELECT owner, job_name, job_action FROM all_scheduler_jobs WHERE INSTR(UPPER(job_action), UPPER(:1)) > 0 AND owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N') AND ROWNUM <= 200", &[&q])? {
+            out.push(Found { path: vec![r[0].clone(), "jobs".into(), r[1].clone()], kind: ObjKind::Job, schema: r[0].clone(), name: r[1].clone(), lines: lines_with(&r[2], q, 3) });
+        }
+        Ok(out)
+    }
+
     fn locate(&mut self, schema: Option<&str>, name: &str, _call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
         let pick = |rows: Vec<Vec<String>>| -> Option<(Vec<String>, ObjKind)> {
             let r = rows.into_iter().next()?;

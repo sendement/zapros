@@ -80,6 +80,13 @@ pub struct EditorState {
     pub cursor: Option<(usize, usize)>,
     /// Put the cursor here (bytes) next frame and focus.
     pub goto: Option<usize>,
+    /// Pick this (bytes) next frame, focus, and scroll it into sight.
+    pub select: Option<(usize, usize)>,
+    /// A pick waiting to be scrolled to (once laid out).
+    scroll_to: Option<(usize, usize)>,
+    /// What a search found here (lit under the text), and the one it's on.
+    pub marks: Vec<Range<usize>>,
+    pub mark_now: Option<Range<usize>>,
     pub focus: bool,
     /// A block (column) selection, made with Alt and the mouse.
     pub block: Option<crate::block::Block>,
@@ -687,6 +694,12 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         set_cursor(&ctx, id, text, g, g);
         ctx.memory_mut(|m| m.request_focus(id));
     }
+    if let Some((a, b)) = st.select.take() {
+        let (a, b) = (floor(text, a.min(text.len())), floor(text, b.min(text.len())));
+        set_cursor(&ctx, id, text, a, b);
+        ctx.memory_mut(|m| m.request_focus(id));
+        st.scroll_to = Some((a, b));
+    }
     if std::mem::take(&mut st.focus) {
         ctx.memory_mut(|m| m.request_focus(id));
     }
@@ -1165,6 +1178,35 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let gp = output.galley_pos.to_vec2();
         if !st.bands.is_empty() {
             shapes.push(egui::Shape::mesh(band_mesh(text, &st.bands, &output.galley, output.galley_pos, clip, ctx.pixels_per_point())));
+        }
+        // What a search found: lit (the one it's on, more).
+        if !st.marks.is_empty() {
+            let rect_of = |r: &Range<usize>| {
+                let a = output.galley.pos_from_cursor(CCursor::new(char_of(text, r.start.min(text.len())))).translate(gp);
+                let b = output.galley.pos_from_cursor(CCursor::new(char_of(text, r.end.min(text.len())))).translate(gp);
+                egui::Rect::from_min_max(a.min, egui::pos2(b.max.x.max(a.min.x + 2.0), a.max.y))
+            };
+            let base = Color32::from_rgb(250, 200, 60);
+            for r in &st.marks {
+                if r.end > text.len() || r.start >= r.end {
+                    continue;
+                }
+                let rect = rect_of(r);
+                if !rect.intersects(clip) {
+                    continue;
+                }
+                let now = st.mark_now.as_ref() == Some(r);
+                shapes.push(egui::Shape::rect_filled(rect.expand2(egui::vec2(1.0, 0.0)), 2.0, base.gamma_multiply(if now { 0.55 } else { 0.22 })));
+                if now {
+                    shapes.push(egui::Shape::rect_stroke(rect.expand2(egui::vec2(1.0, 0.0)), 2.0, Stroke::new(1.0, base), egui::StrokeKind::Outside));
+                }
+            }
+        }
+        // A pick asked for: scrolled into sight.
+        if let Some((a, b)) = st.scroll_to.take() {
+            let p = output.galley.pos_from_cursor(CCursor::new(char_of(text, a))).translate(gp);
+            let q = output.galley.pos_from_cursor(CCursor::new(char_of(text, b))).translate(gp);
+            ui.scroll_to_rect(p.union(q).expand(20.0), Some(egui::Align::Center));
         }
         let has_focus = ctx.memory(|m| m.has_focus(id));
         let sel = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));

@@ -310,11 +310,49 @@ pub struct Cell {
     pub collapsed: bool,
     /// Its output's height (0: the usual).
     pub out_h: f32,
+    /// When it was made (local "YYYY-MM-DD HH:MM"; "" — before there was
+    /// such a thing).
+    #[serde(default)]
+    pub created: String,
+    /// Its colour labels (indexes into LABELS).
+    pub labels: Vec<u8>,
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), kind: CellKind::Sql, text: String::new(), saved: None, collapsed: false, out_h: 0.0 }
+        Self { id: crate::db::new_id(), kind: CellKind::Sql, text: String::new(), saved: None, collapsed: false, out_h: 0.0, created: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(), labels: Vec::new() }
+    }
+}
+
+/// The cells' colour labels: colour and name.
+pub const LABELS: [(Rgb, &str, &str); 8] = [
+    ([229, 57, 53], "Красная", "Red"),
+    ([239, 108, 0], "Оранжевая", "Orange"),
+    ([253, 216, 53], "Жёлтая", "Yellow"),
+    ([76, 175, 80], "Зелёная", "Green"),
+    ([0, 172, 193], "Бирюзовая", "Teal"),
+    ([92, 140, 230], "Синяя", "Blue"),
+    ([171, 71, 188], "Фиолетовая", "Purple"),
+    ([120, 144, 156], "Серая", "Grey"),
+];
+
+/// Which schemas / databases a connection's tree shows: all but those
+/// named (`only` false), or only those.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchemaFilter {
+    pub only: bool,
+    pub names: Vec<String>,
+}
+
+impl SchemaFilter {
+    pub fn shows(&self, name: &str) -> bool {
+        let named = self.names.iter().any(|n| n == name);
+        if self.only { named } else { !named }
+    }
+
+    pub fn active(&self) -> bool {
+        self.only || !self.names.is_empty()
     }
 }
 
@@ -351,7 +389,7 @@ impl Notebook {
             .map(|p| {
                 let kind = if p.kind == Kind::Markdown { CellKind::Markdown } else { CellKind::Sql };
                 let was = old.iter().find(|c| c.kind == kind && c.text == p.text);
-                Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), collapsed: was.is_some_and(|c| c.collapsed), out_h: was.map_or(0.0, |c| c.out_h), text: p.text }
+                Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), collapsed: was.is_some_and(|c| c.collapsed), out_h: was.map_or(0.0, |c| c.out_h), created: was.map_or_else(|| Cell::default().created, |c| c.created.clone()), labels: was.map(|c| c.labels.clone()).unwrap_or_default(), text: p.text }
             })
             .collect();
         Self { on: true, cells }
@@ -487,11 +525,13 @@ pub struct Session {
     /// The structure panel beside the editor.
     pub outline: bool,
     pub outline_width: f32,
+    /// Per connection: the schemas its tree shows.
+    pub schema_filters: std::collections::BTreeMap<String, SchemaFilter>,
 }
 
 impl Default for Session {
     fn default() -> Self {
-        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, outline: true, outline_width: 250.0 }
+        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, outline: true, outline_width: 250.0, schema_filters: Default::default() }
     }
 }
 

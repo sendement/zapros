@@ -107,7 +107,9 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("➕").on_hover_text(t("Новое подключение", "New connection")).clicked() {
             app.conn_edit = Some(crate::dialogs::ConnEdit::new(None));
         }
-        ui.add(egui::TextEdit::singleline(&mut app.tree_filter).hint_text(t("🔎 фильтр объектов", "🔎 filter objects")).desired_width(ui.available_width()));
+        schemas_button(app, ui);
+        ui.add(egui::TextEdit::singleline(&mut app.tree_filter).hint_text(t("🔎 поиск объектов в базах", "🔎 find objects in the databases")).desired_width(ui.available_width()))
+            .on_hover_text(t("От двух букв — поиск по всей базе (во всех схемах, кроме скрытых), а не только по раскрытому", "Two letters or more: the whole database is searched (every schema shown), not just what's open"));
     });
     egui::ScrollArea::both().id_salt("db-tree").auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
@@ -193,8 +195,15 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
                     ui.close();
                 }
             });
-            if open {
-                ui.indent(("conn", &spec.id), |ui| children(app, ui, &spec.id, spec.kind, Vec::new()));
+            // (Searching: what it found shows, open or not.)
+            if open || (!app.tree_search.q.is_empty() && app.tree_search.hits.contains_key(&spec.id)) {
+                ui.indent(("conn", &spec.id), |ui| {
+                    if app.tree_search.q.is_empty() {
+                        children(app, ui, &spec.id, spec.kind, Vec::new())
+                    } else {
+                        found(app, ui, &spec.id)
+                    }
+                });
             }
         }
     });
@@ -228,6 +237,126 @@ fn file_icon(ui: &mut egui::Ui, ic: crate::icons::Ic, glyph: &str, c: Color32) {
             ui.label(RichText::new(glyph).color(c));
         }
     }
+}
+
+/// What the search of the database by name found on this connection:
+/// a row each (by schema); double-click — its code, Ctrl+click — beside
+/// (a table or a job: its designer).
+fn found(app: &mut App, ui: &mut egui::Ui, conn: &str) {
+    let hits = match app.tree_search.hits.get(conn) {
+        None => {
+            ui.label(RichText::new(t("не подключено — поиск по базе после подключения", "not connected: the search comes once connected")).weak().small());
+            return;
+        }
+        Some(None) => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(RichText::new(t("ищу…", "searching…")).weak());
+            });
+            return;
+        }
+        Some(Some(Err(e))) => {
+            ui.colored_label(Color32::from_rgb(230, 80, 80), crate::app::head(e, 160));
+            return;
+        }
+        Some(Some(Ok(v))) => v.clone(),
+    };
+    let shown = app.session.schema_filters.get(conn).cloned().unwrap_or_default();
+    let hits: Vec<_> = hits.into_iter().filter(|f| f.schema.is_empty() || shown.shows(&f.schema)).collect();
+    if hits.is_empty() {
+        ui.label(RichText::new(t("ничего не нашлось", "nothing found")).weak().small());
+        return;
+    }
+    let mut last_schema = None;
+    for f in hits {
+        if !f.schema.is_empty() && last_schema.as_deref() != Some(f.schema.as_str()) {
+            ui.label(RichText::new(&f.schema).small().weak());
+            last_schema = Some(f.schema.clone());
+        }
+        let r = ui
+            .horizontal(|ui| {
+                ui.add_space(8.0);
+                kind_icon(app, ui, f.kind);
+                ui.add(egui::Label::new(&f.name).sense(egui::Sense::click()).selectable(false))
+            })
+            .inner;
+        let title = f.name.split('(').next().unwrap_or(&f.name).to_string();
+        let ctrl = r.clicked() && ui.input(|i| i.modifiers.command);
+        if ctrl {
+            match f.kind {
+                ObjKind::Table | ObjKind::Job => app.open_object(conn, f.path.clone(), f.kind, title.clone()),
+                k => app.open_source_next(conn, f.path.clone(), k, title.clone()),
+            }
+        } else if r.double_clicked() && f.kind.has_source() {
+            app.open_source_next(conn, f.path.clone(), f.kind, title.clone());
+        }
+        r.on_hover_text(t("Двойной щелчок — код, Ctrl+щелчок — во вкладке рядом", "Double-click: code; Ctrl+click: in a tab beside"));
+    }
+}
+
+/// The schemas / databases each connection's tree shows: all but those
+/// ticked off, or only those picked.
+fn schemas_button(app: &mut App, ui: &mut egui::Ui) {
+    let any = app.session.schema_filters.values().any(|f| f.active());
+    let c = if any { ui.visuals().hyperlink_color } else { ui.visuals().text_color() };
+    let b = match crate::icons::image(crate::icons::Ic::Filter, 15.0, c) {
+        Some(img) => egui::Button::image(img),
+        None => egui::Button::new(RichText::new("⛃").color(c)),
+    };
+    let tip = t("Какие схемы / базы показывать", "Which schemas / databases to show");
+    let r = ui.add(b.selected(any));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    let r = r.on_hover_text(tip);
+    egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_min_width(260.0);
+        let mut changed = false;
+        let specs = app.conns.list.clone();
+        let mut none = true;
+        for spec in specs {
+            let Some(crate::app::Node::Ready(items)) = app.tree.get(&(spec.id.clone(), Vec::new())) else { continue };
+            let names: Vec<String> = items.iter().filter(|o| matches!(o.kind, ObjKind::Schema | ObjKind::Database)).map(|o| o.name.clone()).collect();
+            if names.is_empty() {
+                continue;
+            }
+            none = false;
+            ui.label(RichText::new(spec.title()).strong());
+            let f = app.session.schema_filters.entry(spec.id.clone()).or_default();
+            ui.horizontal(|ui| {
+                changed |= ui.radio_value(&mut f.only, false, t("скрывать отмеченные", "hide the ticked")).changed();
+                changed |= ui.radio_value(&mut f.only, true, t("только отмеченные", "only the ticked")).changed();
+            });
+            egui::ScrollArea::vertical().id_salt(("schemas", &spec.id)).max_height(240.0).show(ui, |ui| {
+                for n in &names {
+                    let mut on = f.names.contains(n);
+                    if ui.checkbox(&mut on, n).changed() {
+                        if on {
+                            f.names.push(n.clone());
+                        } else {
+                            f.names.retain(|x| x != n);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button(t("снять все", "untick all")).clicked() {
+                    f.names.clear();
+                    changed = true;
+                }
+                if ui.small_button(t("отметить все", "tick all")).clicked() {
+                    f.names = names.clone();
+                    changed = true;
+                }
+            });
+            ui.separator();
+        }
+        if none {
+            ui.label(RichText::new(t("Раскройте подключение — здесь появятся его схемы", "Open a connection: its schemas show here")).weak());
+        }
+        if changed {
+            app.touch();
+        }
+    });
 }
 
 fn matches_filter(app: &App, o: &Obj) -> bool {
@@ -271,7 +400,9 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
         ui.label(RichText::new(t("пусто", "empty")).weak().small());
     }
     let ctx = ui.ctx().clone();
-    let items: Vec<Obj> = items.into_iter().filter(|o| matches_filter(app, o)).collect();
+    // Schemas / databases: as the connection's filter says.
+    let shown = app.session.schema_filters.get(conn).cloned().unwrap_or_default();
+    let items: Vec<Obj> = items.into_iter().filter(|o| matches_filter(app, o) && (!path.is_empty() || !matches!(o.kind, ObjKind::Schema | ObjKind::Database) || shown.shows(&o.name))).collect();
     for o in &items {
         let mut p = path.clone();
         p.push(o.name.clone());

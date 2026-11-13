@@ -1815,3 +1815,134 @@ fn workspace_tabs_dragged_and_own_title_bar() {
     settle(&mut h);
     shot(&mut h, "titlebar-settings");
 }
+
+#[test]
+fn find_and_replace_across_tabs() {
+    let (mut h, _g) = harness("find", "select total from orders where total > 1;\n", false);
+    h.state_mut().session.workspaces[1].tabs[0].text = "select total from t;\n".into();
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND);
+    assert!(h.state().find.open);
+    type_text(&mut h, "total");
+    settle(&mut h);
+    shot(&mut h, "find-bar");
+    let id = h.state().tab().id.clone();
+    assert_eq!(h.state().rt[&id].ed.marks.len(), 2, "both lit");
+    // Every tab: three; the one in another workspace shown on Enter.
+    h.state_mut().find.scope = crate::search::Scope::All;
+    settle(&mut h);
+    assert_eq!(crate::search::hits(h.state()).len(), 3);
+    let hs = crate::search::hits(h.state());
+    crate::search::go(h.state_mut(), &hs[2]);
+    settle(&mut h);
+    assert_eq!(h.state().session.active, 1);
+    shot(&mut h, "find-all");
+    // Replace all of them.
+    h.state_mut().find.replace = "amount".into();
+    h.state_mut().find.show_replace = true;
+    settle(&mut h);
+    h.get_by_label_contains("Заменить все").click();
+    settle(&mut h);
+    assert_eq!(h.state().session.workspaces[0].tabs[0].text, "select amount from orders where amount > 1;\n");
+    assert_eq!(h.state().session.workspaces[1].tabs[0].text, "select amount from t;\n");
+}
+
+#[test]
+fn database_code_and_tree_search() {
+    let (mut h, _g) = harness("dbsearch", "select 1;\n", false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    settle(&mut h);
+    // The tree: objects by name, the whole database.
+    h.state_mut().tree_filter = "order".into();
+    for _ in 0..60 {
+        settle(&mut h);
+        if matches!(h.state().tree_search.hits.get("lite"), Some(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let names: Vec<String> = match h.state().tree_search.hits.get("lite") {
+        Some(Some(Ok(v))) => v.iter().map(|f| f.name.clone()).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert!(names.contains(&"orders".to_string()) && names.contains(&"big_orders".to_string()) && names.contains(&"orders_customer".to_string()), "{names:?}");
+    shot(&mut h, "tree-search");
+    h.state_mut().tree_filter.clear();
+    // The code of the database's objects: the view holding "total > 100".
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F, egui::Modifiers::COMMAND);
+    h.state_mut().find.scope = crate::search::Scope::Database;
+    type_text(&mut h, "total >");
+    for _ in 0..60 {
+        settle(&mut h);
+        if matches!(h.state().find.db_hits, Some(_)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let hits = h.state().find.db_hits.clone().unwrap().unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].name, "big_orders");
+    assert!(hits[0].lines[0].1.contains("total > 100"));
+    settle(&mut h);
+    shot(&mut h, "db-search");
+}
+
+#[test]
+fn notebook_labels_and_filter() {
+    let (mut h, _g) = harness("nblabels", "-- %%\nselect 1 as a\n-- %%\nselect 2 as b\n-- %%\nselect 3 as c\n", false);
+    h.state_mut().tab_mut().set_notebook(true, crate::sql::Dialect::Sqlite);
+    settle(&mut h);
+    {
+        let nb = h.state_mut().tab_mut().notebook.as_mut().unwrap();
+        assert!(nb.cells.iter().all(|c| !c.created.is_empty()), "made with a time");
+        nb.cells[0].labels = vec![0];
+        nb.cells[2].labels = vec![0, 3];
+        nb.cells[1].collapsed = true;
+    }
+    let id = h.state().tab().id.clone();
+    settle(&mut h);
+    shot(&mut h, "nb-labels");
+    let shown = |h: &Harness<'static, App>| h.query_all_by_label("⠿").count();
+    assert_eq!(shown(&h), 3);
+    // By label: two shown.
+    h.state_mut().rt.get_mut(&id).unwrap().nb_labels = vec![0];
+    settle(&mut h);
+    assert_eq!(shown(&h), 2);
+    // By text: the folded one opens.
+    h.state_mut().rt.get_mut(&id).unwrap().nb_labels.clear();
+    h.state_mut().rt.get_mut(&id).unwrap().nb_query = "2 as".into();
+    settle(&mut h);
+    assert_eq!(shown(&h), 1);
+    assert!(h.query_by_label_contains("⋯").is_none(), "shown open");
+    shot(&mut h, "nb-filter");
+}
+
+#[test]
+fn schema_filter_in_the_tree() {
+    if std::env::var("ZAPROS_TEST_PG").is_err() {
+        return;
+    }
+    let (mut h, _g) = harness("schemas", "select 1;\n", true);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "pg", None);
+    settle(&mut h);
+    h.state_mut().open_nodes.insert(("pg".into(), vec![]));
+    settle(&mut h);
+    assert!(h.query_by_label("information_schema").is_some());
+    // Only public: the rest hidden.
+    h.state_mut().session.schema_filters.insert("pg".into(), crate::config::SchemaFilter { only: true, names: vec!["public".into()] });
+    settle(&mut h);
+    assert!(h.query_by_label("information_schema").is_none() && h.query_by_label("pg_catalog").is_none());
+    assert!(h.query_by_label("public").is_some());
+    // Hiding: just that one gone.
+    h.state_mut().session.schema_filters.insert("pg".into(), crate::config::SchemaFilter { only: false, names: vec!["pg_catalog".into()] });
+    settle(&mut h);
+    assert!(h.query_by_label("information_schema").is_some() && h.query_by_label("pg_catalog").is_none());
+    // The popup.
+    h.get_by_label("Какие схемы / базы показывать").click();
+    settle(&mut h);
+    shot(&mut h, "schema-filter");
+}

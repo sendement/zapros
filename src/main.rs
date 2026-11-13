@@ -18,6 +18,7 @@ mod notebook_ui;
 mod outline_ui;
 mod results;
 mod sched;
+mod search;
 mod themes;
 mod titlebar;
 mod secrets;

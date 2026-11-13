@@ -372,6 +372,44 @@ impl Session for Pg {
         })
     }
 
+    fn find_objects(&mut self, q: &str) -> Res<Vec<Found>> {
+        const SYS: &str = "n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'";
+        let mut out = Vec::new();
+        for r in self.rows(&format!("select n.nspname::text, c.relname::text, c.relkind::text from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'f', 'v', 'm', 'S') and not c.relispartition and strpos(lower(c.relname), lower($1)) > 0 and {SYS} order by 1, 2 limit 300"), &[q])? {
+            if let Some((folder, kind)) = folder_of(&r[2]) {
+                out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: Vec::new() });
+            }
+        }
+        for r in self.rows(&format!("select n.nspname::text, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', p.prokind::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where strpos(lower(p.proname), lower($1)) > 0 and {SYS} order by 1, 2 limit 200"), &[q])? {
+            let (folder, kind) = if r[2] == "p" { ("procedures", ObjKind::Procedure) } else { ("functions", ObjKind::Function) };
+            out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: Vec::new() });
+        }
+        Ok(out)
+    }
+
+    fn search_code(&mut self, q: &str) -> Res<Vec<Found>> {
+        const SYS: &str = "not like 'pg\\_%'";
+        let mut out = Vec::new();
+        for r in self.rows(&format!("select n.nspname::text, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', p.prokind::text, p.prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace where strpos(lower(p.prosrc), lower($1)) > 0 and n.nspname {SYS} and n.nspname <> 'information_schema' and p.prolang <> 12 order by 1, 2 limit 200"), &[q])? {
+            let (folder, kind) = if r[2] == "p" { ("procedures", ObjKind::Procedure) } else { ("functions", ObjKind::Function) };
+            out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: lines_with(&r[3], q, 3) });
+        }
+        for (sql, folder, kind) in [
+            (format!("select schemaname::text, viewname::text, definition from pg_views where strpos(lower(definition), lower($1)) > 0 and schemaname {SYS} and schemaname <> 'information_schema' order by 1, 2 limit 200"), "views", ObjKind::View),
+            (format!("select schemaname::text, matviewname::text, definition from pg_matviews where strpos(lower(definition), lower($1)) > 0 and schemaname {SYS} order by 1, 2 limit 200"), "matviews", ObjKind::MatView),
+        ] {
+            for r in self.rows(&sql, &[q])? {
+                out.push(Found { path: vec![r[0].clone(), folder.into(), r[1].clone()], kind, schema: r[0].clone(), name: r[1].clone(), lines: lines_with(&r[2], q, 3) });
+            }
+        }
+        if !self.one("select to_regclass('cron.job')::text", &[])?.is_empty() {
+            for r in self.rows("select jobid::text || ' ' || coalesce(jobname, ''), command from cron.job where strpos(lower(command), lower($1)) > 0 order by jobid limit 100", &[q])? {
+                out.push(Found { path: vec!["jobs".into(), r[0].clone()], kind: ObjKind::Job, schema: "cron".into(), name: r[0].clone(), lines: lines_with(&r[1], q, 3) });
+            }
+        }
+        Ok(out)
+    }
+
     fn locate(&mut self, schema: Option<&str>, name: &str, call: bool) -> Res<Option<(Vec<String>, ObjKind)>> {
         let s = schema.unwrap_or("");
         let rel = |me: &mut Self| -> Res<Option<(Vec<String>, ObjKind)>> {

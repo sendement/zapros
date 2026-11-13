@@ -980,6 +980,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
         }
         toolbar(app, ui);
+        crate::search::bar(app, ui);
         ui.add_space(2.0);
         // A notebook: its cells instead of the text and the results.
         if app.tab().is_notebook() {

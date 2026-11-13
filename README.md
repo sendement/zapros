@@ -81,6 +81,21 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Dragging tabs**: workspaces and scripts alike, a copy of the tab under
   the pointer, the tabs changing places as it passes them; notebook cells
   lifted and carried by their grip, the others sliding aside to make room.
+- **Search**: Ctrl+F opens a bar under the toolbar — in this script (all
+  its cells), the workspace's scripts or every tab; any case or as typed,
+  whole words; matches lit, Enter / Shift+Enter between them, a list of
+  them across tabs; replace one or all. Its "in the database's code" scope
+  searches the code of views, materialized views, functions, procedures,
+  packages, triggers and jobs (PostgreSQL, Oracle's ALL_SOURCE, ClickHouse,
+  SQLite) and shows cards with the lines found; a double click opens the
+  object beside with the match picked.
+- **Object tree**: its search box, from two letters, looks through the
+  whole database by name (not only what's open), grouped by schema; a
+  filter button picks the schemas / databases each connection shows
+  (hide the ticked, or only the ticked).
+- **Notebook cells** carry the time they were made and colour labels;
+  the notebook's filter (text and labels) opens the cells that fit and
+  hides the rest.
 - **Fonts** (Settings → Look): the interface's, the code's (with its line
   gap) and the tables', any installed family (searchable list, monospaced
   first where it fits), each with its size; a preview of all three.

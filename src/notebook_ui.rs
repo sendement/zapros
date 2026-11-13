@@ -25,8 +25,34 @@ enum Op {
     FoldAll(bool),
     Height(usize, f32),
     Format(usize),
+    /// A label on / off.
+    Label(usize, u8),
     /// A cell dragged from one place to before another (0…n).
     Move(usize, usize),
+}
+
+use crate::config::LABELS;
+
+fn label_name(k: usize) -> &'static str {
+    LABELS.get(k).map_or("", |l| t(l.1, l.2))
+}
+
+/// A label's dot (`k` past the labels: an empty ring, "no labels").
+fn label_dot(ui: &mut egui::Ui, k: usize, on: bool, size: f32) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let c = LABELS.get(k).map_or(ui.visuals().weak_text_color(), |l| crate::editor::rgb(l.0));
+    let rad = size / 2.0 - 1.0;
+    if k >= LABELS.len() {
+        ui.painter().circle_stroke(rect.center(), rad - 0.5, Stroke::new(1.0, c));
+    } else if on {
+        ui.painter().circle_filled(rect.center(), rad, c);
+    } else {
+        ui.painter().circle_stroke(rect.center(), rad - 0.5, Stroke::new(1.2, c.gamma_multiply(0.8)));
+    }
+    if r.hovered() {
+        ui.painter().circle_stroke(rect.center(), rad + 1.0, Stroke::new(1.0, ui.visuals().strong_text_color()));
+    }
+    r
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
@@ -67,6 +93,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The cells' filter: by what they hold and their labels.
+            let tab_id = app.tab().id.clone();
+            let rt = app.rt.entry(tab_id).or_default();
+            for k in (0..LABELS.len()).rev() {
+                let on = rt.nb_labels.contains(&(k as u8));
+                if label_dot(ui, k, on, 13.0).on_hover_text(format!("{}: {}", t("Блоки с меткой", "Cells labelled"), label_name(k))).clicked() {
+                    if on {
+                        rt.nb_labels.retain(|x| *x != k as u8);
+                    } else {
+                        rt.nb_labels.push(k as u8);
+                    }
+                }
+            }
+            ui.add(egui::TextEdit::singleline(&mut rt.nb_query).hint_text(t("🔎 фильтр блоков", "🔎 filter cells")).desired_width(150.0))
+                .on_hover_text(t("Подходящие блоки раскрыты, остальные скрыты (и по меткам справа)", "The cells that fit are open, the rest hidden (by the labels beside too)"));
             // Only in the room left (cut short, never over the buttons).
             ui.add(egui::Label::new(RichText::new(t("Ctrl+Enter — выполнить блок · блок из одного WITH отдаёт свои CTE блокам ниже", "Ctrl+Enter: run the cell · a cell of a WITH alone lends its CTEs to the cells below")).weak().small()).truncate());
         });
@@ -74,6 +115,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     ui.add_space(4.0);
     let tab = app.tab().clone();
     let Some(nb) = tab.notebook.as_ref() else { return actions };
+    // The filter: what the cells hold, their labels.
+    let (nb_q, nb_labels) = app.rt.get(&tab.id).map_or((String::new(), Vec::new()), |r| (r.nb_query.trim().to_lowercase(), r.nb_labels.clone()));
+    let filtering = !nb_q.is_empty() || !nb_labels.is_empty();
+    let fits = |c: &crate::config::Cell| (nb_q.is_empty() || c.text.to_lowercase().contains(&nb_q)) && (nb_labels.is_empty() || c.labels.iter().any(|l| nb_labels.contains(l)));
     let conn = app.tab_conn(app.ws(), &tab);
     let dialect = app.dialect_of(conn.as_deref());
     let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
@@ -102,8 +147,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let mut rects: Vec<egui::Rect> = Vec::new();
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         for (i, cell) in nb.cells.iter().enumerate() {
+            // Filtered: the cells that don't fit hidden, those that do open.
+            if filtering && !fits(cell) {
+                continue;
+            }
             app.restore_cell(&tab.id, cell);
             let key = App::cell_key(&tab.id, &cell.id);
+            if !app.find.open {
+                let marks = if filtering { crate::search::find_in(&cell.text, &nb_q, false, false) } else { Vec::new() };
+                if let Some(rt) = app.rt.get_mut(&key) {
+                    rt.ed.marks = marks;
+                    rt.ed.mark_now = None;
+                }
+            }
             let focused = focus.as_deref() == Some(cell.id.as_str());
             let stroke = if focused { Stroke::new(1.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
             let mut draw = |ui: &mut egui::Ui| egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
@@ -113,7 +169,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 // Its header: kind, run, what it gave; moving, adding, deleting.
                 ui.horizontal(|ui| {
                     // A grip: dragged, the cell goes up or down.
-                    let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), egui::Sense::drag());
+                    // (Not while filtered: the cells hidden would be in the way.)
+                    let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), if filtering { egui::Sense::hover() } else { egui::Sense::drag() });
                     grip.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "⠿"));
                     let gc = if grip.hovered() || grip.dragged() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
                     if !crate::icons::paint(ui, gr, crate::icons::Ic::Grip, 16.0, gc) {
@@ -140,6 +197,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         ops.push(Op::Fold(i));
                     }
                     ui.label(RichText::new(format!("[{}]", i + 1)).weak().small().monospace());
+                    // Its labels (a click: the menu to set them) and when it was made.
+                    let r = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for &k in &cell.labels {
+                                label_dot(ui, k as usize, true, 10.0);
+                            }
+                            if cell.labels.is_empty() {
+                                label_dot(ui, usize::MAX, false, 10.0);
+                            }
+                        })
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_text(t("Метки блока", "The cell's labels"));
+                    egui::Popup::menu(&r).show(|ui| {
+                        for k in 0..LABELS.len() {
+                            let mut on = cell.labels.contains(&(k as u8));
+                            ui.horizontal(|ui| {
+                                label_dot(ui, k, true, 12.0);
+                                if ui.checkbox(&mut on, label_name(k)).changed() {
+                                    ops.push(Op::Label(i, k as u8));
+                                }
+                            });
+                        }
+                    });
+                    if !cell.created.is_empty() {
+                        let when = chrono::NaiveDateTime::parse_from_str(&cell.created, "%Y-%m-%d %H:%M").map(|d| d.format("%d.%m %H:%M").to_string()).unwrap_or_else(|_| cell.created.clone());
+                        ui.label(RichText::new(when).weak().small()).on_hover_text(format!("{} {}", t("Создан", "Made"), cell.created));
+                    }
                     for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, if narrow { "MD" } else { "Markdown" })] {
                         if ui.selectable_label(cell.kind == k, name).clicked() && cell.kind != k {
                             ops.push(Op::Kind(i, k));
@@ -224,7 +310,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         }
                     });
                 });
-                if cell.collapsed {
+                if cell.collapsed && !filtering {
                     // Folded: its first line, a click opens it.
                     let first = cell.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
                     let more = cell.text.trim().lines().count().saturating_sub(1);
@@ -548,6 +634,16 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
             }
         }
         Op::Up(i) if i > 0 => nb.cells.swap(i, i - 1),
+        Op::Label(i, k) => {
+            if let Some(c) = nb.cells.get_mut(i) {
+                if c.labels.contains(&k) {
+                    c.labels.retain(|x| *x != k);
+                } else {
+                    c.labels.push(k);
+                    c.labels.sort_unstable();
+                }
+            }
+        }
         Op::Move(from, to) if from < nb.cells.len() && to <= nb.cells.len() && to != from && to != from + 1 => {
             let c = nb.cells.remove(from);
             nb.cells.insert(if to > from { to - 1 } else { to }, c);

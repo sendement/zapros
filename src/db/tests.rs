@@ -359,3 +359,33 @@ fn designer_on_real_servers() {
         designer_round_trip(s.as_mut(), Kind::Oracle, &[&owner, "tables", &t], &c);
     }
 }
+
+#[test]
+fn searches_on_real_servers() {
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) {
+        let mut s = open(&sp, &pw).unwrap();
+        let f = s.find_objects("ORDER").unwrap();
+        assert!(f.iter().any(|x| x.name == "orders" && x.kind == ObjKind::Table && x.path == ["public", "tables", "orders"]), "{f:?}");
+        let c = s.search_code("orders").unwrap();
+        assert!(c.iter().any(|x| x.kind == ObjKind::Function && !x.lines.is_empty()), "{c:?}");
+        println!("pg code: {:?}", c.iter().map(|x| (&x.name, x.kind)).collect::<Vec<_>>());
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) {
+        let mut s = open(&sp, &pw).unwrap();
+        let f = s.find_objects("even").unwrap();
+        assert!(f.iter().any(|x| x.name == "events"), "{f:?}");
+        let c = s.search_code("events").unwrap();
+        println!("ch code: {:?}", c.iter().map(|x| (&x.name, x.kind, &x.lines)).collect::<Vec<_>>());
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
+        let mut s = open(&sp, &pw).unwrap();
+        // A package of the test user's own (it sees no other schema's).
+        s.run("CREATE OR REPLACE PACKAGE zapros_search_pkg AS\n  -- counts the orders\n  FUNCTION n RETURN NUMBER;\nEND zapros_search_pkg;", &mut Fetch::limit(0), &mut |_| {}).unwrap();
+        let f = s.find_objects("search_pkg").unwrap();
+        assert!(f.iter().any(|x| x.kind == ObjKind::Package && x.path[1] == "packages" && x.name == "ZAPROS_SEARCH_PKG"), "{f:?}");
+        let c = s.search_code("counts the ORDERS").unwrap();
+        assert!(c.iter().any(|x| x.kind == ObjKind::Package && x.lines.first().is_some_and(|l| l.0 == 2 && l.1.contains("counts the orders"))), "{c:?}");
+        s.run("DROP PACKAGE zapros_search_pkg", &mut Fetch::limit(0), &mut |_| {}).unwrap();
+    }
+}
+

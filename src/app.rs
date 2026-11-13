@@ -147,6 +147,11 @@ pub struct TabRt {
     /// How long the last run took (and whether it was cancelled), shown
     /// once it's over.
     pub last_run: Option<(Duration, bool)>,
+    /// Once the code's in (opened from a search): this picked in it.
+    pub find_after_load: Option<String>,
+    /// A notebook's filter: cells holding this, with these labels.
+    pub nb_query: String,
+    pub nb_labels: Vec<u8>,
     /// An object's tab: its designer.
     pub design: Option<crate::design_ui::Designer>,
     pub results: Vec<ResultView>,
@@ -232,6 +237,9 @@ pub struct App {
     fonts_applied: Option<config::Fonts>,
     /// The window's frame as last set (the desktop's title bar or not).
     decorations: Option<bool>,
+    /// Ctrl+F's bar; the tree's search by name.
+    pub find: crate::search::Find,
+    pub tree_search: crate::search::TreeSearch,
     pub about: bool,
     ctx: egui::Context,
     /// Connections started on their own once (not again after failing).
@@ -286,6 +294,8 @@ impl App {
         let mut app = Self {
             fonts_applied,
             decorations: None,
+            find: Default::default(),
+            tree_search: Default::default(),
             settings,
             conns: config::load(&conns_path()),
             session,
@@ -1248,7 +1258,25 @@ impl App {
                         if tb.object.is_none() {
                             tb.split_package();
                         }
+                        // Opened from a search: what was looked for, picked.
+                        let text = tb.text.clone();
+                        if let Some(rt) = self.rt.get_mut(&into) {
+                            if let Some(q) = rt.find_after_load.take() {
+                                if let Some(r) = crate::search::find_in(&text, &q, false, false).into_iter().next() {
+                                    rt.ed.select = Some((r.start, r.end));
+                                }
+                            }
+                        }
                         self.touch();
+                    }
+                }
+                What::Searched { q, code, found } => {
+                    if code {
+                        if self.find.db_asked.as_ref().is_some_and(|(c, aq)| *c == ev.conn && *aq == q) {
+                            self.find.db_hits = Some(found);
+                        }
+                    } else if self.tree_search.q == q {
+                        self.tree_search.hits.insert(ev.conn.clone(), Some(found));
                     }
                 }
                 What::Located { name, found } => match found {
@@ -1477,6 +1505,14 @@ impl App {
         if spec || body {
             self.show_part(body);
         }
+        // (Exactly Ctrl+F: with Shift it's Format.)
+        let find = ctx.input_mut(|i| {
+            let at = i.events.iter().position(|e| matches!(e, egui::Event::Key { key: Key::F, pressed: true, modifiers: m, .. } if m.command && !m.shift && !m.alt));
+            at.map(|k| i.events.remove(k)).is_some()
+        });
+        if find {
+            crate::search::open(self);
+        }
         let (new, close, next, prev) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::COMMAND, Key::N),
@@ -1590,6 +1626,7 @@ impl eframe::App for App {
             let base = crate::ui::chrome(ui.visuals());
             self.settings.backdrop.paint(ui.painter(), ui.max_rect(), base);
         }
+        crate::search::tree_tick(self, &ctx);
         crate::side::panel(self, ui);
         crate::ui::status(self, ui);
         let actions = crate::ui::center(self, ui);
