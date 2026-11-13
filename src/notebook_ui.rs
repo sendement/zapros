@@ -200,14 +200,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         let rows = text.lines().count().max(2) + 1;
                         let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows };
                         let id = egui::Id::new(("cell", &tab.id, &cell.id));
-                        // The code on a rounded ground of its own, as wide as
-                        // the output's table, edged as it is.
+                        // The code on a rounded ground of its own (a shade
+                        // off the cell's), as wide as the output's table.
                         let v = ui.visuals();
-                        let ground = crate::themes::mix(v.panel_fill, v.extreme_bg_color, 0.45);
-                        let edge = v.widgets.noninteractive.bg_stroke;
+                        let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
                         let out = egui::Frame::NONE
                             .fill(ground)
-                            .stroke(edge)
                             .corner_radius(6)
                             .inner_margin(egui::Margin { left: 0, right: 4, top: 2, bottom: 2 })
                             .outer_margin(egui::Margin { left: 0, right: crate::ui::TABLE_BAR_ROOM as i8, top: 0, bottom: 0 })

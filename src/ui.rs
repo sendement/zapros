@@ -956,11 +956,21 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 /// A ">" of two strokes at `c`, turned down by `t` (0…1) — the tree's,
 /// the folds'.
 pub fn paint_chevron(painter: &egui::Painter, c: Pos2, size: f32, t: f32, color: Color32) {
-    let (w, h) = (size * 0.32, size * 0.5);
+    let (w, h) = (size * 0.3, size * 0.5);
     let a = t * std::f32::consts::FRAC_PI_2;
     let rot = |v: Vec2| c + egui::vec2(v.x * a.cos() - v.y * a.sin(), v.x * a.sin() + v.y * a.cos());
-    let pts = vec![rot(egui::vec2(-w, -h)), rot(egui::vec2(w, 0.0)), rot(egui::vec2(-w, h))];
-    painter.add(egui::Shape::line(pts, Stroke::new(1.5, color)));
+    let (p, tip, q) = (egui::vec2(-w, -h), egui::vec2(w, 0.0), egui::vec2(-w, h));
+    // Its tip rounded a little: a short curve round the corner.
+    let k = 0.28;
+    let (s, e) = (tip + (p - tip) * k, tip + (q - tip) * k);
+    let mut pts = vec![rot(p)];
+    for i in 0..=6 {
+        let u = i as f32 / 6.0;
+        let v = s * (1.0 - u) * (1.0 - u) + tip * 2.0 * u * (1.0 - u) + e * u * u;
+        pts.push(rot(v));
+    }
+    pts.push(rot(q));
+    painter.add(egui::Shape::line(pts, Stroke::new(1.4, color)));
 }
 
 /// The tree's open / closed mark: a chevron that turns as it opens.
@@ -970,7 +980,7 @@ pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let t = ui.ctx().animate_bool_responsive(r.id.with("turn"), open);
     let v = ui.visuals();
     let color = if r.hovered() { v.strong_text_color() } else { v.weak_text_color() };
-    paint_chevron(ui.painter(), rect.center(), 11.0, t, color);
+    paint_chevron(ui.painter(), rect.center(), 8.5, t, color);
     r
 }
 

@@ -225,6 +225,14 @@ fn settings_and_workspace_windows() {
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 3usize));
     settle(&mut h);
     shot(&mut h, "settings-formatter");
+    // One size on every page.
+    let mut sizes = Vec::new();
+    for page in 0..6usize {
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), page));
+        settle(&mut h);
+        sizes.push(h.ctx.memory(|m| m.area_rect(egui::Id::new("settings-window"))).map(|r| r.size()));
+    }
+    assert!(sizes[0].is_some() && sizes.iter().all(|s| *s == sizes[0]), "{sizes:?}");
     // A new scale waits while the settings are open, comes once closed.
     h.state_mut().settings.ui_scale = 1.25;
     settle(&mut h);

@@ -588,7 +588,9 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     let mut open = true;
     let id = egui::Id::new("settings-page");
     let mut page: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
-    egui::Window::new(t("Настройки", "Settings")).open(&mut open).default_size([640.0, 520.0]).show(ctx, |ui| {
+    // One size whatever the page (a page's content scrolls inside it).
+    let size = egui::vec2(720.0, 560.0).min(ctx.content_rect().size() - egui::vec2(40.0, 60.0));
+    egui::Window::new(t("Настройки", "Settings")).id(egui::Id::new("settings-window")).open(&mut open).fixed_size(size).show(ctx, |ui| {
         ui.horizontal(|ui| {
             for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Бьютифаер", "Formatter"), t("Подсветка", "Colours"), t("Оформление", "Look")].iter().enumerate() {
                 if ui.selectable_label(page == i, *n).clicked() {
@@ -598,7 +600,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
         });
         ui.separator();
         let s = &mut app.settings;
-        egui::ScrollArea::vertical().show(ui, |ui| match page {
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match page {
             5 => look(ui, s),
             0 => {
                 ui.horizontal(|ui| {
