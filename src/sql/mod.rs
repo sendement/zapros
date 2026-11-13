@@ -102,6 +102,21 @@ pub const FUNCTIONS: &[&str] = &[
     "MOD", "NTILE", "NULLIF", "POWER", "RANK", "REPLACE", "ROUND", "ROW_NUMBER", "RPAD", "RTRIM", "SUBSTR", "SUBSTRING", "SUM", "TRIM", "UPPER", "TRUNC", "SQRT", "SIGN", "EXP", "LN", "LOG",
 ];
 
+/// Keywords that are also functions when called (`left(x, 2)`,
+/// `replace(…)`, `cast(… as …)`).
+pub const KEYWORD_FUNCTIONS: &[&str] = &[
+    "LEFT", "RIGHT", "REPLACE", "CAST", "TRIM", "POSITION", "SUBSTRING", "EXTRACT", "CONVERT", "COALESCE", "NULLIF", "IF", "IIF", "DATE", "TIME", "TIMESTAMP", "YEAR", "MONTH", "DAY", "HOUR",
+    "MINUTE", "SECOND", "CHAR", "VARCHAR", "NUMERIC", "DECIMAL", "FORMAT", "GREATEST", "LEAST", "MOD", "TRUNCATE", "ROW", "ARRAY", "MAP", "TUPLE", "INTERVAL", "USER", "CURRENT_DATE",
+    "LOWER", "UPPER", "COUNT", "SUM", "MIN", "MAX", "AVG", "RANK", "ROW_NUMBER", "LAG", "LEAD", "NVL", "DECODE", "TO_CHAR", "TO_DATE", "TO_NUMBER", "XMLAGG", "LISTAGG", "JSON_OBJECT",
+];
+
+/// Whether a word, called, is a function (`list`: `functions(d)`), not a
+/// keyword before a bracket (FROM (…), BY (…), IN (…)).
+pub fn is_function_in(w: &str, list: &[&str]) -> bool {
+    let up = w.to_ascii_uppercase();
+    KEYWORD_FUNCTIONS.contains(&up.as_str()) || list.iter().any(|f| f.eq_ignore_ascii_case(&up))
+}
+
 pub fn functions(d: Dialect) -> Vec<&'static str> {
     let extra: &[&str] = match d {
         Dialect::Postgres => &[

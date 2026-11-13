@@ -419,16 +419,19 @@ pub fn classify(src: &str, d: Dialect, deep: bool) -> Vec<Span> {
     classify_at(src, d, if deep { 0 } else { MAX_LEVEL }, 0)
 }
 
-fn base_spans(src: &str, toks: &[Tok], level: u8) -> Vec<Span> {
+fn base_spans(src: &str, toks: &[Tok], level: u8, d: Dialect) -> Vec<Span> {
     let mut depth = 0u8;
+    // A keyword before "(" is a call only when it's a function's name (else
+    // FROM (…), BY (…), JOIN (…), IN (…), VALUES (…) stay keywords).
+    let functions = super::functions(d);
+    let is_function = |w: &str| super::is_function_in(w, &functions);
     let next_is_call = |k: usize| toks[k + 1..].iter().find(|x| x.kind != Tk::Space).is_some_and(|x| x.kind == Tk::Open && x.text(src) == "(");
     toks.iter()
         .enumerate()
         .map(|(k, t)| {
             let class = match t.kind {
                 Tk::Keyword => {
-                    let not_fn = matches!(t.text(src).to_ascii_uppercase().as_str(), "IN" | "EXISTS" | "AS" | "VALUES" | "ON" | "USING" | "OVER" | "AND" | "OR" | "NOT" | "INTO" | "ANY" | "ALL" | "FILTER" | "WITHIN");
-                    if next_is_call(k) && !not_fn { Class::Function } else { Class::Keyword }
+                    if next_is_call(k) && is_function(t.text(src)) { Class::Function } else { Class::Keyword }
                 }
                 Tk::Word => {
                     let after_dot = k > 0 && toks[k - 1].kind == Tk::Dot;
@@ -464,7 +467,7 @@ fn base_spans(src: &str, toks: &[Tok], level: u8) -> Vec<Span> {
 /// `depth`: how many strings in; `level`: of those, not $$ bodies.
 fn classify_at(src: &str, d: Dialect, depth: u8, level: u8) -> Vec<Span> {
     let toks = lex::lex(src, d);
-    let base = base_spans(src, &toks, level);
+    let base = base_spans(src, &toks, level, d);
     if depth >= MAX_LEVEL {
         return base;
     }
@@ -867,5 +870,36 @@ mod tests {
         let out = fmt(src, Dialect::Postgres);
         assert!(out.contains("%I") && out.contains("%I.%I") && out.contains("%L"), "{out}");
         assert!(out.contains("SELECT"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod keyword_bracket_tests {
+    use super::*;
+
+    fn class_of(src: &str, word: &str, d: Dialect) -> Class {
+        let at = src.find(word).unwrap();
+        classify(src, d, false).into_iter().find(|s| s.range.start == at).unwrap().class
+    }
+
+    #[test]
+    fn keywords_before_brackets_stay_keywords() {
+        let q = "select left(name, 2), count(*), replace(a, 'x', 'y'), cast(id as text) from (select 1) t join (select 2) u on (t.a = u.a) where (x) group by (a) order by (b) partition by (c)";
+        let pg = Dialect::Postgres;
+        for w in ["from (", "join (", "where (", "group by (", "order by (", "by (c"] {
+            let word = w.split(' ').next().unwrap();
+            let at = q.find(w).unwrap();
+            let class = classify(q, pg, false).into_iter().find(|s| s.range.start == at).unwrap().class;
+            assert_eq!(class, Class::Keyword, "{word} in {w}");
+        }
+        for w in ["by (a", "by (b"] {
+            let at = q.find(w).unwrap();
+            assert_eq!(classify(q, pg, false).into_iter().find(|s| s.range.start == at).unwrap().class, Class::Keyword, "{w}");
+        }
+        for w in ["left(", "count(", "replace(", "cast("] {
+            assert_eq!(class_of(q, w, pg), Class::Function, "{w}");
+        }
+        assert_eq!(class_of("select case when (a > 1) then (2) else (3) end", "when (", pg), Class::Keyword);
+        assert_eq!(class_of("select if(a, 1, 2) from t", "if(", Dialect::ClickHouse), Class::Function);
     }
 }

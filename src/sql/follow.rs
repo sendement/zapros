@@ -183,8 +183,9 @@ pub fn follow(src: &str, at: usize, d: Dialect, has_col: &dyn Fn(&str, &str) -> 
     let cte = |a: &str| ctes.iter().find(|(n, _)| eq(n, a));
     // A table of the statement: a CTE's definition, or its name there.
     let table_at = |n: &Named| cte(&n.table).map_or(n.at.clone(), |(_, r)| r.clone());
-    // Keywords lead nowhere, unless called (count(…) is the database's).
-    if t.kind == Tk::Keyword && next != Some(Tk::Open) && qual.is_none() {
+    // Keywords lead nowhere, unless a function's called (count(…) is the
+    // database's; FROM (…), BY (…) are keywords still).
+    if t.kind == Tk::Keyword && qual.is_none() && !(next == Some(Tk::Open) && super::is_function_in(&word, &super::functions(d))) {
         return None;
     }
     // A qualifier itself: alias / CTE → its table; else a table or schema.
