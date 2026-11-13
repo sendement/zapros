@@ -397,6 +397,20 @@ pub struct SavedTable {
 }
 
 impl Notebook {
+    /// Cells sharing an id (from before it was fixed) get ids of their own.
+    pub fn fix_ids(&mut self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut fixed = false;
+        for c in self.cells.iter_mut() {
+            if !seen.insert(c.id.clone()) {
+                c.id = crate::db::new_id();
+                seen.insert(c.id.clone());
+                fixed = true;
+            }
+        }
+        fixed
+    }
+
     pub fn pieces(&self) -> Vec<crate::sql::notebook::Piece> {
         use crate::sql::notebook::{Kind, Piece};
         self.cells.iter().map(|c| Piece { kind: if c.kind == CellKind::Markdown { Kind::Markdown } else { Kind::Sql }, text: c.text.clone() }).collect()
@@ -406,11 +420,17 @@ impl Notebook {
     /// outputs of cells with the same text kept.
     pub fn from_text(text: &str, d: crate::sql::Dialect, old: &[Cell]) -> Self {
         use crate::sql::notebook::Kind;
+        // Each old cell lends its id (and output, labels…) once: two cells
+        // alike (two empty ones) must not end up one.
+        let mut used = std::collections::HashSet::new();
         let cells = crate::sql::notebook::parse(text, d)
             .into_iter()
             .map(|p| {
                 let kind = if p.kind == Kind::Markdown { CellKind::Markdown } else { CellKind::Sql };
-                let was = old.iter().find(|c| c.kind == kind && c.text == p.text);
+                let was = old.iter().find(|c| c.kind == kind && c.text == p.text && !used.contains(&c.id));
+                if let Some(c) = was {
+                    used.insert(c.id.clone());
+                }
                 Cell { id: was.map_or_else(crate::db::new_id, |c| c.id.clone()), kind, saved: was.and_then(|c| c.saved.clone()), collapsed: was.is_some_and(|c| c.collapsed), out_h: was.map_or(0.0, |c| c.out_h), created: was.map_or_else(|| Cell::default().created, |c| c.created.clone()), labels: was.map(|c| c.labels.clone()).unwrap_or_default(), text: p.text }
             })
             .collect();

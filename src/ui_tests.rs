@@ -2042,3 +2042,35 @@ fn label_dots_unfold_under_the_pointer() {
     }
     shot(&mut h, "chips-open");
 }
+
+#[test]
+fn empty_cells_stay_apart() {
+    let (mut h, _g) = harness("twins", "-- %%\nselect 1\n", false);
+    h.state_mut().tab_mut().set_notebook(true, crate::sql::Dialect::Sqlite);
+    settle(&mut h);
+    // Two empty Markdown cells, then the notebook off and on again.
+    for _ in 0..2 {
+        h.get_by_label("+ Markdown").click();
+        settle(&mut h);
+    }
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let cells = |h: &Harness<'static, App>| h.state().tab().notebook.as_ref().unwrap().cells.clone();
+    let c = cells(&h);
+    let ids: std::collections::HashSet<_> = c.iter().map(|c| c.id.clone()).collect();
+    assert_eq!(ids.len(), c.len(), "an id each: {:?}", c.iter().map(|c| (&c.id, c.kind)).collect::<Vec<_>>());
+    // A label and a kind on one: the other untouched.
+    let empty: Vec<usize> = c.iter().enumerate().filter(|(_, c)| c.text.is_empty()).map(|(i, _)| i).collect();
+    assert_eq!(empty.len(), 2);
+    h.state_mut().tab_mut().notebook.as_mut().unwrap().cells[empty[0]].labels = vec![1];
+    h.state_mut().tab_mut().notebook.as_mut().unwrap().cells[empty[0]].kind = crate::config::CellKind::Sql;
+    settle(&mut h);
+    let c = cells(&h);
+    assert!(c[empty[1]].labels.is_empty() && c[empty[1]].kind == crate::config::CellKind::Markdown);
+    // Twins from before the fix: told apart.
+    let mut nb = crate::config::Notebook { on: true, cells: vec![c[0].clone(), c[0].clone()] };
+    assert!(nb.fix_ids());
+    assert_ne!(nb.cells[0].id, nb.cells[1].id);
+}

@@ -293,6 +293,9 @@ impl App {
                 ws.tabs.push(Tab::default());
             }
             ws.active = ws.active.min(ws.tabs.len() - 1);
+            for nb in ws.tabs.iter_mut().filter_map(|t| t.notebook.as_mut()) {
+                nb.fix_ids();
+            }
             for tb in ws.tabs.iter_mut().filter(|t| t.other.is_some()) {
                 tb.text = config::unslashed(&tb.text);
                 tb.other = tb.other.as_deref().map(config::unslashed);
