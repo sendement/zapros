@@ -762,8 +762,21 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
             app.run(&ctx, false, true);
         }
-        if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(t("Форматировать", "Format"), "Ctrl+Shift+F")).clicked() {
-            app.format();
+        let nb = app.tab().is_notebook();
+        let fmt_tip = if nb { t("Форматировать все SQL-блоки (Markdown не трогается)", "Format every SQL cell (Markdown stays)") } else { t("Форматировать", "Format") };
+        if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(fmt_tip, "Ctrl+Shift+F")).clicked() {
+            if nb { app.format_all_cells() } else { app.format() }
+        }
+        let copy_tip = if nb { t("Скопировать весь блокнот как SQL", "Copy the whole notebook as SQL") } else { t("Скопировать скрипт (или выделенное)", "Copy the script (or what's picked)") };
+        if ui.add(tinted(lbl("🗐", t("Копировать", "Copy")), BLUE)).on_hover_text(copy_tip).clicked() {
+            let tab = app.tab().clone();
+            let sel = app.rt.get(&tab.id).and_then(|r| editor::selection(&r.ed)).filter(|_| !nb);
+            let s = match sel {
+                Some(r) => tab.text.get(r).unwrap_or_default().to_string(),
+                None => tab.full_text(),
+            };
+            ui.ctx().copy_text(s);
+            app.toast(t("Скопировано", "Copied"));
         }
         // Transactions, where the database has them.
         if let Some(c) = cur.as_ref().filter(|c| app.spec(c).is_some_and(|s| s.kind.transactions())) {
@@ -800,6 +813,8 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         if let Some(since) = app.rt.get(&tab.id).and_then(|r| r.run.as_ref()).map(|r| r.since) {
             ui.add(egui::Spinner::new());
             crate::app::stopwatch_label(ui, since, false);
+        } else if let Some((took, cancelled)) = app.rt.get(&tab.id).and_then(|r| r.last_run) {
+            crate::app::last_run_label(ui, took, cancelled);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let nb = app.tab().is_notebook();
@@ -918,8 +933,11 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             app.session.results_height = got;
             app.touch();
         }
+        // The line over the results: from where the grounds' roundings start
+        // (as in a notebook).
         let top = ui.cursor().top();
-        ui.painter().hline(sheet.x_range().shrink(1.0), top - 2.0, ui.visuals().widgets.noninteractive.bg_stroke);
+        let lr = ui.max_rect();
+        ui.painter().hline(egui::Rangef::new(lr.left() + 6.0, lr.right() - 6.0 - TABLE_BAR_ROOM), top - 2.0, ui.visuals().widgets.noninteractive.bg_stroke);
         if app.session.outline {
             let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
             let r = egui::Panel::right("outline")
@@ -951,10 +969,21 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
         let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows: 30 };
-        let out = egui::ScrollArea::both()
-            .id_salt(("editor-scroll", &tab_id, tab.on_body))
-            .auto_shrink([false, false])
-            .show(ui, |ui| editor::show(ui, egui::Id::new(("editor", &tab_id, part)), &mut tab.text, &mut rt.ed, &cx))
+        // The code on a rounded ground, as a notebook cell's.
+        let v = ui.visuals();
+        let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
+        let out = egui::Frame::NONE
+            .fill(ground)
+            .corner_radius(6)
+            .inner_margin(egui::Margin { left: 0, right: 2, top: 2, bottom: 0 })
+            .outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 6 })
+            .show(ui, |ui| {
+                egui::ScrollArea::both()
+                    .id_salt(("editor-scroll", &tab_id, tab.on_body))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| editor::show(ui, egui::Id::new(("editor", &tab_id, part)), &mut tab.text, &mut rt.ed, &cx))
+                    .inner
+            })
             .inner;
         rt.issues = issues;
         if out.changed {

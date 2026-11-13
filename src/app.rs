@@ -144,6 +144,9 @@ pub struct Running {
 #[derive(Default)]
 pub struct TabRt {
     pub ed: EditorState,
+    /// How long the last run took (and whether it was cancelled), shown
+    /// once it's over.
+    pub last_run: Option<(Duration, bool)>,
     /// An object's tab: its designer.
     pub design: Option<crate::design_ui::Designer>,
     pub results: Vec<ResultView>,
@@ -981,6 +984,28 @@ impl App {
         }
     }
 
+    /// A notebook's SQL cells laid out, each on its own (Markdown stays).
+    pub fn format_all_cells(&mut self) {
+        let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+        let o = self.settings.format;
+        if let Some(nb) = self.tab_mut().notebook.as_mut() {
+            for c in nb.cells.iter_mut().filter(|c| c.kind == crate::config::CellKind::Sql && !c.text.trim().is_empty()) {
+                c.text = sql::fmt::format(&c.text, d, o).trim_end().to_string();
+            }
+        }
+        self.touch();
+    }
+
+    /// One cell laid out.
+    pub fn format_cell(&mut self, i: usize) {
+        let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+        let o = self.settings.format;
+        if let Some(c) = self.tab_mut().notebook.as_mut().and_then(|n| n.cells.get_mut(i)).filter(|c| c.kind == crate::config::CellKind::Sql) {
+            c.text = sql::fmt::format(&c.text, d, o).trim_end().to_string();
+        }
+        self.touch();
+    }
+
     pub fn format(&mut self) {
         if self.tab().is_notebook() {
             let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
@@ -1192,6 +1217,7 @@ impl App {
                         if let Some(rt) = self.rt.get_mut(&tab) {
                             if rt.run.as_ref().is_some_and(|r| r.run == run) {
                                 let took = rt.run.take().map(|r| r.since.elapsed()).unwrap_or_default();
+                                rt.last_run = Some((took, cancelled));
                                 if cancelled {
                                     rt.log.push(LogLine { when: now(), kind: LogKind::Note, text: t("Отменено", "Cancelled").into(), at: None });
                                 } else {
@@ -1498,6 +1524,16 @@ pub fn stopwatch_label(ui: &mut egui::Ui, since: Instant, small: bool) {
         t = t.small();
     }
     ui.label(t.color(ui.visuals().weak_text_color())).on_hover_text(crate::i18n::t("Сколько уже идёт", "How long it's been running"));
+}
+
+/// The last run's time, where its stopwatch was.
+pub fn last_run_label(ui: &mut egui::Ui, took: Duration, cancelled: bool) {
+    let c = if cancelled { egui::Color32::from_rgb(230, 160, 40) } else { ui.visuals().weak_text_color() };
+    if let Some(img) = crate::icons::image(crate::icons::Ic::Done, 13.0, c).filter(|_| !cancelled) {
+        ui.add(img);
+    }
+    let tip = if cancelled { crate::i18n::t("Последний запуск отменён через", "The last run was cancelled after") } else { crate::i18n::t("Последний запуск занял", "The last run took") };
+    ui.label(egui::RichText::new(stopwatch(took)).monospace().small().color(c)).on_hover_text(format!("{tip} {}", fmt_took(took)));
 }
 
 pub fn fmt_took(d: Duration) -> String {

@@ -1573,6 +1573,23 @@ fn fonts_for_each_place() {
     settle(&mut h);
     shot(&mut h, "fonts-applied");
     assert_eq!(h.ctx.global_style().text_styles[&egui::TextStyle::Body].size, 14.0);
+    // A code font without the interface's shapes (as a Nerd Font may be):
+    // they come from the fallbacks, never an empty square.
+    h.state_mut().settings.fonts.code = "JetBrainsMono Nerd Font Mono".into();
+    h.state_mut().settings.fonts.ui = String::new();
+    settle(&mut h);
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace, egui::FontFamily::Name("bold".into()), egui::FontFamily::Name("table".into())] {
+        // (A char no font has comes out as the replacement square: a shape
+        // drawn differently from that is really there.)
+        let uv = |h: &Harness<'static, App>, c: char| {
+            let g = h.ctx.fonts_mut(|f| f.layout_no_wrap(c.to_string(), egui::FontId::new(13.0, fam.clone()), egui::Color32::WHITE));
+            g.rows[0].glyphs[0].uv_rect
+        };
+        let missing = uv(&h, '\u{10FFFD}');
+        for ch in ['▦', '↵', '●', '▸', 'ж'] {
+            assert_ne!(uv(&h, ch), missing, "{ch} in {fam:?} is the empty square");
+        }
+    }
     h.state_mut().settings_open = true;
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
     settle(&mut h);
@@ -1696,4 +1713,47 @@ fn hints_with_the_word_as_typed_first() {
     let last = h.get_by_label("Клавиши и о программе").rect();
     let (l, r) = (first.left() as f32, last.right() as f32);
     assert!(((l - 6.0) - (w - 6.0 - r)).abs() < 3.0, "centred: {l} … {r} in {w}");
+}
+
+#[test]
+fn notebook_cells_dragged_formatted_copied_timed() {
+    let (mut h, _g) = harness("nbdrag", "-- %%\nselect 1 as a\n-- %%\nselect 2 as b\n-- %%\nselect 3 as c\n", false);
+    h.state_mut().tab_mut().set_notebook(true, crate::sql::Dialect::Sqlite);
+    settle(&mut h);
+    let texts = |h: &Harness<'static, App>| h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+    assert_eq!(texts(&h), ["select 1 as a", "select 2 as b", "select 3 as c"]);
+    // The first cell's grip dragged below the last cell.
+    let grips: Vec<egui::Rect> = h.query_all_by_label("⠿").map(|n| { let r = n.rect(); egui::Rect::from_min_max(egui::pos2(r.min.x as f32, r.min.y as f32), egui::pos2(r.max.x as f32, r.max.y as f32)) }).collect();
+    assert_eq!(grips.len(), 3);
+    let from = grips[0].center();
+    let to = grips[2].center() + egui::vec2(0.0, 80.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=10 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
+        h.step();
+    }
+    shot(&mut h, "nb-dragging");
+    h.input_mut().events.push(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+    assert_eq!(texts(&h), ["select 2 as b", "select 3 as c", "select 1 as a"]);
+    // The top bar's format: every SQL cell.
+    {
+        let nb = h.state_mut().tab_mut().notebook.as_mut().unwrap();
+        nb.cells[0].text = "select x, y from t where x=1".into();
+        nb.cells[1].text = "select z from u".into();
+    }
+    h.state_mut().format_all_cells();
+    let t = texts(&h);
+    assert!(t[0].starts_with("SELECT x\n") && t[1].starts_with("SELECT z\n"), "{t:?}");
+    // A run: its time stays after it.
+    focus_editor(&mut h, 0);
+    h.get_all_by_label_contains("Выполнить").next().unwrap().click();
+    settle(&mut h);
+    let ran = h.state().rt.iter().any(|(_, r)| r.last_run.is_some());
+    assert!(ran, "the last run's time kept");
+    shot(&mut h, "nb-timed");
 }

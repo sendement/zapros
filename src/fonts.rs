@@ -73,6 +73,18 @@ pub fn install(ctx: &egui::Context, f: &Fonts) {
         }
         v
     };
+    // Fallbacks after any chosen font: the system's sans and monospace and
+    // a font with the shapes the interface draws (▦ ▸ ● ⋈ ↵ ✓…), so
+    // nothing comes out as an empty square whatever font is picked.
+    let mut tail: Vec<String> = Vec::new();
+    for (key, pat) in [("sys-sans", "sans-serif".to_string()), ("sys-mono", "monospace".to_string()), ("sys-shapes", ":charset=25a6 25b8 25cf 22c8 21b5 2713 2715 23f1".to_string())] {
+        if let Some(font) = fc_match(&pat) {
+            add(&mut defs, key, font);
+            tail.push(key.to_string());
+        }
+    }
+    let egui_prop: Vec<String> = egui_prop.into_iter().chain(tail.iter().cloned()).collect();
+    let egui_mono: Vec<String> = egui_mono.into_iter().chain(tail.iter().cloned()).collect();
     let ui = chain(&mut defs, "ui", pattern(&f.ui, "sans-serif", false), &egui_prop);
     let ui_bold = chain(&mut defs, "ui-bold", pattern(&f.ui, "sans-serif", true), &ui);
     let mut code = chain(&mut defs, "code", pattern(&f.code, "monospace", false), &egui_mono);

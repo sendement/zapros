@@ -24,6 +24,9 @@ enum Op {
     Fold(usize),
     FoldAll(bool),
     Height(usize, f32),
+    Format(usize),
+    /// A cell dragged from one place to before another (0…n).
+    Move(usize, usize),
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
@@ -87,6 +90,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     // top edge is pulled.)
     let nb_scroll = ui.make_persistent_id(egui::IdSalt::new(("notebook", &tab.id)));
     let mut pull = 0.0f32;
+    // A cell being dragged by its grip, the one let go; where the cells are.
+    let mut dragging: Option<usize> = None;
+    let mut dropped: Option<usize> = None;
+    let mut rects: Vec<egui::Rect> = Vec::new();
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
         for (i, cell) in nb.cells.iter().enumerate() {
             app.restore_cell(&tab.id, cell);
@@ -99,6 +106,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
                 // Its header: kind, run, what it gave; moving, adding, deleting.
                 ui.horizontal(|ui| {
+                    // A grip: dragged, the cell goes up or down.
+                    let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), egui::Sense::drag());
+                    grip.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "⠿"));
+                    let gc = if grip.hovered() || grip.dragged() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+                    if !crate::icons::paint(ui, gr, crate::icons::Ic::Grip, 16.0, gc) {
+                        ui.painter().text(gr.center(), egui::Align2::CENTER_CENTER, "⠿", egui::FontId::proportional(14.0), gc);
+                    }
+                    let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(t("Тянуть — переставить блок", "Drag: move the cell"));
+                    if grip.dragged() {
+                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        dragging = Some(i);
+                    }
+                    if grip.drag_stopped() {
+                        dropped = Some(i);
+                    }
                     let fold = ui.add(egui::Button::new("").min_size(egui::vec2(24.0, 24.0)));
                     crate::ui::paint_chevron(ui.painter(), fold.rect.center(), 11.0, if cell.collapsed { 0.0 } else { 1.0 }, if fold.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
                     let fold = fold.on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
@@ -131,6 +153,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
                             ui.add(egui::Spinner::new().size(14.0));
                             crate::app::stopwatch_label(ui, since, true);
+                        } else if let Some((took, cancelled)) = app.rt.get(&key).and_then(|r| r.last_run) {
+                            crate::app::last_run_label(ui, took, cancelled);
                         }
                         if crate::sql::notebook::parse_with(cell.text.trim().trim_end_matches(';'), dialect).is_some_and(|w| w.main.is_empty()) {
                             ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
@@ -160,6 +184,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                                 ui.close();
                             }
                         });
+                        // Its text to the clipboard; a SQL cell's own formatting.
+                        if ui.add(tinted("🗐".into(), crate::ui::BLUE).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Скопировать текст блока", "Copy the cell's text")).clicked() {
+                            ctx.copy_text(cell.text.clone());
+                        }
+                        if cell.kind == CellKind::Sql && ui.add(tinted("✨".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Форматировать этот блок", "Format this cell")).clicked() {
+                            ops.push(Op::Format(i));
+                        }
                         if cell.kind == CellKind::Sql {
                             ui.separator();
                             if has_out && ui.add(egui::Button::new("✖").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Очистить вывод (сохранённый остаётся)", "Clear the output (a kept one stays)")).clicked() {
@@ -350,10 +381,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             // The edge drawn twice: its rounded corners as strong as its
             // sides (a thin line's corners come out paler).
             let edge = framed.response.rect.shrink(0.5);
+            rects.push(framed.response.rect);
             for _ in 0..2 {
                 ui.painter().rect_stroke(edge, RADIUS, stroke, egui::StrokeKind::Middle);
             }
             ui.add_space(6.0);
+        }
+        // Dragging a cell: where it'd go (a line between cells); the notebook
+        // scrolls when the pointer is near its top or bottom.
+        let target = |y: f32| rects.iter().filter(|r| r.center().y < y).count();
+        if let (Some(from), Some(p)) = (dragging.or(dropped), ctx.pointer_interact_pos().or(ctx.pointer_hover_pos())) {
+            let to = target(p.y);
+            if dropped.is_some() {
+                ops.push(Op::Move(from, to));
+            } else if to != from && to != from + 1 {
+                let y = if to == 0 { rects[0].top() - 3.0 } else { rects[to - 1].bottom() + 3.0 };
+                let x = rects.first().map_or(ui.max_rect().x_range(), |r| r.x_range());
+                ui.painter().hline(x, y, Stroke::new(3.0, accent));
+            }
+            if dragging.is_some() {
+                let clip = ui.clip_rect();
+                let edge = 40.0;
+                let dy = if p.y < clip.top() + edge { 8.0 } else if p.y > clip.bottom() - edge { -8.0 } else { 0.0 };
+                if dy != 0.0 {
+                    ui.scroll_with_delta(egui::vec2(0.0, dy));
+                    ctx.request_repaint();
+                }
+            }
         }
         // Room to add one more at the end.
         ui.horizontal(|ui| {
@@ -414,6 +468,10 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
         app.rt.insert(key.clone(), crate::app::TabRt::default());
         return;
     }
+    if let Op::Format(i) = op {
+        app.format_cell(i);
+        return;
+    }
     let Some(nb) = app.tab_mut().notebook.as_mut() else { return };
     let mut focus = None;
     let mut edit: Option<String> = None;
@@ -436,6 +494,10 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
             }
         }
         Op::Up(i) if i > 0 => nb.cells.swap(i, i - 1),
+        Op::Move(from, to) if from < nb.cells.len() && to <= nb.cells.len() && to != from && to != from + 1 => {
+            let c = nb.cells.remove(from);
+            nb.cells.insert(if to > from { to - 1 } else { to }, c);
+        }
         Op::Down(i) if i + 1 < nb.cells.len() => nb.cells.swap(i, i + 1),
         Op::Kind(i, k) => {
             if let Some(c) = nb.cells.get_mut(i) {

@@ -63,28 +63,31 @@ GENERIC = {
     "outline": "list-tree tree-structure account_tree list-nested",
     "filter": "filter funnel filter_alt",
     "export": "download download-simple",
+    "copy": "copy content_copy files",
+    "grip": "grip-vertical gripper dots-six-vertical drag_indicator re_order_dots_vertical drag",
+    "done": "circle-check check-circle check_circle checkmark_circle check-circle-solid",
 }
 
 # A pack's own name for a concept, where it differs.
 OWN = {
-    "codicons": {"function": "symbol-method", "procedure": "gear", "trigger": "symbol-event", "job": "watch", "type": "text-size",
+    "codicons": {"done": "pass", "grip": "gripper", "function": "symbol-method", "procedure": "gear", "trigger": "symbol-event", "job": "watch", "type": "text-size",
                  "column": "symbol-field", "run_all": "run-all", "stop": "debug-stop", "rollback": "discard", "files": "files",
                  "file": "file", "settings": "settings-gear", "export": "export", "outline": "list-tree", "help": "question"},
-    "fluent": {"function": "math_formula", "procedure": "flow", "package": "box", "trigger": "flash", "sequence": "text_number_list_ltr",
+    "fluent": {"copy": "copy", "grip": "re_order_dots_vertical", "done": "checkmark_circle", "function": "math_formula", "procedure": "flow", "package": "box", "trigger": "flash", "sequence": "text_number_list_ltr",
                "job": "clock_alarm", "dictionary": "book_open", "type": "text_t", "column": "column_triple", "run_all": "fast_forward",
                "commit": "checkmark", "rollback": "arrow_undo", "files": "folder_open", "file": "document", "connections": "plug_connected",
                "filter": "filter", "export": "arrow_download", "outline": "text_bullet_list_tree", "help": "question_circle",
                "explain": "search", "format": "wand"},
-    "material": {"files": "folder_open", "file": "draft", "connections": "power", "filter": "filter_alt", "notebook": "note_stack",
+    "material": {"copy": "content_copy", "grip": "drag_indicator", "done": "check_circle", "files": "folder_open", "file": "draft", "connections": "power", "filter": "filter_alt", "notebook": "note_stack",
                  "format": "wand_stars", "function": "function", "help": "help", "outline": "account_tree"},
-    "iconoir": {"function": "sigma-function", "sequence": "numbered-list-left", "type": "text", "column": "view-columns-3", "notebook": "journal",
+    "iconoir": {"grip": "drag", "done": "check-circle", "function": "sigma-function", "sequence": "numbered-list-left", "type": "text", "column": "view-columns-3", "notebook": "journal",
                 "files": "multiple-pages", "file": "page", "connections": "ev-plug", "dictionary": "open-book", "outline": "list", "help": "help-circle",
                 "procedure": "settings", "format": "magic-wand", "rollback": "undo", "export": "download"},
-    "bootstrap": {"files": "folder2-open", "file": "file-earmark-text", "outline": "diagram-3", "notebook": "journal-code", "filter": "funnel",
+    "bootstrap": {"grip": "grip-vertical", "done": "check-circle", "files": "folder2-open", "file": "file-earmark-text", "outline": "diagram-3", "notebook": "journal-code", "filter": "funnel",
                   "help": "question-circle", "connections": "plug"},
-    "tabler": {"type": "typography", "function": "math-function", "outline": "list-tree", "help": "help-circle", "file": "file"},
-    "phosphor": {"function": "function", "outline": "tree-structure", "help": "question", "file": "file", "connections": "plug"},
-    "lucide": {"function": "square-function", "help": "circle-help"},
+    "tabler": {"done": "circle-check", "type": "typography", "function": "math-function", "outline": "list-tree", "help": "help-circle", "file": "file"},
+    "phosphor": {"grip": "dots-six-vertical", "done": "check-circle", "function": "function", "outline": "tree-structure", "help": "question", "file": "file", "connections": "plug"},
+    "lucide": {"done": "circle-check", "function": "square-function", "help": "circle-help"},
 }
 
 

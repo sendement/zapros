@@ -12,10 +12,10 @@ pub const PACKS: &[(&str, &str, &str)] = &[
     ("bootstrap", "Bootstrap", "MIT"),
 ];
 
-pub const CONCEPTS: [&str; 34] = ["connection", "schema", "folder", "table", "view", "matview", "function", "procedure", "package", "trigger", "sequence", "index", "job", "dictionary", "type", "synonym", "column", "key", "run", "run_all", "stop", "explain", "format", "commit", "rollback", "notebook", "files", "file", "connections", "settings", "help", "outline", "filter", "export"];
+pub const CONCEPTS: [&str; 37] = ["connection", "schema", "folder", "table", "view", "matview", "function", "procedure", "package", "trigger", "sequence", "index", "job", "dictionary", "type", "synonym", "column", "key", "run", "run_all", "stop", "explain", "format", "commit", "rollback", "notebook", "files", "file", "connections", "settings", "help", "outline", "filter", "export", "copy", "grip", "done"];
 
 /// [pack][concept] → the SVG.
-pub const SVG: [[&[u8]; 34]; 8] = [
+pub const SVG: [[&[u8]; 37]; 8] = [
     [
         include_bytes!("../assets/icons/lucide/connection.svg"),
         include_bytes!("../assets/icons/lucide/schema.svg"),
@@ -51,6 +51,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/lucide/outline.svg"),
         include_bytes!("../assets/icons/lucide/filter.svg"),
         include_bytes!("../assets/icons/lucide/export.svg"),
+        include_bytes!("../assets/icons/lucide/copy.svg"),
+        include_bytes!("../assets/icons/lucide/grip.svg"),
+        include_bytes!("../assets/icons/lucide/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/tabler/connection.svg"),
@@ -87,6 +90,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/tabler/outline.svg"),
         include_bytes!("../assets/icons/tabler/filter.svg"),
         include_bytes!("../assets/icons/tabler/export.svg"),
+        include_bytes!("../assets/icons/tabler/copy.svg"),
+        include_bytes!("../assets/icons/tabler/grip.svg"),
+        include_bytes!("../assets/icons/tabler/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/phosphor/connection.svg"),
@@ -123,6 +129,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/phosphor/outline.svg"),
         include_bytes!("../assets/icons/phosphor/filter.svg"),
         include_bytes!("../assets/icons/phosphor/export.svg"),
+        include_bytes!("../assets/icons/phosphor/copy.svg"),
+        include_bytes!("../assets/icons/phosphor/grip.svg"),
+        include_bytes!("../assets/icons/phosphor/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/codicons/connection.svg"),
@@ -159,6 +168,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/codicons/outline.svg"),
         include_bytes!("../assets/icons/codicons/filter.svg"),
         include_bytes!("../assets/icons/codicons/export.svg"),
+        include_bytes!("../assets/icons/codicons/copy.svg"),
+        include_bytes!("../assets/icons/codicons/grip.svg"),
+        include_bytes!("../assets/icons/codicons/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/fluent/connection.svg"),
@@ -195,6 +207,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/fluent/outline.svg"),
         include_bytes!("../assets/icons/fluent/filter.svg"),
         include_bytes!("../assets/icons/fluent/export.svg"),
+        include_bytes!("../assets/icons/fluent/copy.svg"),
+        include_bytes!("../assets/icons/fluent/grip.svg"),
+        include_bytes!("../assets/icons/fluent/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/material/connection.svg"),
@@ -231,6 +246,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/material/outline.svg"),
         include_bytes!("../assets/icons/material/filter.svg"),
         include_bytes!("../assets/icons/material/export.svg"),
+        include_bytes!("../assets/icons/material/copy.svg"),
+        include_bytes!("../assets/icons/material/grip.svg"),
+        include_bytes!("../assets/icons/material/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/iconoir/connection.svg"),
@@ -267,6 +285,9 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/iconoir/outline.svg"),
         include_bytes!("../assets/icons/iconoir/filter.svg"),
         include_bytes!("../assets/icons/iconoir/export.svg"),
+        include_bytes!("../assets/icons/iconoir/copy.svg"),
+        include_bytes!("../assets/icons/iconoir/grip.svg"),
+        include_bytes!("../assets/icons/iconoir/done.svg"),
     ],
     [
         include_bytes!("../assets/icons/bootstrap/connection.svg"),
@@ -303,5 +324,8 @@ pub const SVG: [[&[u8]; 34]; 8] = [
         include_bytes!("../assets/icons/bootstrap/outline.svg"),
         include_bytes!("../assets/icons/bootstrap/filter.svg"),
         include_bytes!("../assets/icons/bootstrap/export.svg"),
+        include_bytes!("../assets/icons/bootstrap/copy.svg"),
+        include_bytes!("../assets/icons/bootstrap/grip.svg"),
+        include_bytes!("../assets/icons/bootstrap/done.svg"),
     ],
 ];

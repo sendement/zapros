@@ -46,6 +46,9 @@ pub enum Ic {
     Outline,
     Filter,
     Export,
+    Copy,
+    Grip,
+    Done,
 }
 
 impl Ic {
@@ -92,6 +95,9 @@ impl Ic {
             "?" => Ic::Help,
             "📁" => Ic::Folder,
             "💾" => Ic::Export,
+            "🗐" | "📋" => Ic::Copy,
+            "⠿" => Ic::Grip,
+            "✓" => Ic::Done,
             "📜" | "📄" => Ic::File,
             _ => return None,
         })

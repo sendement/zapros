@@ -75,7 +75,13 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   gap) and the tables', any installed family (searchable list, monospaced
   first where it fits), each with its size; a preview of all three.
 - **A stopwatch** by every spinner of a running query (the toolbar, the
-  script's tab, a notebook cell, rows being fetched): 0:03.4, 12:05.0…
+  script's tab, a notebook cell, rows being fetched): 0:03.4, 12:05.0… Once
+  it's over, the last run's time stays there (✓ 0:03.4; amber if cancelled).
+- **Notebook cells** are dragged up and down by their grip (a line shows
+  where they'd go; the notebook scrolls near its edges); each has its own
+  Format and Copy; the top bar's Format lays out every SQL cell (Markdown
+  stays). The plain script has Copy too (the script, or what's picked), and
+  its code lies on the same rounded ground as a cell's.
 - **Markdown cells**: a right click while editing gives bold, italic,
   strikethrough, inline code, link, headings, lists (bulleted, numbered,
   checklist), quote, code block, table, divider — on the picked text or
