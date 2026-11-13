@@ -102,8 +102,9 @@ pub fn sizes(s: &mut egui::Style, f: &Fonts) {
     let k = f.ui_size.clamp(8.0, 32.0);
     s.text_styles.insert(TextStyle::Body, FontId::proportional(k));
     s.text_styles.insert(TextStyle::Button, FontId::proportional(k));
-    s.text_styles.insert(TextStyle::Small, FontId::proportional((k * 0.72).round()));
-    s.text_styles.insert(TextStyle::Heading, FontId::proportional((k * 1.44).round()));
-    s.text_styles.insert(TextStyle::Monospace, FontId::monospace(k - 0.5));
+    // (egui's own proportions: 9 / 13 / 18.)
+    s.text_styles.insert(TextStyle::Small, FontId::proportional((k * 9.0 / 13.0).round()));
+    s.text_styles.insert(TextStyle::Heading, FontId::proportional((k * 18.0 / 13.0).round()));
+    s.text_styles.insert(TextStyle::Monospace, FontId::monospace(k));
     s.text_styles.insert(TextStyle::Name("table".into()), FontId::new(f.table_size.clamp(7.0, 32.0), FontFamily::Name("table".into())));
 }

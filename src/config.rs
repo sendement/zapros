@@ -186,7 +186,7 @@ pub struct Fonts {
 
 impl Default for Fonts {
     fn default() -> Self {
-        Self { ui: String::new(), ui_size: 12.5, code: String::new(), table: String::new(), table_size: 12.0, code_spacing: 0.0 }
+        Self { ui: String::new(), ui_size: 13.0, code: String::new(), table: String::new(), table_size: 13.0, code_spacing: 0.0 }
     }
 }
 

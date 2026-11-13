@@ -394,12 +394,10 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
 /// The table of a result. True when its columns were moved (the order is
 /// kept for the next runs with the same columns).
 fn table(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool {
-    // In the tables' font (the cells and the headers).
+    // The cells in the tables' font (the headers in the interface's).
     ui.scope(|ui| {
         if let Some(tf) = ui.style().text_styles.get(&egui::TextStyle::Name("table".into())).cloned() {
-            let st = ui.style_mut();
-            st.text_styles.insert(egui::TextStyle::Monospace, tf.clone());
-            st.text_styles.insert(egui::TextStyle::Body, tf);
+            ui.style_mut().text_styles.insert(egui::TextStyle::Monospace, tf);
         }
         table_in(ui, tab, i, v)
     })
