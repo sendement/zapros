@@ -118,22 +118,39 @@ impl Look {
     }
 }
 
-/// Room the three buttons take on the top bar (with a little margin).
-pub fn buttons_width(style: Style, height: f32) -> f32 {
-    group_width(style, fit(style, height)) + 16.0
+/// Half a button's ground (what's lit under the pointer) at scale 1:
+/// a circle's radius, Windows 11's square's half side.
+fn ground(style: Style) -> f32 {
+    match style.resolve() {
+        Style::Breeze | Style::Yaru => 11.0,
+        Style::Adwaita => 12.0,
+        Style::Macos => 6.5,
+        Style::Win11 => 19.0,
+        _ => 13.0,
+    }
 }
 
-/// The scale the buttons take to fit `height` (a little room above and
-/// below their grounds; never larger than their own size).
-pub fn fit(style: Style, height: f32) -> f32 {
+/// Where the buttons go in a band `height` high from `top`, their grounds
+/// `margin` in from the window's edge `edge` (its right, or left when
+/// `left`): the group's left, its middle's height, its scale. The grounds
+/// fill the band (macOS's lights stay smaller, as they are).
+pub fn place(style: Style, edge: f32, top: f32, height: f32, margin: f32, left: bool) -> (f32, f32, f32) {
     let (size, _) = style.metrics();
-    // (Their grounds reach about their size; the round ones less.)
-    let ground = match style.resolve() {
-        Style::Macos => size.y,
-        Style::Win11 => size.y,
-        _ => size.y * 0.75,
-    };
-    ((height - 6.0) / ground).min(1.0)
+    let g = ground(style);
+    let fill = if style.resolve() == Style::Macos { 0.5 } else { 1.0 };
+    let scale = height * fill / (2.0 * g);
+    // (A ground's edge stands back from its button's rect by this much.)
+    let inset = (size.x / 2.0 - g) * scale;
+    let w = group_width(style, scale);
+    let x = if left { edge + margin - inset } else { edge - margin + inset - w };
+    (x, top + height / 2.0, scale)
+}
+
+/// Room the buttons take from the window's edge (with as much again
+/// before the tabs).
+pub fn buttons_width(style: Style, height: f32, margin: f32) -> f32 {
+    let (x, _, scale) = place(style, 0.0, 0.0, height, margin, true);
+    x + group_width(style, scale) + margin * 2.0
 }
 
 fn group_width(style: Style, scale: f32) -> f32 {
@@ -143,9 +160,8 @@ fn group_width(style: Style, scale: f32) -> f32 {
 
 /// The three buttons from `x` (their left edge) on the row's middle `cy`;
 /// the one clicked.
-pub fn buttons(ui: &mut Ui, look: Look, x: f32, cy: f32, height: f32) -> Option<WinButton> {
+pub fn buttons(ui: &mut Ui, look: Look, x: f32, cy: f32, scale: f32) -> Option<WinButton> {
     let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
-    let scale = fit(look.style, height);
     let rects = layout(look.style, &look.order, x, cy, scale);
     let resp: Vec<egui::Response> = rects.iter().map(|(b, r)| ui.interact(*r, ui.id().with(("win-button", *b as u8)), Sense::click())).collect();
     // (macOS shows its glyphs while the pointer is over any of them.)

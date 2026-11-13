@@ -23,6 +23,10 @@ pub fn conn_dot(app: &App, conn: &str) -> (Color32, String) {
 
 /// Height of the row of workspace tabs (and of the icons beside it).
 pub const ROW_H: f32 = 32.0;
+/// The side panel's icons: the row less a gap as wide as the one above it
+/// (the panel's top margin), so their lit squares stand as far from the
+/// card below as from the window's top.
+const ICON_H: f32 = ROW_H - 6.0;
 pub const SHEET_R: f32 = 8.0;
 /// Where the sheet lay last frame (for the side panel's card).
 pub const SHEET_KEY: &str = "sheet-rect";
@@ -114,7 +118,9 @@ fn elided(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -
 
 /// A square icon button of the side panel's row; `on`: shown pressed.
 fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(Vec2::splat(ROW_H - 2.0), egui::Sense::click());
+    // (Its lit square as far from the panel's card below as from the
+    // window's top above.)
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(ICON_H), egui::Sense::click());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     let v = ui.visuals();
     let fill = if on {
@@ -126,9 +132,9 @@ fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     };
     ui.painter().rect_filled(rect, RADIUS, fill);
     let color = if on || r.hovered() { v.strong_text_color() } else { v.text_color() };
-    let drawn = crate::icons::Ic::for_glyph(glyph).is_some_and(|ic| crate::icons::paint(ui, rect, ic, 18.0, color));
+    let drawn = crate::icons::Ic::for_glyph(glyph).is_some_and(|ic| crate::icons::paint(ui, rect, ic, 17.0, color));
     if !drawn {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(17.0), color);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(16.0), color);
     }
     r.on_hover_text(tip)
 }
@@ -154,7 +160,7 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
     let wid = egui::Id::new("icon-bar-w");
     let last: f32 = ctx.data(|d| d.get_temp(wid)).unwrap_or(0.0);
     let row = ui.horizontal(|ui| {
-        ui.set_height(ROW_H);
+        ui.set_height(ICON_H);
         ui.spacing_mut().item_spacing.x = 2.0;
         let start = ui.cursor().left();
         // (Not measured yet: no room before it — the panel mustn't widen.)
@@ -170,7 +176,7 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
             app.session.side_files = true;
             app.touch();
         }
-        let (sep, _) = ui.allocate_exact_size(Vec2::new(9.0, ROW_H - 10.0), egui::Sense::hover());
+        let (sep, _) = ui.allocate_exact_size(Vec2::new(9.0, ICON_H - 8.0), egui::Sense::hover());
         ui.painter().vline(sep.center().x, sep.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
         icon_menu(ui, "🗋", t("Файл", "File"), |ui| file_menu(app, ui));
         icon_menu(ui, "🔌", t("Подключения", "Connections"), |ui| conn_menu(app, ui, &ctx));
@@ -934,9 +940,12 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // start), the row's empty room drags it, a double click maximizes.
         let own = !app.settings.system_titlebar;
         let look = crate::titlebar::Look::of(&app.settings);
-        // (They fit the room of a not-chosen tab: clear of the sheet's edge.)
-        let (btn_top, btn_bottom) = (row.top() + IDLE_TOP, sheet.top() - IDLE_GAP);
-        let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top) } else { 0.0 };
+        // (Their grounds as far from the window's top as from its side, as
+        // low as a not-chosen tab's bottom.)
+        const M: f32 = 6.0;
+        let win = ui.ctx().content_rect();
+        let (btn_top, btn_bottom) = (win.top() + M, sheet.top() - IDLE_GAP);
+        let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top, M) - (win.right() - row.right()) } else { 0.0 };
         let reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
         if own {
             let drag = ui.interact(row, ui.id().with("title-drag"), egui::Sense::click_and_drag());
@@ -949,8 +958,9 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
         workspaces(app, ui, row, sheet, reserve);
         if own {
-            let x = if look.left { sheet.left() + 8.0 } else { row.right() - win_w + 8.0 };
-            if let Some(b) = crate::titlebar::buttons(ui, look, x, (btn_top + btn_bottom) / 2.0, btn_bottom - btn_top) {
+            let edge = if look.left { sheet.left() } else { win.right() };
+            let (x, cy, scale) = crate::titlebar::place(look.style, edge, btn_top, btn_bottom - btn_top, M, look.left);
+            if let Some(b) = crate::titlebar::buttons(ui, look, x, cy, scale) {
                 crate::titlebar::press(ui.ctx(), b);
             }
         }

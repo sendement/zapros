@@ -1788,6 +1788,21 @@ fn workspace_tabs_dragged_and_own_title_bar() {
     settle(&mut h);
     assert!(h.query_by_label("Закрыть").is_some() || h.query_all_by_label_contains("Закрыть").count() > 0);
     shot(&mut h, "own-titlebar");
+    // Windows 11's: the button is its ground — as far from the top as from
+    // the right edge.
+    h.state_mut().settings.win_style = crate::titlebar::Style::Win11;
+    settle(&mut h);
+    let c = h.get_by_label("Закрыть").rect();
+    assert!((c.min.y - 6.0).abs() < 0.6 && (1280.0 - c.max.x - 6.0).abs() < 0.6, "{c:?}");
+    let p = egui::pos2(((c.min.x + c.max.x) / 2.0) as f32, ((c.min.y + c.max.y) / 2.0) as f32);
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "own-titlebar-win11");
+    // The side panel's icons: their squares 6 from the top, 6 from the card.
+    let i = h.get_by_label("Настройки").rect();
+    assert!((i.min.y - 6.0).abs() < 0.6 && (38.0 - i.max.y - 6.0).abs() < 0.6, "{i:?}");
     h.state_mut().settings_open = true;
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
     settle(&mut h);
