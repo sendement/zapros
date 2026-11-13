@@ -258,6 +258,10 @@ impl App {
         let settings: Settings = config::load(&settings_path());
         crate::i18n::set_ru(settings.russian.unwrap_or_else(crate::i18n::system_is_ru));
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // Before the first frame: what it draws asks for these families
+        // (fonts set during a frame come only with the next one).
+        crate::fonts::install(&cc.egui_ctx, &settings.fonts);
+        let fonts_applied = Some(settings.fonts.clone());
         let mut session: Session = config::load(&session_path());
         if session.workspaces.is_empty() {
             session = Session::default();
@@ -275,7 +279,7 @@ impl App {
         }
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = Self {
-            fonts_applied: None,
+            fonts_applied,
             settings,
             conns: config::load(&conns_path()),
             session,

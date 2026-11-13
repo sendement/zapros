@@ -1632,3 +1632,30 @@ fn markdown_menu_and_new_marks() {
     shot(&mut h, "md-menu");
     assert!(h.query_by_label("Таблица").is_some() && h.query_by_label("Чек-лист").is_some());
 }
+
+/// Started on a session whose first frame draws bold Markdown, a table's
+/// cells, keywords in bold: every font family is there from the start.
+#[test]
+fn starts_on_a_notebook_with_bold_markdown() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = dir("start-bold");
+    unsafe {
+        std::env::set_var("ZAPROS_CONFIG", d.join("config"));
+        std::env::set_var("ZAPROS_DATA", d.join("data"));
+        std::env::set_var("ZAPROS_NO_KEYRING", "1");
+    }
+    let nb = config::Notebook {
+        on: true,
+        cells: vec![
+            config::Cell { id: "m".into(), kind: config::CellKind::Markdown, text: "# Report\n**bold** and *italic*\n\n| a | b |\n| --- | --- |\n| **x** | 1 |".into(), ..Default::default() },
+            config::Cell { id: "s".into(), kind: config::CellKind::Sql, text: "select 1".into(), ..Default::default() },
+        ],
+    };
+    let session = Session { workspaces: vec![Workspace { name: "w".into(), tabs: vec![Tab { title: "nb".into(), notebook: Some(nb), ..Default::default() }], ..Default::default() }], ..Default::default() };
+    config::save(&d.join("data/session.json"), &session).unwrap();
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(|cc| App::new(cc));
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.state().tab().is_notebook());
+}
