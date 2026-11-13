@@ -418,6 +418,7 @@ fn gradient_strip(ui: &mut egui::Ui, b: &crate::themes::Backdrop, size: egui::Ve
 
 /// Colour schemes and the backdrop's gradient.
 fn look(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
+    use crate::icons::Ic;
     use crate::themes::{SCHEMES, Stop, mix};
     ui.label(RichText::new(t("Цветовая схема", "Colour scheme")).strong());
     ui.label(RichText::new(t("Схема задаёт цвета окна и палитру редактора (её можно доправить на вкладке «Подсветка»).", "A scheme sets the window's colours and the editor's palette (fine-tune it under Colours).")).weak().small());
@@ -452,6 +453,40 @@ fn look(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
         s.dark = Palette::dark();
         s.light = Palette::light();
     }
+    ui.separator();
+    ui.label(RichText::new(t("Иконки", "Icons")).strong());
+    let sample = [Ic::Connection, Ic::Table, Ic::View, Ic::Function, Ic::Procedure, Ic::Package, Ic::Trigger, Ic::Job, Ic::Key, Ic::Run, Ic::RunAll, Ic::Format, Ic::Commit, Ic::Settings];
+    let weak = ui.visuals().weak_text_color();
+    let pal = if ui.visuals().dark_mode { s.dark.clone() } else { s.light.clone() };
+    egui::Grid::new("icon-packs").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+        let text = ui.visuals().text_color();
+        if ui.radio(s.icons.is_empty(), t("Символы шрифта", "Font symbols")).clicked() {
+            s.icons.clear();
+        }
+        ui.label(RichText::new("🗄 ▦ 👁 ƒ ⚙ 📦 ⚡ ⏱ 🔑 ▶ ⏩ ✨ ✔ ⚙").color(text));
+        ui.label("");
+        ui.end_row();
+        for (i, (id, name, lic)) in crate::icons_data::PACKS.iter().enumerate() {
+            if ui.radio(s.icons == *id, *name).clicked() {
+                s.icons = id.to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                for (k, ic) in sample.iter().enumerate() {
+                    // The tree's kinds in their colours, the rest plain.
+                    let kind = [crate::db::ObjKind::Database, crate::db::ObjKind::Table, crate::db::ObjKind::View, crate::db::ObjKind::Function, crate::db::ObjKind::Procedure, crate::db::ObjKind::Package, crate::db::ObjKind::Trigger, crate::db::ObjKind::Job, crate::db::ObjKind::Key].get(k);
+                    let c = match kind {
+                        Some(&kd) if s.icon_colors => crate::icons::kind_color(kd, &pal, text),
+                        _ => text,
+                    };
+                    ui.add(crate::icons::image_of(i, *ic, 18.0, c));
+                }
+            });
+            ui.label(RichText::new(*lic).small().color(weak));
+            ui.end_row();
+        }
+    });
+    ui.checkbox(&mut s.icon_colors, t("Значки дерева в цветах палитры (таблицы, функции, триггеры…)", "Tree icons in the palette's colours (tables, functions, triggers…)"));
     ui.separator();
     let b = &mut s.backdrop;
     ui.label(RichText::new(t("Фон окна", "Window backdrop")).strong());
@@ -870,6 +905,8 @@ fn small(app: &mut App, ctx: &egui::Context) {
                     ui.end_row();
                 }
             });
+            ui.separator();
+            ui.label(RichText::new(format!("{}: {}", t("Иконки", "Icons"), crate::icons::credits())).small().weak());
         });
         if !open {
             app.about = false;

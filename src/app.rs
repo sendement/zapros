@@ -254,6 +254,7 @@ impl App {
         let settings: Settings = config::load(&settings_path());
         crate::i18n::set_ru(settings.russian.unwrap_or_else(crate::i18n::system_is_ru));
         crate::fonts::install(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let mut session: Session = config::load(&session_path());
         if session.workspaces.is_empty() {
             session = Session::default();
@@ -1490,6 +1491,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
         self.closing(&ctx);
+        crate::icons::set_pack(&self.settings.icons);
         // The backdrop's gradient, under the panels (they leave it bare).
         crate::themes::set_gradient(self.settings.backdrop.on);
         if self.settings.backdrop.on {

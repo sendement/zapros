@@ -189,6 +189,36 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// An object kind's icon in the tree: the pack's (in the kind's colour),
+/// or the symbol.
+fn kind_icon(app: &App, ui: &mut egui::Ui, k: ObjKind) {
+    let weak = ui.visuals().weak_text_color();
+    let p = if ui.visuals().dark_mode { &app.settings.dark } else { &app.settings.light };
+    let c = if app.settings.icon_colors { crate::icons::kind_color(k, p, weak) } else { weak };
+    let size = (ui.text_style_height(&egui::TextStyle::Body) - 1.0).max(12.0);
+    match crate::icons::image(crate::icons::Ic::of(k), size, c) {
+        Some(img) => {
+            ui.add(img);
+        }
+        None => {
+            ui.label(RichText::new(k.icon()).weak());
+        }
+    }
+}
+
+/// A file's or folder's icon in the files panel.
+fn file_icon(ui: &mut egui::Ui, ic: crate::icons::Ic, glyph: &str, c: Color32) {
+    let size = (ui.text_style_height(&egui::TextStyle::Body) - 1.0).max(12.0);
+    match crate::icons::image(ic, size, c) {
+        Some(img) => {
+            ui.add(img);
+        }
+        None => {
+            ui.label(RichText::new(glyph).color(c));
+        }
+    }
+}
+
 fn matches_filter(app: &App, o: &Obj) -> bool {
     let f = app.tree_filter.trim().to_lowercase();
     f.is_empty() || o.kind == ObjKind::Folder || o.kind == ObjKind::Schema || o.kind == ObjKind::Database || o.name.to_lowercase().contains(&f)
@@ -245,7 +275,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                 } else {
                     Some(ui.add(egui::Label::new(if open { "⏷" } else { "⏵" }).sense(egui::Sense::click())))
                 };
-                ui.label(RichText::new(o.kind.icon()).weak());
+                kind_icon(app, ui, o.kind);
                 let n = ui.add(egui::Label::new(&label).sense(egui::Sense::click()).selectable(false));
                 if !o.note.is_empty() {
                     ui.add(egui::Label::new(RichText::new(&o.note).small().weak()).truncate());
@@ -402,7 +432,15 @@ fn dir(app: &mut App, ui: &mut egui::Ui, d: &Path) {
         let p: PathBuf = d.join(&name);
         if is_dir {
             let open = app.open_dirs.contains(&p);
-            let r = ui.add(egui::Label::new(format!("{} 📁 {name}", if open { "⏷" } else { "⏵" })).sense(egui::Sense::click()).selectable(false));
+            let r = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(if open { "⏷" } else { "⏵" });
+                    let c = ui.visuals().text_color();
+                    file_icon(ui, crate::icons::Ic::Folder, "📁", c);
+                    ui.add(egui::Label::new(&name).sense(egui::Sense::click()).selectable(false))
+                })
+                .inner;
             if r.clicked() {
                 if open {
                     app.open_dirs.remove(&p);
@@ -415,14 +453,22 @@ fn dir(app: &mut App, ui: &mut egui::Ui, d: &Path) {
             }
         } else {
             let sql = name.to_lowercase().ends_with(".sql");
-            let mut text = RichText::new(format!("   {} {name}", if sql { "📜" } else { "📄" }));
+            let mut text = RichText::new(&name);
             if !sql {
                 text = text.weak();
             }
             if open_tab.as_deref() == Some(p.as_path()) {
                 text = text.strong();
             }
-            let r = ui.add(egui::Label::new(text).sense(egui::Sense::click()).selectable(false));
+            let r = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.add_space(16.0);
+                    let c = if sql { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+                    file_icon(ui, crate::icons::Ic::File, if sql { "📜" } else { "📄" }, c);
+                    ui.add(egui::Label::new(text).sense(egui::Sense::click()).selectable(false))
+                })
+                .inner;
             if r.clicked() {
                 app.open_file(&p);
             }

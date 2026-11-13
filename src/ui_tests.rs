@@ -1122,7 +1122,7 @@ fn wheel_scrolls_while_selecting() {
     // A small move makes it a drag; then the wheel, the pointer still.
     h.input_mut().events.push(egui::Event::PointerMoved(p + egui::vec2(0.0, 30.0)));
     h.step();
-    for _ in 0..6 {
+    for _ in 0..4 {
         h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -300.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
         h.step();
     }
@@ -1470,4 +1470,36 @@ fn ctrl_click_opens_a_function() {
     assert_eq!(h.state().tab().title, "vip");
     assert!(h.state().tab().text.to_lowercase().contains("function public.vip"), "{}", h.state().tab().text);
     shot(&mut h, "follow-function");
+}
+
+#[test]
+fn icon_packs_in_the_tree_and_toolbar() {
+    let (mut h, _g) = harness("icons", SCRIPT, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    for p in [vec![], vec!["tables".to_string()], vec!["tables".into(), "orders".into()], vec!["views".into()], vec!["indexes".into()], vec!["triggers".into()]] {
+        h.state_mut().open_nodes.insert(("lite".into(), p));
+        settle(&mut h);
+    }
+    h.state_mut().settings_open = true;
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 5usize));
+    settle(&mut h);
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(300.0, 300.0)));
+    h.step();
+    for _ in 0..4 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -120.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    settle(&mut h);
+    shot(&mut h, "icons-settings");
+    h.state_mut().settings_open = false;
+    for (id, ..) in crate::icons_data::PACKS {
+        h.state_mut().settings.icons = id.to_string();
+        settle(&mut h);
+        shot(&mut h, &format!("icons-{id}"));
+    }
+    // The symbols as before.
+    h.state_mut().settings.icons.clear();
+    settle(&mut h);
+    shot(&mut h, "icons-none");
 }

@@ -64,6 +64,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   GitHub Dark / Light, Gruvbox, Catppuccin Mocha / Latte, Tokyo Night —
   window colours and the editor's palette together (Settings → Look); the
   standard look follows the system or is set dark / light.
+- **Icon packs** (Settings → Look): Lucide, Tabler, Phosphor, Codicons,
+  Fluent, Material Symbols, Iconoir, Bootstrap — or the font's symbols as
+  before — in the object tree, the files panel and the toolbars; tinted by
+  the scheme, the tree's kinds (tables, functions, triggers…) in the
+  palette's colours if wished. What a pack lacks comes from the pack nearest
+  in look; licences in `assets/icons/LICENSES.md` and in About.
 - **Backdrop gradient**: behind the tabs, panels and status line, any
   number of colour stops, linear at an angle or from the centre, its
   strength over the scheme's own backdrop; presets to start from.

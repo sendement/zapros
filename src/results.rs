@@ -226,6 +226,9 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
                 ui.ctx().copy_text(as_tsv(v));
             }
             ui.separator();
+            if let Some(img) = crate::icons::image(crate::icons::Ic::Filter, 15.0, ui.visuals().weak_text_color()) {
+                ui.add(img);
+            }
             let fr = ui.add(egui::TextEdit::singleline(&mut v.filter).hint_text(t("фильтр…", "filter…")).desired_width(140.0));
             if fr.changed() {
                 reorder(v);

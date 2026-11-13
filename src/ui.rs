@@ -114,7 +114,10 @@ fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     };
     ui.painter().rect_filled(rect, RADIUS, fill);
     let color = if on || r.hovered() { v.strong_text_color() } else { v.text_color() };
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(17.0), color);
+    let drawn = crate::icons::Ic::for_glyph(glyph).is_some_and(|ic| crate::icons::paint(ui, rect, ic, 18.0, color));
+    if !drawn {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(17.0), color);
+    }
     r.on_hover_text(tip)
 }
 
@@ -635,8 +638,27 @@ pub const BLUE: Color32 = Color32::from_rgb(66, 133, 244);
 pub const VIOLET: Color32 = Color32::from_rgb(171, 71, 188);
 
 /// A toolbar button in its colour: a wash of it, its edge, the icon in it.
+/// A toggle with an icon (the pack's, or the symbol) and maybe a name.
+pub fn selectable(on: bool, glyph: &str, name: Option<&str>, c: Color32) -> egui::Button<'static> {
+    match crate::icons::Ic::for_glyph(glyph).and_then(|ic| crate::icons::image(ic, 16.0, c)) {
+        Some(img) => match name {
+            Some(n) => egui::Button::selectable(on, (img, n.to_string())),
+            None => egui::Button::selectable(on, img),
+        },
+        None => egui::Button::selectable(on, name.map_or(glyph.to_string(), |n| format!("{glyph} {n}"))),
+    }
+}
+
 pub fn tinted(text: String, c: Color32) -> egui::Button<'static> {
     let (icon, rest) = text.split_once(' ').map_or((text.as_str(), None), |(a, b)| (a, Some(b)));
+    // An icon of the pack in use for the symbol.
+    if let Some(img) = crate::icons::Ic::for_glyph(icon).and_then(|ic| crate::icons::image(ic, 16.0, c)) {
+        let b = match rest {
+            Some(r) => egui::Button::image_and_text(img, r.to_string()),
+            None => egui::Button::image(img),
+        };
+        return b.fill(c.gamma_multiply(0.16)).stroke(Stroke::new(1.0, c.gamma_multiply(0.55)));
+    }
     let mut job = egui::text::LayoutJob::default();
     let font = egui::TextStyle::Button;
     RichText::new(icon).color(c).append_to(&mut job, &egui::Style::default(), egui::FontSelection::Style(font.clone()), egui::Align::Center);
@@ -751,14 +773,14 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let nb = app.tab().is_notebook();
-            if ui.add(egui::Button::selectable(nb, if compact { "📓".to_string() } else { format!("📓 {}", t("Блокнот", "Notebook")) })).on_hover_text(t("Вкладка как блокнот: независимые блоки SQL и Markdown, у каждого свой вывод. Выключить — снова одно полотно", "The tab as a notebook: separate SQL and Markdown cells, each with its own output. Off: one text again")).clicked() {
+            if ui.add(selectable(nb, "📓", (!compact).then(|| t("Блокнот", "Notebook")), ui.visuals().text_color())).on_hover_text(t("Вкладка как блокнот: независимые блоки SQL и Markdown, у каждого свой вывод. Выключить — снова одно полотно", "The tab as a notebook: separate SQL and Markdown cells, each with its own output. Off: one text again")).clicked() {
                 app.toggle_notebook();
             }
             if nb {
                 return;
             }
             let on = app.session.outline;
-            if ui.add(egui::Button::selectable(on, if compact { "☰".to_string() } else { format!("☰ {}", t("Структура", "Structure")) })).on_hover_text(t("Панель структуры: функции, процедуры, типы, запросы   Ctrl+Shift+O", "Structure panel: functions, procedures, types, statements   Ctrl+Shift+O")).clicked() {
+            if ui.add(selectable(on, "☰", (!compact).then(|| t("Структура", "Structure")), ui.visuals().text_color())).on_hover_text(t("Панель структуры: функции, процедуры, типы, запросы   Ctrl+Shift+O", "Structure panel: functions, procedures, types, statements   Ctrl+Shift+O")).clicked() {
                 app.session.outline = !on;
                 app.touch();
             }

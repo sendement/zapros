@@ -160,6 +160,10 @@ pub struct Settings {
     pub scheme: String,
     /// The backdrop (round the sheet) as a gradient.
     pub backdrop: crate::themes::Backdrop,
+    /// The icon pack's id ("" — the font's symbols).
+    pub icons: String,
+    /// The tree's icons in their kinds' colours (else in the text's).
+    pub icon_colors: bool,
 }
 
 impl Default for Settings {
@@ -189,6 +193,8 @@ impl Default for Settings {
             close_always: false,
             scheme: String::new(),
             backdrop: crate::themes::Backdrop::default(),
+            icons: "lucide".into(),
+            icon_colors: true,
         }
     }
 }
