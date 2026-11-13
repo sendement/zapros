@@ -57,6 +57,9 @@ fn kind_folder(f: &str) -> Option<(&'static str, ObjKind)> {
 
 impl Ora {
     pub fn open(spec: &Spec, password: &str) -> Res<Self> {
+        if let Err(message) = crate::drivers::init_oracle() {
+            return Err(Failure { message: format!("{message}\n\n{}", crate::drivers::hint()), at: None, lost: false });
+        }
         let mut c = Connector::new(spec.user.as_str(), password, connect_string(spec));
         let mut user = spec.user.trim().to_string();
         // "sys as sysdba"
@@ -69,7 +72,7 @@ impl Ora {
         let mut conn = c.connect().map_err(|e| {
             let mut f = fail(e);
             if f.message.contains("DPI-1047") {
-                f.message += "\n\nOracle Instant Client is needed (libclntsh.so): e.g. the AUR package oracle-instantclient-basic.";
+                f.message = format!("{}\n\n{}", f.message, crate::drivers::hint());
             }
             f
         })?;

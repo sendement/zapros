@@ -227,12 +227,26 @@ fn settings_and_workspace_windows() {
     shot(&mut h, "settings-formatter");
     // One size on every page.
     let mut sizes = Vec::new();
-    for page in 0..6usize {
+    for page in 0..7usize {
         h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), page));
         settle(&mut h);
         sizes.push(h.ctx.memory(|m| m.area_rect(egui::Id::new("settings-window"))).map(|r| r.size()));
     }
     assert!(sizes[0].is_some() && sizes.iter().all(|s| *s == sizes[0]), "{sizes:?}");
+    // Drivers: a client downloaded earlier is listed and can be picked;
+    // the pick waits for a restart.
+    let lib = crate::drivers::root().join("23.26.4.0.0-lite/instantclient_23_26");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("libclntsh.so"), b"").unwrap();
+    h.ctx.data_mut(|d| d.remove_temp::<std::sync::Arc<Vec<crate::drivers::Installed>>>(egui::Id::new("drivers-installed")));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 6usize));
+    settle(&mut h);
+    h.get_by_label("23.26.4.0.0-lite").click();
+    settle(&mut h);
+    assert_eq!(h.state().settings.oracle_client, lib.to_string_lossy());
+    let _ = h.get_by_label_contains("после перезапуска");
+    shot(&mut h, "settings-drivers");
+    h.state_mut().settings.oracle_client.clear();
     // A new scale waits while the settings are open, comes once closed.
     h.state_mut().settings.ui_scale = 1.25;
     settle(&mut h);

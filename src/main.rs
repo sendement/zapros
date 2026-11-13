@@ -7,6 +7,7 @@ mod db;
 mod design;
 mod design_ui;
 mod dialogs;
+mod drivers;
 mod editor;
 mod export;
 mod fonts;
@@ -31,6 +32,9 @@ mod ui_tests;
 fn main() -> eframe::Result {
     // The desktop's title bar, or the window's own (a setting).
     let settings: config::Settings = config::load(&config::config_dir().join("settings.json"));
+    // Oracle's client from the folder chosen in the settings (it's loaded
+    // once, on the first connection).
+    drivers::prepare(&settings.oracle_client);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("zapros").with_app_id("zapros").with_inner_size([1400.0, 900.0]).with_min_inner_size([700.0, 400.0]).with_decorations(settings.system_titlebar),
         // No waiting for the display in eglSwapBuffers: on Wayland a window

@@ -24,6 +24,7 @@ futures-util = "0.3"
 postgres-native-tls = "0.5"
 native-tls = "0.2"
 ureq = { version = "3", features = ["json"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.37", features = ["bundled", "column_decltype"] }
 oracle = { version = "0.6", optional = true, features = ["chrono"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

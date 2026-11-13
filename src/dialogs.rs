@@ -178,7 +178,7 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
             ui.end_row();
         });
         if s.kind == Kind::Oracle {
-            ui.label(RichText::new(t("Нужен Oracle Instant Client (libclntsh.so), например AUR: oracle-instantclient-basic", "Needs Oracle Instant Client (libclntsh.so), e.g. AUR: oracle-instantclient-basic")).small().weak());
+            ui.label(RichText::new(t("Нужен Oracle Instant Client — его можно скачать в Настройки → Драйверы", "Needs Oracle Instant Client — download it in Settings → Drivers")).small().weak());
         }
         ui.separator();
         // The test's answer.
@@ -697,6 +697,150 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
     });
 }
 
+/// Drivers: the built-in ones, and Oracle's client — the system's or one
+/// downloaded here, version and kind as picked.
+fn drivers_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
+    use crate::drivers::{self, Job};
+    let st = drivers::state();
+    let ctx = ui.ctx().clone();
+    // The installed list, read again after a download or a deletion.
+    let list_id = egui::Id::new("drivers-installed");
+    let mut installed: Option<std::sync::Arc<Vec<drivers::Installed>>> = ctx.data(|d| d.get_temp(list_id));
+    if installed.is_none() || std::mem::take(&mut st.lock().unwrap().changed) {
+        installed = Some(std::sync::Arc::new(drivers::installed()));
+        ctx.data_mut(|d| d.insert_temp(list_id, installed.clone().unwrap()));
+    }
+    let installed = installed.unwrap();
+    let ok = Color32::from_rgb(80, 180, 90);
+    let bad = Color32::from_rgb(230, 80, 80);
+
+    ui.label(RichText::new(t("Встроенные", "Built in")).strong());
+    for n in ["PostgreSQL", "ClickHouse", "SQLite"] {
+        ui.horizontal(|ui| {
+            ui.colored_label(ok, "✔");
+            ui.label(n);
+            ui.label(RichText::new(t("— входит в программу, ставить ничего не нужно", "— part of the program, nothing to install")).weak());
+        });
+    }
+    ui.separator();
+    ui.label(RichText::new("Oracle Instant Client").strong());
+    ui.label(RichText::new(t(
+        "Oracle работает через библиотеку Oracle (libclntsh.so). Её можно скачать прямо отсюда — в папку программы, без установки в систему и без настройки LD_LIBRARY_PATH.",
+        "Oracle works through Oracle's library (libclntsh.so). It can be downloaded right here — into the program's folder, no system install, no LD_LIBRARY_PATH.",
+    )).weak().small());
+    #[cfg(feature = "oracle")]
+    {
+        let now = drivers::loaded_version();
+        let at_start = drivers::chosen_at_start();
+        match &now {
+            Some(v) => ui.label(format!("{} {v} ({})", t("Загружен:", "Loaded:"), at_start.as_ref().map_or_else(|| t("системный", "the system's").to_string(), |p| p.display().to_string()))),
+            None => ui.label(RichText::new(t("Ещё не загружен — загрузится при первом подключении к Oracle", "Not loaded yet — it loads on the first Oracle connection")).weak()),
+        };
+        let wanted = (!s.oracle_client.is_empty()).then(|| std::path::PathBuf::from(&s.oracle_client));
+        if wanted != at_start {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::from_rgb(220, 160, 60), t("Выбран другой клиент — он подключится после перезапуска программы", "Another client is picked — it's used once the program restarts"));
+                if ui.button(t("Перезапустить", "Restart")).clicked() {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("drivers-restart"), true));
+                }
+            });
+        }
+    }
+    ui.add_space(4.0);
+    // The choice: the system's, or one downloaded.
+    let sys = drivers::system_client();
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut s.oracle_client, String::new(), t("Системный", "The system's"));
+        match &sys {
+            Some(p) => ui.label(RichText::new(p).weak()),
+            None => ui.label(RichText::new(t("— в системе не найден", "— none in the system")).weak()),
+        };
+    });
+    let mut delete: Option<std::path::PathBuf> = None;
+    for i in installed.iter() {
+        ui.horizontal(|ui| {
+            let dir = i.lib_dir.to_string_lossy().into_owned();
+            ui.radio_value(&mut s.oracle_client, dir.clone(), &i.name);
+            ui.label(RichText::new(drivers::human(i.size)).weak());
+            if !i.missing.is_empty() {
+                ui.colored_label(bad, format!("⚠ {} {}", t("в системе нет:", "the system lacks:"), i.missing.join(", ")))
+                    .on_hover_text(t("Поставьте эти библиотеки пакетным менеджером (например, libaio)", "Install these libraries with the package manager (e.g. libaio)"));
+            }
+            let busy = !matches!(st.lock().unwrap().job, Job::Idle | Job::Failed(_) | Job::Done(_));
+            if ui.add_enabled(!busy, egui::Button::new(t("Удалить", "Delete"))).clicked() {
+                delete = Some(drivers::root().join(&i.name));
+                if s.oracle_client == dir {
+                    s.oracle_client.clear();
+                }
+            }
+        });
+    }
+    if let Some(d) = delete {
+        let _ = std::fs::remove_dir_all(d);
+        st.lock().unwrap().changed = true;
+        ctx.request_repaint();
+    }
+    ui.separator();
+    // Downloading one.
+    ui.label(RichText::new(t("Скачать с сайта Oracle", "Download from Oracle's site")).strong());
+    let (releases, job) = {
+        let g = st.lock().unwrap();
+        (g.releases.clone(), g.job.clone())
+    };
+    let busy = matches!(job, Job::Listing | Job::Downloading { .. } | Job::Unpacking { .. });
+    let pick_id = egui::Id::new("drivers-pick");
+    let mut pick: usize = ctx.data(|d| d.get_temp(pick_id)).unwrap_or(0);
+    ui.horizontal(|ui| {
+        if releases.is_empty() {
+            ui.label(RichText::new(t("Список версий ещё не получен", "No list of versions yet")).weak());
+        } else {
+            pick = pick.min(releases.len() - 1);
+            egui::ComboBox::from_id_salt("drivers-release").width(260.0).selected_text(releases[pick].label()).show_ui(ui, |ui| {
+                for (k, r) in releases.iter().enumerate() {
+                    ui.selectable_value(&mut pick, k, r.label());
+                }
+            });
+            if ui.add_enabled(!busy, egui::Button::new(t("Скачать", "Download"))).clicked() {
+                drivers::download(&ctx, releases[pick].clone());
+            }
+        }
+        if ui.add_enabled(!busy, egui::Button::new(if releases.is_empty() { t("Получить список версий", "Get the versions") } else { t("Обновить список", "Refresh") })).clicked() {
+            drivers::list(&ctx);
+        }
+    });
+    ctx.data_mut(|d| d.insert_temp(pick_id, pick));
+    match &job {
+        Job::Idle => {}
+        Job::Listing => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(t("Читаю страницу загрузок Oracle…", "Reading Oracle's download page…"));
+            });
+        }
+        Job::Downloading { label, got, total } => {
+            let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
+            let text = if *total > 0 { format!("{label}: {} / {}", drivers::human(*got), drivers::human(*total)) } else { format!("{label}: {}", drivers::human(*got)) };
+            ui.add(egui::ProgressBar::new(frac).text(text).animate(*total == 0));
+        }
+        Job::Unpacking { label } => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("{label}: {}", t("распаковка…", "unpacking…")));
+            });
+        }
+        Job::Failed(e) => {
+            ui.colored_label(bad, format!("⛔ {e}"));
+        }
+        Job::Done(l) => {
+            ui.colored_label(ok, format!("✔ {l} {}", t("скачан — выберите его выше", "downloaded — pick it above")));
+        }
+    }
+    ui.label(RichText::new(t(
+        "Basic — все языки и кодировки; Basic Light — меньше, сообщения на английском и основные кодировки (UTF-8, Latin-1…). Загрузка с download.oracle.com на условиях лицензии Oracle (OTN) — входа не нужно. Клиент 23 работает с Oracle 19c и новее, 21 — с 12.1+, 19 — с 11.2+.",
+        "Basic: all languages and character sets; Basic Light: smaller, English messages and the main character sets (UTF-8, Latin-1…). Downloaded from download.oracle.com under Oracle's licence (OTN), no login. Client 23 works with Oracle 19c and newer, 21 with 12.1+, 19 with 11.2+.",
+    )).weak().small());
+}
+
 fn settings(app: &mut App, ctx: &egui::Context) {
     if !app.settings_open {
         return;
@@ -709,7 +853,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     let size = egui::vec2(720.0, 560.0).min(ctx.content_rect().size() - egui::vec2(40.0, 60.0));
     egui::Window::new(t("Настройки", "Settings")).id(egui::Id::new("settings-window")).open(&mut open).fixed_size(size).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Стиль кода", "Code style"), t("Подсветка", "Colours"), t("Оформление", "Look")].iter().enumerate() {
+            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Стиль кода", "Code style"), t("Подсветка", "Colours"), t("Оформление", "Look"), t("Драйверы", "Drivers")].iter().enumerate() {
                 if ui.selectable_label(page == i, *n).clicked() {
                     page = i;
                 }
@@ -719,6 +863,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
         let s = &mut app.settings;
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match page {
             5 => look(ui, s),
+            6 => drivers_ui(ui, s),
             0 => {
                 ui.horizontal(|ui| {
                     ui.label(t("Язык", "Language"));
@@ -860,6 +1005,11 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(id, page));
     if app.settings != before {
         app.save_settings();
+    }
+    if ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("drivers-restart"))).is_some() {
+        app.save_settings();
+        app.save_session();
+        crate::drivers::restart();
     }
     if !open {
         app.settings_open = false;

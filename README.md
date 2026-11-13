@@ -266,8 +266,13 @@ python3 examples/seed/sqlite.py shop.db                              # 100k orde
 cargo build --release
 ```
 
-Oracle needs Oracle Instant Client at run time (`libclntsh.so`, e.g. AUR
-`oracle-instantclient-basic`); build without it: `--no-default-features`.
+Oracle needs Oracle Instant Client at run time (`libclntsh.so`): the
+system's (e.g. AUR `oracle-instantclient-basic`), or one downloaded in
+**Settings → Drivers** — any version on Oracle's page (19, 21, 23…), Basic
+or Basic Light, into `~/.local/share/zapros/drivers/oracle`; no system
+install, no `LD_LIBRARY_PATH` to set (zapros restarts itself with the chosen
+folder on it — older clients find their own libraries only that way). Build
+without Oracle: `--no-default-features`.
 
 Settings and connections: `~/.config/zapros`; session: `~/.local/share/zapros`.
 

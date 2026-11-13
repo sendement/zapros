@@ -148,6 +148,9 @@ pub struct Settings {
     /// The hints' first row is the word as typed (picked at first): Enter
     /// then just goes to a new line; a hint is taken by ↓ and Enter / Tab.
     pub hints_typed_first: bool,
+    /// Oracle Instant Client's folder (one downloaded in the settings);
+    /// empty: the system's.
+    pub oracle_client: String,
     pub auto_pairs: bool,
     /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
     pub embedded_sql: bool,
@@ -220,6 +223,7 @@ impl Default for Settings {
             hint_case: Case::Upper,
             hint_quote_schemas: false,
             hints_typed_first: false,
+            oracle_client: String::new(),
             auto_pairs: true,
             format: FmtOptions::default(),
             dark: Palette::dark(),
