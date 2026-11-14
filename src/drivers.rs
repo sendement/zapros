@@ -84,7 +84,13 @@ fn lib_dir_in(p: &Path) -> Option<PathBuf> {
 fn missing_libs(lib_dir: &Path) -> Vec<String> {
     let lib = std::fs::read_dir(lib_dir).ok().and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("libclntsh.so."))));
     let Some(lib) = lib.or_else(|| Some(lib_dir.join("libclntsh.so"))) else { return Vec::new() };
-    let Ok(out) = std::process::Command::new("ldd").arg(&lib).env("LD_LIBRARY_PATH", lib_dir).output() else { return Vec::new() };
+    // The folder before the path already set (Flatpak's /app/lib: libaio).
+    let mut path = lib_dir.as_os_str().to_owned();
+    if let Some(old) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+        path.push(":");
+        path.push(old);
+    }
+    let Ok(out) = std::process::Command::new("ldd").arg(&lib).env("LD_LIBRARY_PATH", path).output() else { return Vec::new() };
     String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains("not found")).filter_map(|l| l.split_whitespace().next().map(str::to_string)).collect()
 }
 
