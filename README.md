@@ -69,6 +69,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   The script it makes (CREATE_JOB / SET_ATTRIBUTE, `cron.schedule` /
   `cron.alter_job`) is shown under it, pinned with Apply; "New job…" on the
   Jobs folder opens a blank one (its Code: the script that makes it).
+- **Help on Ctrl+click**: a function (count, coalesce, date_trunc,
+  toStartOfMonth, NVL, strftime…), an operator (||, ::, ->>, @>, <=>…) or a
+  keyword (LEFT JOIN, OVER, EXISTS, BETWEEN, CONNECT BY, PREWHERE…) opens
+  its help — how it's written, what it does (each database's own version
+  first: length counts bytes in ClickHouse), an example to copy. The
+  reference is src/sql/help.txt.
 - **Ctrl+click in the code** (the script and notebook cells; with Ctrl held
   the name under the pointer is underlined): an alias — its table (or CTE)
   picked and lit; a CTE's name — its definition; a function or procedure of
@@ -87,6 +93,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   GROUP BY, HAVING). Schemas / users before a table's name ("shop.orders",
   CREATE TABLE app.users, the first of three parts) in a colour of their
   own too.
+- **Rainbow bands** go on across blank lines inside a construct (as far as
+  the lines around have them), their outer corners rounded.
 - **Selection** drawn by zapros: the text keeps its colours, the rainbow
   bands show through in another shade, the corners rounded outside and in.
 - **Code style** (Settings → Code style): keyword and function case;

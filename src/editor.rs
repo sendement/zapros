@@ -32,6 +32,9 @@ pub enum Action {
     /// Ctrl+click on a name of the database's: open it (a table's
     /// designer, a function's code…).
     Open { schema: Option<String>, name: String, call: bool },
+    /// Ctrl+click on a function, operator or keyword the reference knows:
+    /// its help (an entry of sql::help), by the pointer.
+    Help { entry: usize, at: egui::Pos2 },
 }
 
 pub struct Popup {
@@ -64,6 +67,8 @@ pub struct EditorState {
     blocks: Vec<crate::sql::bands::Block>,
     /// The rainbow bands as of `job` (painted under the text).
     bands: Vec<(Range<usize>, Color32)>,
+    /// On blank lines: (the line's start, from col, to col, colour).
+    pub blank_bands: Vec<(usize, usize, usize, Color32)>,
     /// (layout key, block start) → the x its lines' text starts at.
     frame_x: std::collections::HashMap<(u64, usize), f32>,
     /// What can be folded: (its first line's start, its end), as of `job`.
@@ -222,9 +227,11 @@ fn band_hues(dark: bool) -> Vec<Color32> {
 /// The bands on the rows in sight, as one mesh: every edge on a whole
 /// pixel, the same one for the pieces either side of it (no seams, no
 /// overlaps), each row down to the next one's top.
-fn band_mesh(text: &str, bands: &[(Range<usize>, Color32)], galley: &egui::Galley, at: egui::Pos2, clip: egui::Rect, ppp: f32) -> egui::Mesh {
+#[allow(clippy::too_many_arguments)]
+fn band_mesh(text: &str, bands: &[(Range<usize>, Color32)], blank: &[(usize, usize, usize, Color32)], galley: &egui::Galley, at: egui::Pos2, clip: egui::Rect, ppp: f32, char_w: f32, radius: f32) -> egui::Mesh {
     let px = |v: f32| (v * ppp).round() / ppp;
-    let mut mesh = egui::Mesh::default();
+    let mesh = egui::Mesh::default();
+    let mut pieces: Vec<(egui::Rect, Color32)> = Vec::new();
     let rows = &galley.rows;
     if rows.is_empty() {
         return mesh;
@@ -262,10 +269,123 @@ fn band_mesh(text: &str, bands: &[(Range<usize>, Color32)], galley: &egui::Galle
                 let bottom = px(at.y + rows.get(l + 1).map_or(row.max_y(), |n| n.min_y().max(row.max_y())));
                 let rect = egui::Rect::from_min_max(egui::pos2(x(c0), top), egui::pos2(x(c1), bottom));
                 if rect.width() > 0.0 {
-                    mesh.add_colored_rect(rect, *c);
+                    pieces.push((rect, *c));
                 }
             }
             a = le + 1;
+        }
+    }
+    // Blank lines: by columns.
+    for &(ls, c0, c1, c) in blank {
+        if ls < lo || ls > hi {
+            continue;
+        }
+        let l = starts.partition_point(|&s| s <= ls) - 1;
+        if l < first || l >= last || starts[l] != ls {
+            continue;
+        }
+        let row = &rows[l];
+        let x = |c: usize| px(at.x + row.pos.x + c as f32 * char_w);
+        let top = px(at.y + row.min_y());
+        let bottom = px(at.y + rows.get(l + 1).map_or(row.max_y(), |n| n.min_y().max(row.max_y())));
+        let rect = egui::Rect::from_min_max(egui::pos2(x(c0), top), egui::pos2(x(c1), bottom));
+        if rect.width() > 0.0 {
+            pieces.push((rect, c));
+        }
+    }
+    rounded_pieces(pieces, radius)
+}
+
+/// The corner points of `r`, clockwise, its corners [nw, ne, se, sw]
+/// rounded by those radii.
+fn rounded_rect_points(r: egui::Rect, radii: [f32; 4]) -> Vec<egui::Pos2> {
+    use std::f32::consts::FRAC_PI_2;
+    const STEPS: usize = 6;
+    let mut pts = Vec::new();
+    let mut corner = |c: egui::Pos2, ix: f32, iy: f32, rr: f32, rev: bool| {
+        if rr <= 0.1 {
+            pts.push(c);
+            return;
+        }
+        let center = c + egui::vec2(ix * rr, iy * rr);
+        let mut arc: Vec<egui::Pos2> = (0..=STEPS)
+            .map(|k| {
+                let f = k as f32 / STEPS as f32 * FRAC_PI_2;
+                center + egui::vec2(-ix * f.cos(), -iy * f.sin()) * rr
+            })
+            .collect();
+        if rev {
+            arc.reverse();
+        }
+        pts.extend(arc);
+    };
+    corner(r.left_top(), 1.0, 1.0, radii[0], false);
+    corner(r.right_top(), -1.0, 1.0, radii[1], true);
+    corner(r.right_bottom(), -1.0, -1.0, radii[2], false);
+    corner(r.left_bottom(), 1.0, -1.0, radii[3], true);
+    pts
+}
+
+/// Coloured pieces (the bands) as one shape: where pieces touch side by
+/// side and row under row they make one, whose outer corners are rounded
+/// (its inner ones stay square); each piece keeps its colour.
+fn rounded_pieces(mut pieces: Vec<(egui::Rect, Color32)>, radius: f32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    pieces.sort_by(|a, b| a.0.top().total_cmp(&b.0.top()).then(a.0.left().total_cmp(&b.0.left())));
+    // Rows, each of segments: (its span, the pieces in it).
+    let mut rows: Vec<(f32, f32, Vec<(egui::Rect, Vec<usize>)>)> = Vec::new();
+    for (i, (r, _)) in pieces.iter().enumerate() {
+        if rows.last().is_none_or(|x| (x.0 - r.top()).abs() > 0.5) {
+            rows.push((r.top(), r.bottom(), Vec::new()));
+        }
+        let segs = &mut rows.last_mut().unwrap().2;
+        match segs.last_mut() {
+            Some((span, ids)) if r.left() <= span.right() + 0.5 => {
+                *span = span.union(*r);
+                ids.push(i);
+            }
+            _ => segs.push((*r, vec![i])),
+        }
+    }
+    let overlap = |a: &egui::Rect, b: &egui::Rect| (a.right().min(b.right()) - a.left().max(b.left())).max(0.0);
+    for ri in 0..rows.len() {
+        let above = ri.checked_sub(1).filter(|&j| (rows[j].1 - rows[ri].0).abs() < 0.5);
+        let below = Some(ri + 1).filter(|&j| j < rows.len() && (rows[ri].1 - rows[j].0).abs() < 0.5);
+        for (span, ids) in &rows[ri].2 {
+            let near = |j: Option<usize>| {
+                j.and_then(|j| rows[j].2.iter().map(|s| s.0).filter(|s| overlap(s, span) > 0.5).max_by(|a, b| overlap(a, span).total_cmp(&overlap(b, span))))
+            };
+            let (up, down) = (near(above), near(below));
+            let h = span.height();
+            let lim = |d: f32| radius.min(h / 2.0).min(d / 2.0);
+            let outer = |n: Option<egui::Rect>, left: bool| match n {
+                None => lim(f32::INFINITY),
+                Some(o) if left && o.left() > span.left() + 0.5 => lim(o.left() - span.left()),
+                Some(o) if !left && o.right() < span.right() - 0.5 => lim(span.right() - o.right()),
+                _ => 0.0,
+            };
+            let (nw, ne, se, sw) = (outer(up, true), outer(up, false), outer(down, false), outer(down, true));
+            for &i in ids {
+                let (r, c) = pieces[i];
+                let w = r.width() / 2.0;
+                let at_l = (r.left() - span.left()).abs() < 0.5;
+                let at_r = (r.right() - span.right()).abs() < 0.5;
+                let radii = [if at_l { nw.min(w) } else { 0.0 }, if at_r { ne.min(w) } else { 0.0 }, if at_r { se.min(w) } else { 0.0 }, if at_l { sw.min(w) } else { 0.0 }];
+                if radii.iter().all(|x| *x <= 0.1) {
+                    mesh.add_colored_rect(r, c);
+                    continue;
+                }
+                let pts = rounded_rect_points(r, radii);
+                let i0 = mesh.vertices.len() as u32;
+                mesh.colored_vertex(r.center(), c);
+                for p in &pts {
+                    mesh.colored_vertex(*p, c);
+                }
+                let n = pts.len() as u32;
+                for k in 0..n {
+                    mesh.add_triangle(i0, i0 + 1 + k, i0 + 1 + (k + 1) % n);
+                }
+            }
         }
     }
     mesh
@@ -285,6 +405,7 @@ struct Found {
     foldable: Vec<(usize, usize)>,
     /// The rainbow bands, when the editor paints them itself.
     bands: Vec<(Range<usize>, Color32)>,
+    blank_bands: Vec<(usize, usize, usize, Color32)>,
 }
 
 /// The text laid out with colours, and its blocks (for the frames).
@@ -353,10 +474,19 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
     }
     // Rainbow bands under the indents (listok's hues).
     let (found, blocks) = if (pal.bands || pal.frames) && text.len() < 2_000_000 { crate::sql::bands::analyse(text, cx.dialect) } else { Default::default() };
+    let mut blank_bands: Vec<(usize, usize, usize, Color32)> = Vec::new();
     let bands: Vec<(Range<usize>, Color32)> = if pal.bands {
         let alpha = if cx.dark { 0.24 } else { 0.30 };
         let hues: Vec<Color32> = band_hues(cx.dark).into_iter().map(|c| c.gamma_multiply(alpha)).collect();
-        found.into_iter().map(|b| (b.range, hues[b.level % hues.len()])).collect()
+        let mut v = Vec::new();
+        for b in found {
+            let c = hues[b.level % hues.len()];
+            match b.cols {
+                Some((a, z)) => blank_bands.push((b.range.start, a, z, c)),
+                None => v.push((b.range, c)),
+            }
+        }
+        v
     } else {
         Vec::new()
     };
@@ -442,7 +572,7 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
     let mut foldable: Vec<(usize, usize)> = spans_.into_iter().map(|r| (line_starts[line_starts.partition_point(|&x| x <= r.start) - 1], r.end)).collect();
     foldable.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     foldable.dedup_by_key(|f| f.0);
-    (job, Found { blocks: if pal.frames { blocks } else { Vec::new() }, foldable, bands: if own_bands { bands } else { Vec::new() } })
+    (job, Found { blocks: if pal.frames { blocks } else { Vec::new() }, foldable, bands: if own_bands { bands } else { Vec::new() }, blank_bands: if own_bands { blank_bands } else { Vec::new() } })
 }
 
 /// Replaces `r` with `with` and puts the cursor after it (or at "$0").
@@ -661,6 +791,35 @@ pub fn crisp_frame(painter: &egui::Painter, rect: egui::Rect, radius: f32, color
 }
 
 /// The name at `at` (letters, digits, _ $ #, or a quoted one).
+/// The function, operator or keyword at byte `at` the reference has help
+/// for: where it is and its entry. Not a qualified name (schema.f), not a
+/// column named like a function (no bracket after it).
+pub fn help_at(text: &str, at: usize, d: crate::sql::Dialect) -> Option<(Range<usize>, usize)> {
+    use crate::sql::lex::{self, Tk};
+    let at = floor(text, at.min(text.len()));
+    let ls = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let le = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    let line = &text[ls..le];
+    let toks: Vec<lex::Tok> = lex::lex(line, d).into_iter().filter(|t| !t.trivia()).collect();
+    let rel = at - ls;
+    let k = toks.iter().position(|t| t.start <= rel && rel < t.end).or_else(|| toks.iter().position(|t| t.end == rel && rel > t.start))?;
+    let t = toks[k];
+    if !matches!(t.kind, Tk::Word | Tk::Keyword | Tk::Op) {
+        return None;
+    }
+    if k > 0 && toks[k - 1].kind == Tk::Dot || toks.get(k + 1).is_some_and(|n| n.kind == Tk::Dot) {
+        return None;
+    }
+    let call = toks.get(k + 1).is_some_and(|n| n.kind == Tk::Open && n.text(line) == "(");
+    let e = crate::sql::help::lookup(t.text(line), d, call)?;
+    // A bare word: a keyword's help, never a function's.
+    if t.kind == Tk::Word && !call && e.kind == 'f' {
+        return None;
+    }
+    let idx = crate::sql::help::entries().iter().position(|x| std::ptr::eq(x, e))?;
+    Some((ls + t.start..ls + t.end, idx))
+}
+
 fn name_at(text: &str, at: usize) -> Option<Range<usize>> {
     let at = floor(text, at.min(text.len()));
     let is = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '#';
@@ -698,6 +857,18 @@ fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str
     }
     let Some(pos) = ctx.pointer_hover_pos().filter(|p| output.response.rect.contains(*p)) else { return };
     let at = byte_of(text, output.galley.cursor_from_pos(pos - gp).index.0);
+    // A function, operator or keyword the reference knows: its help.
+    if let Some((r, entry)) = help_at(text, at, cx.dialect) {
+        let wr = rect_of(&r);
+        if wr.expand(2.0).contains(pos) {
+            ui.painter().hline(wr.x_range(), wr.bottom() - 1.0, egui::Stroke::new(1.2, ui.visuals().hyperlink_color));
+            ctx.set_cursor_icon(egui::CursorIcon::Help);
+            if output.response.clicked() {
+                out.actions.push(Action::Help { entry, at: pos });
+            }
+            return;
+        }
+    }
     let Some(word) = name_at(text, at) else { return };
     let wr = rect_of(&word);
     if !wr.expand(2.0).contains(pos) {
@@ -1121,6 +1292,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 st.blocks = found.blocks;
                 st.foldable = found.foldable;
                 st.bands = found.bands;
+                st.blank_bands = found.blank_bands;
                 st.frame_x.clear();
                 j
             }
@@ -1311,7 +1483,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let mut shapes: Vec<egui::Shape> = Vec::new();
         let gp = output.galley_pos.to_vec2();
         if !st.bands.is_empty() {
-            shapes.push(egui::Shape::mesh(band_mesh(text, &st.bands, &output.galley, output.galley_pos, clip, ctx.pixels_per_point())));
+            let radius = (font * 0.3).clamp(2.0, 5.0);
+            shapes.push(egui::Shape::mesh(band_mesh(text, &st.bands, &st.blank_bands, &output.galley, output.galley_pos, clip, ctx.pixels_per_point(), char_w, radius)));
         }
         // The selection: over the bands (they show through, another shade),
         // its corners rounded, outside and in.

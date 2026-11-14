@@ -7,6 +7,7 @@ pub mod check;
 pub mod complete;
 pub mod embed;
 pub mod fmt;
+pub mod help;
 pub mod follow;
 pub mod lex;
 pub mod notebook;

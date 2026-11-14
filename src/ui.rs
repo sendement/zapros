@@ -270,7 +270,7 @@ fn query_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Action::Cancel => app.cancel(),
                 Action::Commit => app.commit_current(true),
                 Action::Rollback => app.commit_current(false),
-                Action::Save | Action::Open { .. } => {}
+                Action::Save | Action::Open { .. } | Action::Help { .. } => {}
             }
         }
     };

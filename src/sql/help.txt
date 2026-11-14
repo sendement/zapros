@@ -1,0 +1,1009 @@
+# zapros' reference of functions, operators and keywords (Ctrl+click).
+#
+#   @ names (comma-separated) | dialects (* or pg ch ora lite) | f / o / k
+#   sig: how it's written
+#   ru: / en: what it does (one line each, may repeat)
+#   ex: an example (each line its own ex:)
+#
+# Entries for one name are looked up first by the dialect, then "*".
+
+# ---------------------------------------------------------- aggregates
+
+@ count | * | f
+sig: count(*) | count(expr) | count(DISTINCT expr)
+ru: Число строк (*) или не-NULL значений выражения; с DISTINCT — число разных значений.
+en: The number of rows (*) or of the expression's non-NULL values; with DISTINCT, of different values.
+ex: SELECT customer_id, count(*) AS orders, count(DISTINCT status) AS statuses
+ex:   FROM orders
+ex:  GROUP BY customer_id;
+
+@ sum | * | f
+sig: sum(expr) | sum(DISTINCT expr)
+ru: Сумма значений группы; NULL не считаются, у пустой группы — NULL.
+en: The sum of the group's values; NULLs are skipped, an empty group gives NULL.
+ex: SELECT customer_id, sum(total) AS spent
+ex:   FROM orders
+ex:  GROUP BY customer_id;
+
+@ avg | * | f
+sig: avg(expr)
+ru: Среднее арифметическое группы (NULL не учитываются).
+en: The group's arithmetic mean (NULLs left out).
+ex: SELECT avg(total) FROM orders WHERE created_at >= DATE '2026-01-01';
+
+@ min, max | * | f
+sig: min(expr) / max(expr)
+ru: Наименьшее / наибольшее значение группы: числа, строки, даты.
+en: The group's least / greatest value: numbers, strings, dates.
+ex: SELECT min(created_at) AS first_order, max(total) AS biggest FROM orders;
+
+@ string_agg | pg | f
+sig: string_agg(expr, separator [ORDER BY …])
+ru: Склеивает значения группы в одну строку через разделитель.
+en: Joins the group's values into one string with a separator.
+ex: SELECT customer_id, string_agg(product, ', ' ORDER BY product)
+ex:   FROM order_items GROUP BY customer_id;
+
+@ array_agg | pg | f
+sig: array_agg(expr [ORDER BY …])
+ru: Собирает значения группы в массив.
+en: Gathers the group's values into an array.
+ex: SELECT customer_id, array_agg(id ORDER BY created_at) AS order_ids FROM orders GROUP BY customer_id;
+
+@ listagg | ora | f
+sig: LISTAGG(expr, separator) WITHIN GROUP (ORDER BY …)
+ru: Склеивает значения группы в строку через разделитель, в заданном порядке.
+en: Joins the group's values into a string with a separator, in the order given.
+ex: SELECT customer_id, LISTAGG(product, ', ') WITHIN GROUP (ORDER BY product) AS products
+ex:   FROM order_items GROUP BY customer_id;
+
+@ group_concat | lite | f
+sig: group_concat(expr [, separator])
+ru: Склеивает значения группы в строку (по умолчанию через запятую).
+en: Joins the group's values into a string (a comma by default).
+ex: SELECT customer_id, group_concat(product, '; ') FROM order_items GROUP BY customer_id;
+
+@ groupArray | ch | f
+sig: groupArray([max_size])(x)
+ru: Собирает значения группы в массив (с ограничением размера, если задано).
+en: Gathers the group's values into an array (up to max_size, if given).
+ex: SELECT customer_id, groupArray(10)(id) AS last_ids FROM orders GROUP BY customer_id;
+
+@ uniq, uniqExact | ch | f
+sig: uniq(x) | uniqExact(x)
+ru: Число разных значений: uniq — приближённо и быстро, uniqExact — точно.
+en: The number of distinct values: uniq approximately and fast, uniqExact exactly.
+ex: SELECT toDate(ts) AS day, uniq(user_id) AS users FROM visits GROUP BY day;
+
+@ countIf, sumIf, avgIf, minIf, maxIf, anyIf | ch | f
+sig: countIf(cond) | sumIf(x, cond) | avgIf(x, cond)
+ru: Агрегат только по строкам, где условие истинно (комбинатор -If).
+en: An aggregate over the rows where the condition holds (the -If combinator).
+ex: SELECT countIf(status = 'paid') AS paid, sumIf(total, status = 'paid') AS paid_sum FROM orders;
+
+@ argMax, argMin | ch | f
+sig: argMax(arg, val) / argMin(arg, val)
+ru: Значение arg в строке с наибольшим / наименьшим val.
+en: The arg of the row with the greatest / least val.
+ex: SELECT customer_id, argMax(status, updated_at) AS last_status FROM orders GROUP BY customer_id;
+
+@ any, anyLast | ch | f
+sig: any(x) / anyLast(x)
+ru: Какое-нибудь (первое / последнее встреченное) значение группы.
+en: Some (the first / last met) value of the group.
+ex: SELECT customer_id, any(name) FROM orders GROUP BY customer_id;
+
+@ quantile, median | ch | f
+sig: quantile(level)(x) | median(x)
+ru: Приближённый квантиль уровня 0…1; median = quantile(0.5).
+en: An approximate quantile of level 0…1; median = quantile(0.5).
+ex: SELECT quantile(0.95)(duration_ms) AS p95 FROM requests;
+
+@ percentile_cont | pg ora | f
+sig: percentile_cont(fraction) WITHIN GROUP (ORDER BY expr)
+ru: Непрерывный перцентиль (с интерполяцией); 0.5 — медиана.
+en: A continuous percentile (interpolated); 0.5 is the median.
+ex: SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY total) AS median FROM orders;
+
+@ total | lite | f
+sig: total(expr)
+ru: Сумма как число с плавающей точкой; у пустой группы — 0.0, а не NULL.
+en: The sum as a float; 0.0 for an empty group, not NULL.
+ex: SELECT total(amount) FROM payments WHERE 0;
+
+# ----------------------------------------------------------- window
+
+@ row_number | * | f
+sig: row_number() OVER ([PARTITION BY …] ORDER BY …)
+ru: Номер строки внутри окна: 1, 2, 3… без повторов.
+en: The row's number in its window: 1, 2, 3… with no repeats.
+ex: SELECT * FROM (
+ex:   SELECT o.*, row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn
+ex:     FROM orders o) t
+ex:  WHERE rn = 1;  -- each customer's last order
+
+@ rank, dense_rank | * | f
+sig: rank() / dense_rank() OVER (… ORDER BY …)
+ru: Место в окне; равные делят место. rank пропускает номера после равных (1,1,3), dense_rank — нет (1,1,2).
+en: The place in the window; equals share it. rank skips numbers after ties (1,1,3), dense_rank doesn't (1,1,2).
+ex: SELECT name, score, dense_rank() OVER (ORDER BY score DESC) AS place FROM players;
+
+@ lag, lead | pg ora lite | f
+sig: lag(expr [, offset [, default]]) OVER (…) / lead(…)
+ru: Значение из предыдущей (lag) или следующей (lead) строки окна.
+en: The value from the previous (lag) or next (lead) row of the window.
+ex: SELECT day, revenue, revenue - lag(revenue) OVER (ORDER BY day) AS change FROM daily;
+
+@ first_value, last_value | * | f
+sig: first_value(expr) OVER (…) / last_value(expr) OVER (… ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ru: Первое / последнее значение окна. Для last_value задайте рамку до конца окна, иначе это текущая строка.
+en: The window's first / last value. For last_value set the frame to the window's end, else it's the current row.
+ex: SELECT id, first_value(status) OVER (PARTITION BY customer_id ORDER BY created_at) FROM orders;
+
+@ ntile | * | f
+sig: ntile(n) OVER (ORDER BY …)
+ru: Делит строки окна на n примерно равных групп и даёт номер группы.
+en: Splits the window's rows into n near-equal groups, giving the group's number.
+ex: SELECT customer_id, spent, ntile(4) OVER (ORDER BY spent DESC) AS quartile FROM totals;
+
+@ over | * | k
+sig: агрегат(…) OVER ([PARTITION BY …] [ORDER BY …] [ROWS | RANGE …])
+ru: Делает агрегат или ранжирующую функцию оконной: она считается по «окну» строк, а строки не сворачиваются.
+ru: PARTITION BY — на какие окна делить, ORDER BY — порядок внутри, ROWS/RANGE — рамка.
+en: Makes an aggregate or ranking function a window one: computed over a window of rows, the rows aren't collapsed.
+en: PARTITION BY splits into windows, ORDER BY orders inside, ROWS/RANGE set the frame.
+ex: SELECT id, total,
+ex:        sum(total) OVER (PARTITION BY customer_id ORDER BY created_at
+ex:                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
+ex:   FROM orders;
+
+@ partition | * | k
+sig: OVER (PARTITION BY expr, …)
+ru: Внутри OVER: делит строки на независимые окна — по каждому окну функция считается отдельно.
+en: Inside OVER: splits the rows into independent windows, the function computed for each.
+ex: SELECT id, avg(total) OVER (PARTITION BY customer_id) AS customer_avg FROM orders;
+
+@ runningDifference | ch | f
+sig: runningDifference(x)
+ru: Разница со значением предыдущей строки блока (порядок — как пришли строки; сортируйте в подзапросе).
+en: The difference with the previous row's value in the block (in arrival order; sort in a subquery).
+ex: SELECT day, runningDifference(users) FROM (SELECT day, users FROM daily ORDER BY day);
+
+# ----------------------------------------------------------- null & logic
+
+@ coalesce | * | f
+sig: coalesce(a, b, …)
+ru: Первое значение из списка, которое не NULL; если все NULL — NULL.
+en: The first value of the list that isn't NULL; NULL if all are.
+ex: SELECT coalesce(phone, email, 'нет контакта') AS contact FROM customers;
+
+@ nullif | * | f
+sig: nullif(a, b)
+ru: NULL, если a = b, иначе a. Удобно против деления на ноль.
+en: NULL when a = b, else a. Handy against division by zero.
+ex: SELECT paid / nullif(total, 0) AS share FROM orders;
+
+@ nvl | ora | f
+sig: NVL(expr, default)
+ru: default, если expr — NULL, иначе expr (как coalesce для двух).
+en: default when expr is NULL, else expr (coalesce of two).
+ex: SELECT NVL(discount, 0) FROM orders;
+
+@ nvl2 | ora | f
+sig: NVL2(expr, if_not_null, if_null)
+ru: Второй аргумент, если expr не NULL, иначе третий.
+en: The second argument when expr isn't NULL, else the third.
+ex: SELECT NVL2(shipped_at, 'отправлен', 'ждёт') FROM orders;
+
+@ ifnull | lite ch | f
+sig: ifnull(x, default)
+ru: default, если x — NULL, иначе x.
+en: default when x is NULL, else x.
+ex: SELECT ifnull(note, '') FROM orders;
+
+@ decode | ora | f
+sig: DECODE(expr, search1, result1 [, search2, result2 …] [, default])
+ru: Сравнивает expr с вариантами и даёт результат первого совпавшего (NULL = NULL здесь равны).
+en: Compares expr with the options and gives the first match's result (NULL equals NULL here).
+ex: SELECT DECODE(status, 'P', 'оплачен', 'C', 'отменён', 'новый') FROM orders;
+
+@ if | ch | f
+sig: if(cond, then, else)
+ru: then, если условие истинно, иначе else.
+en: then when the condition holds, else else.
+ex: SELECT if(total > 1000, 'big', 'small') AS kind FROM orders;
+
+@ multiIf | ch | f
+sig: multiIf(cond1, then1, cond2, then2, …, else)
+ru: Как CASE WHEN: результат первого истинного условия, иначе последний аргумент.
+en: Like CASE WHEN: the first true condition's result, else the last argument.
+ex: SELECT multiIf(total > 1000, 'big', total > 100, 'medium', 'small') FROM orders;
+
+@ iif | lite | f
+sig: iif(cond, then, else)
+ru: then, если условие истинно, иначе else (SQLite 3.32+).
+en: then when the condition holds, else else (SQLite 3.32+).
+ex: SELECT iif(total > 100, 'big', 'small') FROM orders;
+
+@ greatest, least | pg ora ch | f
+sig: greatest(a, b, …) / least(a, b, …)
+ru: Наибольшее / наименьшее из перечисленных значений (не агрегат: по одной строке).
+en: The greatest / least of the values listed (not an aggregate: within a row).
+ex: SELECT greatest(price, min_price) FROM products;
+
+@ case | * | k
+sig: CASE WHEN cond THEN res … [ELSE res] END | CASE expr WHEN value THEN res … END
+ru: Условное выражение: результат первой подошедшей ветки, иначе ELSE (без ELSE — NULL).
+en: A conditional expression: the first matching branch's result, else ELSE (without it, NULL).
+ex: SELECT CASE WHEN total > 1000 THEN 'big'
+ex:             WHEN total > 100 THEN 'medium'
+ex:             ELSE 'small' END AS kind
+ex:   FROM orders;
+
+@ is | * | k
+sig: x IS [NOT] NULL | x IS [NOT] DISTINCT FROM y | x IS [NOT] TRUE
+ru: Проверка на NULL (= NULL всегда даёт NULL, нужен IS NULL). IS DISTINCT FROM сравнивает, считая NULL обычным значением.
+en: A test for NULL (= NULL is always NULL, IS NULL is needed). IS DISTINCT FROM compares, NULL taken as a plain value.
+ex: SELECT * FROM orders WHERE shipped_at IS NULL;
+ex: SELECT * FROM a JOIN b ON a.code IS NOT DISTINCT FROM b.code;
+
+@ in | * | k
+sig: x [NOT] IN (v1, v2, …) | x [NOT] IN (SELECT …)
+ru: Входит ли значение в список или в результат подзапроса. Осторожно: NOT IN с NULL в списке не даёт ни одной строки.
+en: Whether the value is in the list or the subquery's result. Careful: NOT IN with a NULL in the list gives no rows.
+ex: SELECT * FROM orders WHERE status IN ('new', 'paid');
+ex: SELECT * FROM customers WHERE id NOT IN (SELECT customer_id FROM orders WHERE customer_id IS NOT NULL);
+
+@ between | * | k
+sig: x [NOT] BETWEEN a AND b
+ru: a <= x AND x <= b — обе границы включены. Для дат-времени удобнее >= и <.
+en: a <= x AND x <= b, both ends in. For timestamps >= and < are handier.
+ex: SELECT * FROM orders WHERE total BETWEEN 100 AND 500;
+
+@ like | * | k
+sig: x [NOT] LIKE pattern [ESCAPE c]
+ru: Сравнение с шаблоном: % — любая строка, _ — один символ. В PostgreSQL и ClickHouse чувствителен к регистру.
+en: A pattern match: % any string, _ one character. Case-sensitive in PostgreSQL and ClickHouse.
+ex: SELECT * FROM customers WHERE email LIKE '%@example.com';
+
+@ ilike | pg ch | k
+sig: x [NOT] ILIKE pattern
+ru: LIKE без учёта регистра.
+en: LIKE ignoring case.
+ex: SELECT * FROM customers WHERE name ILIKE 'иван%';
+
+@ exists | * | k
+sig: [NOT] EXISTS (SELECT …)
+ru: Истина, если подзапрос вернул хотя бы одну строку (что в SELECT — не важно).
+en: True when the subquery gives at least one row (what it selects doesn't matter).
+ex: SELECT * FROM customers c
+ex:  WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+
+@ any, some, all | pg ora | k
+sig: x op ANY (SELECT … | array) / x op ALL (…)
+ru: Сравнение с каждым значением подзапроса или массива: ANY — хотя бы одно подходит, ALL — все.
+en: Comparison with each value of a subquery or array: ANY at least one fits, ALL every one.
+ex: SELECT * FROM products WHERE price > ALL (SELECT price FROM products WHERE category = 'eco');
+
+@ distinct | * | k
+sig: SELECT DISTINCT … | count(DISTINCT x) | DISTINCT ON (expr) (PostgreSQL)
+ru: Убирает повторяющиеся строки результата. DISTINCT ON (PostgreSQL) оставляет первую строку на каждое значение выражения (по ORDER BY).
+en: Drops repeated result rows. DISTINCT ON (PostgreSQL) keeps the first row per value of the expression (by ORDER BY).
+ex: SELECT DISTINCT ON (customer_id) * FROM orders ORDER BY customer_id, created_at DESC;
+
+# ----------------------------------------------------------- joins & sets
+
+@ join, inner | * | k
+sig: a [INNER] JOIN b ON cond | a JOIN b USING (col)
+ru: Строки, у которых есть пара в обеих таблицах по условию.
+en: Rows that have a match in both tables by the condition.
+ex: SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id;
+
+@ left | * | k
+sig: a LEFT [OUTER] JOIN b ON cond
+ru: Все строки a; поля b — NULL, где пары не нашлось.
+en: Every row of a; b's columns NULL where there's no match.
+ex: SELECT c.name, count(o.id) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.name;
+
+@ right | * | k
+sig: a RIGHT [OUTER] JOIN b ON cond
+ru: Все строки b; поля a — NULL, где пары не нашлось. Обычно пишут LEFT JOIN, поменяв таблицы.
+en: Every row of b; a's columns NULL where there's no match. Usually written as LEFT JOIN with the tables swapped.
+ex: SELECT * FROM orders o RIGHT JOIN customers c ON c.id = o.customer_id;
+
+@ full | * | k
+sig: a FULL [OUTER] JOIN b ON cond
+ru: Все строки обеих таблиц; там, где пары нет, недостающая сторона — NULL.
+en: Every row of both tables; where there's no match, the missing side is NULL.
+ex: SELECT coalesce(a.day, b.day) AS day, a.sales, b.costs FROM a FULL JOIN b ON a.day = b.day;
+
+@ cross | * | k
+sig: a CROSS JOIN b
+ru: Каждая строка a с каждой строкой b (декартово произведение).
+en: Each row of a with each row of b (the Cartesian product).
+ex: SELECT d.day, p.id FROM days d CROSS JOIN products p;
+
+@ lateral | pg | k
+sig: FROM a, LATERAL (SELECT … WHERE … = a.x) b | JOIN LATERAL (…) b ON true
+ru: Подзапрос во FROM, который видит столбцы таблиц левее — «для каждой строки».
+en: A FROM subquery that sees the columns of tables to its left: "for each row".
+ex: SELECT c.name, last.total
+ex:   FROM customers c
+ex:   JOIN LATERAL (SELECT total FROM orders o WHERE o.customer_id = c.id
+ex:                  ORDER BY created_at DESC LIMIT 1) last ON true;
+
+@ union | * | k
+sig: SELECT … UNION [ALL] SELECT …
+ru: Склеивает результаты запросов. UNION убирает повторы (медленнее), UNION ALL — оставляет.
+en: Stacks the queries' results. UNION drops repeats (slower), UNION ALL keeps them.
+ex: SELECT email FROM customers UNION SELECT email FROM subscribers;
+
+@ intersect, except, minus | * | k
+sig: SELECT … INTERSECT SELECT … | SELECT … EXCEPT (Oracle: MINUS) SELECT …
+ru: INTERSECT — строки, что есть в обоих результатах; EXCEPT/MINUS — что есть в первом, но нет во втором.
+en: INTERSECT: rows in both results; EXCEPT/MINUS: rows in the first but not the second.
+ex: SELECT customer_id FROM orders EXCEPT SELECT id FROM customers;
+
+@ with | * | k
+sig: WITH name [(cols)] AS (SELECT …) [, …] SELECT … | WITH RECURSIVE …
+ru: Именованные подзапросы (CTE) перед основным запросом. RECURSIVE — CTE, ссылающийся на себя (деревья, ряды).
+en: Named subqueries (CTEs) before the main query. RECURSIVE: a CTE that refers to itself (trees, series).
+ex: WITH big AS (SELECT * FROM orders WHERE total > 1000)
+ex: SELECT customer_id, count(*) FROM big GROUP BY customer_id;
+
+@ arrayJoin | ch | f
+sig: arrayJoin(arr) | … ARRAY JOIN arr AS x
+ru: Разворачивает массив в строки: по строке на элемент.
+en: Unfolds an array into rows: a row per element.
+ex: SELECT id, arrayJoin(tags) AS tag FROM posts;
+
+@ unnest | pg | f
+sig: unnest(array [, …])
+ru: Разворачивает массив в строки.
+en: Unfolds an array into rows.
+ex: SELECT id, unnest(tags) AS tag FROM posts;
+
+@ generate_series | pg | f
+sig: generate_series(start, stop [, step])
+ru: Ряд чисел или дат от start до stop с шагом — как таблица.
+en: A series of numbers or dates from start to stop by step, as a table.
+ex: SELECT d::date FROM generate_series(DATE '2026-01-01', DATE '2026-01-31', INTERVAL '1 day') d;
+
+# ----------------------------------------------------------- strings
+
+@ length | pg ora lite | f
+sig: length(s)
+ru: Длина строки в символах (Oracle: LENGTHB — в байтах).
+en: The string's length in characters (Oracle: LENGTHB in bytes).
+ex: SELECT name FROM customers WHERE length(name) > 30;
+
+@ length | ch | f
+sig: length(s) | lengthUTF8(s)
+ru: length — длина строки в БАЙТАХ (и длина массива); для символов — lengthUTF8.
+en: length is the string's length in BYTES (and an array's length); characters: lengthUTF8.
+ex: SELECT length('привет'), lengthUTF8('привет');  -- 12, 6
+
+@ lower, upper | * | f
+sig: lower(s) / upper(s)
+ru: Строка в нижнем / верхнем регистре. В ClickHouse для кириллицы — lowerUTF8 / upperUTF8.
+en: The string in lower / upper case. In ClickHouse, lowerUTF8 / upperUTF8 for non-Latin text.
+ex: SELECT * FROM customers WHERE lower(email) = lower(:email);
+
+@ initcap | pg ora | f
+sig: initcap(s)
+ru: Каждое слово с заглавной буквы.
+en: Each word capitalised.
+ex: SELECT initcap('иван петров');  -- Иван Петров
+
+@ trim, ltrim, rtrim | * | f
+sig: trim([BOTH | LEADING | TRAILING] [chars FROM] s) | ltrim(s) | rtrim(s)
+ru: Убирает пробелы (или указанные символы) по краям строки.
+en: Strips spaces (or the characters given) from the string's ends.
+ex: SELECT trim(both '0' from '000123000'), rtrim(note) FROM orders;
+
+@ substr, substring | * | f
+sig: substr(s, from [, count]) | substring(s FROM from FOR count)
+ru: Часть строки с позиции from (с 1) длиной count. В Oracle отрицательное from — от конца.
+en: Part of the string from position from (1-based), count long. In Oracle a negative from counts from the end.
+ex: SELECT substr(phone, 1, 3) AS code FROM customers;
+
+@ replace | * | f
+sig: replace(s, what, with)
+ru: Заменяет все вхождения подстроки. В ClickHouse — replaceAll (replaceOne — первое).
+en: Replaces every occurrence of a substring. In ClickHouse, replaceAll (replaceOne: the first).
+ex: SELECT replace(phone, '-', '') FROM customers;
+
+@ replaceAll, replaceOne | ch | f
+sig: replaceAll(s, what, with) / replaceOne(…)
+ru: Замена всех / первого вхождения подстроки.
+en: Replaces every / the first occurrence of a substring.
+ex: SELECT replaceAll(url, 'http://', 'https://') FROM links;
+
+@ concat | * | f
+sig: concat(a, b, …)
+ru: Склейка строк. В PostgreSQL и Oracle NULL-ы пропускаются (в отличие от ||).
+en: Joins strings. In PostgreSQL and Oracle NULLs are skipped (unlike ||).
+ex: SELECT concat(first_name, ' ', last_name) FROM customers;
+
+@ position, strpos, instr | * | f
+sig: position(sub IN s) | strpos(s, sub) | instr(s, sub [, from [, nth]])
+ru: Позиция подстроки в строке (с 1); 0, если нет. Oracle: INSTR, ClickHouse: position(s, sub).
+en: The substring's position in the string (1-based); 0 when absent. Oracle: INSTR, ClickHouse: position(s, sub).
+ex: SELECT substr(email, instr(email, '@') + 1) AS domain FROM customers;
+
+@ lpad, rpad | pg ora ch | f
+sig: lpad(s, length [, fill]) / rpad(…)
+ru: Дополняет строку слева / справа до длины (по умолчанию пробелами).
+en: Pads the string on the left / right to the length (spaces by default).
+ex: SELECT lpad(id::text, 8, '0') FROM orders;
+
+@ split_part | pg | f
+sig: split_part(s, separator, n)
+ru: n-я часть строки, разделённой разделителем (с 1; отрицательное — с конца).
+en: The n-th part of the string split by the separator (1-based; negative from the end).
+ex: SELECT split_part(email, '@', 2) AS domain FROM customers;
+
+@ splitByChar, splitByString | ch | f
+sig: splitByChar(sep, s) / splitByString(sep, s)
+ru: Массив частей строки по разделителю.
+en: An array of the string's parts by the separator.
+ex: SELECT splitByChar('@', email)[2] AS domain FROM customers;
+
+@ string_to_array | pg | f
+sig: string_to_array(s, separator)
+ru: Массив частей строки по разделителю.
+en: An array of the string's parts by the separator.
+ex: SELECT string_to_array('a,b,c', ',');
+
+@ regexp_replace | pg ora ch | f
+sig: regexp_replace(s, pattern, replacement [, flags])
+ru: Замена по регулярному выражению. PostgreSQL: флаг 'g' — заменить все; ClickHouse: replaceRegexpAll.
+en: Replacement by a regular expression. PostgreSQL: flag 'g' replaces all; ClickHouse: replaceRegexpAll.
+ex: SELECT regexp_replace(phone, '\D', '', 'g') FROM customers;
+
+@ regexp_like | ora | f
+sig: REGEXP_LIKE(s, pattern [, flags])
+ru: Истина, если строка подходит под регулярное выражение ('i' — без учёта регистра).
+en: True when the string matches the regular expression ('i' ignores case).
+ex: SELECT * FROM customers WHERE REGEXP_LIKE(email, '^[a-z]+@', 'i');
+
+@ regexp_substr | ora | f
+sig: REGEXP_SUBSTR(s, pattern [, from [, nth [, flags [, group]]]])
+ru: Часть строки, подошедшая под регулярное выражение.
+en: The part of the string matching the regular expression.
+ex: SELECT REGEXP_SUBSTR(note, '[0-9]+') AS num FROM orders;
+
+@ match | ch | f
+sig: match(s, pattern)
+ru: 1, если строка подходит под регулярное выражение (re2).
+en: 1 when the string matches the regular expression (re2).
+ex: SELECT * FROM logs WHERE match(message, 'timeout|refused');
+
+@ format | pg | f
+sig: format(template, args…)
+ru: Строка по шаблону: %s — значение, %I — имя (в кавычках при нужде), %L — литерал.
+en: A string from a template: %s value, %I identifier (quoted as needed), %L literal.
+ex: EXECUTE format('SELECT count(*) FROM %I WHERE id = %L', tbl, id);
+
+@ printf | lite | f
+sig: printf(format, args…)
+ru: Форматирование как в C: %d, %s, %.2f…
+en: C-style formatting: %d, %s, %.2f…
+ex: SELECT printf('%08d', id) FROM orders;
+
+@ translate | pg ora | f
+sig: translate(s, from_chars, to_chars)
+ru: Заменяет символы по одному: i-й символ from на i-й символ to (лишние — удаляются).
+en: Replaces characters one by one: from's i-th with to's i-th (extra ones removed).
+ex: SELECT translate(phone, '()- ', '') FROM customers;
+
+@ left, right | pg | f
+sig: left(s, n) / right(s, n)
+ru: Первые / последние n символов строки.
+en: The string's first / last n characters.
+ex: SELECT left(name, 1) AS initial FROM customers;
+
+@ md5 | pg ch | f
+sig: md5(s)
+ru: MD5-хеш строки (PostgreSQL — hex-строкой).
+en: The string's MD5 hash (PostgreSQL: as hex text).
+ex: SELECT md5(email) FROM customers;
+
+# ----------------------------------------------------------- numbers
+
+@ round | * | f
+sig: round(x [, digits])
+ru: Округление до digits знаков после запятой (по умолчанию до целого).
+en: Rounds to digits decimals (to a whole number by default).
+ex: SELECT round(total * 1.2, 2) FROM orders;
+
+@ trunc | pg ora | f
+sig: trunc(x [, digits]) | TRUNC(date [, 'MM'])
+ru: Отбрасывает дробную часть (без округления). В Oracle для даты — обрезает до дня / месяца / года.
+en: Cuts the fraction off (no rounding). In Oracle, for a date it cuts to the day / month / year.
+ex: SELECT trunc(3.99), TRUNC(SYSDATE, 'MM') FROM dual;
+
+@ ceil, ceiling, floor | * | f
+sig: ceil(x) / floor(x)
+ru: Округление вверх / вниз до целого.
+en: Rounds up / down to a whole number.
+ex: SELECT ceil(items / 10.0) AS pages FROM carts;
+
+@ abs | * | f
+sig: abs(x)
+ru: Модуль числа.
+en: The number's absolute value.
+ex: SELECT abs(balance) FROM accounts;
+
+@ mod | pg ora | f
+sig: mod(a, b) | a % b
+ru: Остаток от деления.
+en: The remainder of a division.
+ex: SELECT * FROM orders WHERE mod(id, 2) = 0;
+
+@ power, sqrt, exp, ln, log | * | f
+sig: power(x, y) | sqrt(x) | exp(x) | ln(x) | log(x)
+ru: Степень, корень, экспонента, натуральный и десятичный логарифм (Oracle: LOG(base, x)).
+en: Power, square root, exponent, natural and decimal logarithm (Oracle: LOG(base, x)).
+ex: SELECT power(1 + rate, years) FROM deposits;
+
+@ random, rand | pg lite ch | f
+sig: random() | rand() (ClickHouse)
+ru: Случайное число: PostgreSQL — от 0 до 1, SQLite — целое, ClickHouse rand() — UInt32.
+en: A random number: PostgreSQL 0 to 1, SQLite an integer, ClickHouse rand() a UInt32.
+ex: SELECT * FROM customers ORDER BY random() LIMIT 10;
+
+@ intDiv | ch | f
+sig: intDiv(a, b)
+ru: Целочисленное деление (обычное / даёт Float64).
+en: Integer division (plain / gives Float64).
+ex: SELECT intDiv(seconds, 60) AS minutes FROM calls;
+
+# ----------------------------------------------------------- conversion
+
+@ cast | * | f
+sig: CAST(expr AS type) | expr::type (PostgreSQL)
+ru: Приведение к типу. Ошибка, если значение не переводится (ClickHouse: toTypeOrNull, PostgreSQL 16+: pg_input_is_valid).
+en: Converts to the type. An error when the value doesn't convert (ClickHouse: toTypeOrNull).
+ex: SELECT CAST(amount AS numeric(12, 2)), '2026-01-01'::date;
+
+@ to_char | pg ora | f
+sig: to_char(value, format)
+ru: Число или дату в строку по формату: 'YYYY-MM-DD HH24:MI', 'FM999G990D00'…
+en: A number or date as text by a format: 'YYYY-MM-DD HH24:MI', 'FM999G990D00'…
+ex: SELECT to_char(created_at, 'DD.MM.YYYY') FROM orders;
+
+@ to_date, to_timestamp | pg ora | f
+sig: to_date(text, format) / to_timestamp(text, format)
+ru: Строку в дату / время по формату.
+en: Text to a date / timestamp by a format.
+ex: SELECT to_date('14.11.2026', 'DD.MM.YYYY');
+
+@ to_number | pg ora | f
+sig: to_number(text [, format])
+ru: Строку в число (по формату, если задан).
+en: Text to a number (by a format, if given).
+ex: SELECT to_number('1 234,50', '9G999D99');
+
+@ toString | ch | f
+sig: toString(x)
+ru: Значение в строку.
+en: The value as a string.
+ex: SELECT toString(id) || '-' || toString(toDate(ts)) FROM events;
+
+@ toInt32, toInt64, toUInt32, toUInt64, toFloat64, toDecimal64 | ch | f
+sig: toInt64(x) | toInt64OrNull(x) | toInt64OrZero(x)
+ru: Приведение к числовому типу; варианты OrNull / OrZero не падают на плохих значениях.
+en: Converts to a numeric type; the OrNull / OrZero variants don't fail on bad values.
+ex: SELECT toUInt32OrZero(code) FROM imports;
+
+@ toTypeName | ch | f
+sig: toTypeName(x)
+ru: Имя типа выражения — удобно, чтобы понять, что получилось.
+en: The expression's type name, handy to see what came out.
+ex: SELECT toTypeName(1 + 0.5), toTypeName(now());
+
+@ typeof | lite | f
+sig: typeof(x)
+ru: Класс хранения значения: integer, real, text, blob, null.
+en: The value's storage class: integer, real, text, blob, null.
+ex: SELECT typeof(total), count(*) FROM orders GROUP BY 1;
+
+# ----------------------------------------------------------- dates
+
+@ now, current_timestamp | pg ch lite | f
+sig: now() | current_timestamp
+ru: Текущие дата и время (в PostgreSQL — момент начала транзакции).
+en: The current date and time (in PostgreSQL, when the transaction began).
+ex: SELECT * FROM orders WHERE created_at > now() - INTERVAL '1 day';
+
+@ current_date | * | k
+sig: current_date
+ru: Сегодняшняя дата.
+en: Today's date.
+ex: SELECT * FROM orders WHERE created_at >= current_date;
+
+@ sysdate, systimestamp | ora | k
+sig: SYSDATE | SYSTIMESTAMP
+ru: Текущие дата и время сервера (DATE с точностью до секунд / TIMESTAMP с зоной).
+en: The server's current date and time (DATE to the second / TIMESTAMP with zone).
+ex: SELECT * FROM orders WHERE created_at > SYSDATE - 1;
+
+@ date_trunc | pg | f
+sig: date_trunc('unit', ts)
+ru: Обрезает время до начала единицы: 'day', 'week', 'month', 'quarter', 'year', 'hour'…
+en: Cuts the time down to the unit's start: 'day', 'week', 'month', 'quarter', 'year', 'hour'…
+ex: SELECT date_trunc('month', created_at) AS month, sum(total) FROM orders GROUP BY 1 ORDER BY 1;
+
+@ extract, date_part | * | f
+sig: extract(field FROM ts) | date_part('field', ts)
+ru: Часть даты: YEAR, MONTH, DAY, HOUR, DOW (день недели), EPOCH (секунды с 1970)…
+en: A part of a date: YEAR, MONTH, DAY, HOUR, DOW (weekday), EPOCH (seconds since 1970)…
+ex: SELECT extract(year FROM created_at) AS y, count(*) FROM orders GROUP BY 1;
+
+@ age | pg | f
+sig: age(ts [, from_ts])
+ru: Интервал между датами «по-человечески»: 3 years 2 mons 5 days.
+en: The interval between dates "humanly": 3 years 2 mons 5 days.
+ex: SELECT name, age(birth_date) FROM customers;
+
+@ interval | * | k
+sig: INTERVAL '1 day' | INTERVAL '3' MONTH (Oracle) | INTERVAL 30 DAY (ClickHouse)
+ru: Промежуток времени: его прибавляют к дате и вычитают из неё.
+en: A span of time, added to or taken from a date.
+ex: SELECT now() - INTERVAL '7 days';
+
+@ add_months | ora | f
+sig: ADD_MONTHS(date, n)
+ru: Дата через n месяцев (конец месяца остаётся концом месяца).
+en: The date n months on (a month's end stays a month's end).
+ex: SELECT ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -1) AS prev_month FROM dual;
+
+@ months_between | ora | f
+sig: MONTHS_BETWEEN(date1, date2)
+ru: Число месяцев между датами (дробное).
+en: The number of months between the dates (fractional).
+ex: SELECT FLOOR(MONTHS_BETWEEN(SYSDATE, birth_date) / 12) AS age FROM customers;
+
+@ last_day | ora | f
+sig: LAST_DAY(date)
+ru: Последний день месяца даты.
+en: The last day of the date's month.
+ex: SELECT LAST_DAY(SYSDATE) FROM dual;
+
+@ toDate, toDateTime | ch | f
+sig: toDate(x) / toDateTime(x [, tz])
+ru: В дату / дату-время (из строки 'YYYY-MM-DD…', числа или DateTime).
+en: To a date / date-time (from 'YYYY-MM-DD…' text, a number or a DateTime).
+ex: SELECT toDate(ts) AS day, count() FROM events GROUP BY day ORDER BY day;
+
+@ toStartOfDay, toStartOfHour, toStartOfWeek, toStartOfMonth, toStartOfQuarter, toStartOfYear | ch | f
+sig: toStartOfMonth(date)
+ru: Начало дня / часа / недели / месяца… для группировки по периодам.
+en: The start of the day / hour / week / month… to group by periods.
+ex: SELECT toStartOfMonth(ts) AS month, sum(amount) FROM payments GROUP BY month ORDER BY month;
+
+@ toYYYYMM, toYYYYMMDD | ch | f
+sig: toYYYYMM(date)
+ru: Дата как число 202611 / 20261114 — удобно для партиций.
+en: The date as a number 202611 / 20261114, handy for partitions.
+ex: SELECT toYYYYMM(ts) AS ym, count() FROM events GROUP BY ym;
+
+@ formatDateTime | ch | f
+sig: formatDateTime(time, format [, tz])
+ru: Дата-время в строку по формату (%Y-%m-%d %H:%M:%S).
+en: A date-time as text by a format (%Y-%m-%d %H:%M:%S).
+ex: SELECT formatDateTime(now(), '%d.%m.%Y %H:%M');
+
+@ dateDiff | ch | f
+sig: dateDiff('unit', start, end)
+ru: Разница между датами в единицах: 'second', 'minute', 'hour', 'day', 'month', 'year'.
+en: The difference between dates in units: 'second', 'minute', 'hour', 'day', 'month', 'year'.
+ex: SELECT dateDiff('day', created_at, shipped_at) AS days FROM orders;
+
+@ today, yesterday | ch | f
+sig: today() / yesterday()
+ru: Сегодняшняя / вчерашняя дата.
+en: Today's / yesterday's date.
+ex: SELECT count() FROM events WHERE toDate(ts) = yesterday();
+
+@ date, time, datetime, julianday, strftime | lite | f
+sig: date(value, modifier…) | datetime(…) | strftime(format, value, modifier…)
+ru: Даты в SQLite — строки/числа; модификаторы: 'now', '-1 day', 'start of month', 'localtime'.
+en: Dates in SQLite are text/numbers; modifiers: 'now', '-1 day', 'start of month', 'localtime'.
+ex: SELECT date('now', 'start of month', '-1 month');
+ex: SELECT strftime('%Y-%m', created_at) AS month, count(*) FROM orders GROUP BY month;
+
+# ----------------------------------------------------------- json & arrays
+
+@ json_extract | lite | f
+sig: json_extract(json, '$.path')
+ru: Значение из JSON по пути; также операторы -> и ->> (SQLite 3.38+).
+en: A value from JSON by path; also the -> and ->> operators (SQLite 3.38+).
+ex: SELECT json_extract(payload, '$.user.id') FROM events;
+
+@ json_value, json_query | ora | f
+sig: JSON_VALUE(json, '$.path') / JSON_QUERY(json, '$.path')
+ru: Скалярное значение / фрагмент JSON по пути.
+en: A scalar value / a JSON fragment by path.
+ex: SELECT JSON_VALUE(payload, '$.user.name') FROM events;
+
+@ jsonb_build_object, json_build_object | pg | f
+sig: jsonb_build_object(key1, val1, key2, val2, …)
+ru: JSON-объект из пар ключ-значение.
+en: A JSON object from key-value pairs.
+ex: SELECT jsonb_build_object('id', id, 'total', total) FROM orders;
+
+@ JSONExtractString, JSONExtractInt, JSONExtract | ch | f
+sig: JSONExtractString(json, 'key', …) | JSONExtract(json, 'key', 'Type')
+ru: Значение из JSON-строки по ключам (вложенные — следующими аргументами).
+en: A value from a JSON string by keys (nested ones as further arguments).
+ex: SELECT JSONExtractString(payload, 'user', 'name') FROM events;
+
+@ has, hasAny, hasAll | ch | f
+sig: has(arr, x) | hasAny(arr, arr2) | hasAll(arr, arr2)
+ru: Есть ли в массиве элемент / хотя бы один / все из второго массива.
+en: Whether the array has the element / any / all of the second array's.
+ex: SELECT * FROM posts WHERE has(tags, 'sql');
+
+@ arrayMap, arrayFilter | ch | f
+sig: arrayMap(x -> expr, arr) / arrayFilter(x -> cond, arr)
+ru: Новый массив из выражения для каждого элемента / только элементы, где условие истинно.
+en: A new array of the expression per element / only the elements where the condition holds.
+ex: SELECT arrayFilter(x -> x > 0, arrayMap(x -> x * 2, [1, -2, 3]));
+
+@ array_length, cardinality | pg | f
+sig: array_length(arr, dim) | cardinality(arr)
+ru: Длина массива (по измерению) / число всех элементов.
+en: The array's length (along a dimension) / the count of all elements.
+ex: SELECT id FROM posts WHERE cardinality(tags) > 3;
+
+# ----------------------------------------------------------- misc
+
+@ nextval, currval, setval | pg | f
+sig: nextval('seq') | currval('seq') | setval('seq', n)
+ru: Следующее значение последовательности / последнее выданное в этом сеансе / установить значение.
+en: The sequence's next value / the last one given in this session / set its value.
+ex: SELECT setval('orders_id_seq', (SELECT max(id) FROM orders));
+
+@ gen_random_uuid | pg | f
+sig: gen_random_uuid()
+ru: Случайный UUID v4.
+en: A random UUID v4.
+ex: INSERT INTO sessions (id, user_id) VALUES (gen_random_uuid(), 42);
+
+@ generateUUIDv4 | ch | f
+sig: generateUUIDv4()
+ru: Случайный UUID v4.
+en: A random UUID v4.
+ex: SELECT generateUUIDv4();
+
+@ sys_guid | ora | f
+sig: SYS_GUID()
+ru: Уникальный идентификатор RAW(16).
+en: A unique RAW(16) identifier.
+ex: SELECT RAWTOHEX(SYS_GUID()) FROM dual;
+
+@ dictGet | ch | f
+sig: dictGet('dict', 'attr', key) | dictGetOrDefault(…, default)
+ru: Значение атрибута из словаря по ключу (быстрее JOIN для справочников).
+en: An attribute's value from a dictionary by key (faster than a JOIN for lookups).
+ex: SELECT dictGet('countries', 'name', country_id) FROM visits;
+
+@ pg_size_pretty | pg | f
+sig: pg_size_pretty(bytes)
+ru: Размер в байтах «по-человечески»: 12 MB.
+en: A size in bytes, humanly: 12 MB.
+ex: SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) FROM pg_class ORDER BY pg_total_relation_size(oid) DESC LIMIT 10;
+
+@ last_insert_rowid | lite | f
+sig: last_insert_rowid()
+ru: rowid последней вставленной этим соединением строки.
+en: The rowid of the last row this connection inserted.
+ex: INSERT INTO orders (total) VALUES (10); SELECT last_insert_rowid();
+
+# ----------------------------------------------------------- clauses
+
+@ group | * | k
+sig: GROUP BY expr, … [WITH ROLLUP | ROLLUP (…) | CUBE (…) | GROUPING SETS (…)]
+ru: Сворачивает строки с одинаковыми значениями в одну; в SELECT — эти выражения и агрегаты.
+en: Collapses rows with equal values into one; SELECT then holds those expressions and aggregates.
+ex: SELECT customer_id, count(*) FROM orders GROUP BY customer_id;
+
+@ having | * | k
+sig: … GROUP BY … HAVING cond
+ru: Условие на группы (после агрегации) — в отличие от WHERE, где условие на строки.
+en: A condition on groups (after aggregation), unlike WHERE on rows.
+ex: SELECT customer_id, sum(total) FROM orders GROUP BY customer_id HAVING sum(total) > 10000;
+
+@ order | * | k
+sig: ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], …
+ru: Порядок строк результата; без ORDER BY порядок не гарантирован.
+en: The result's row order; without ORDER BY there is no guaranteed order.
+ex: SELECT * FROM orders ORDER BY created_at DESC NULLS LAST;
+
+@ limit, offset | pg ch lite | k
+sig: LIMIT n [OFFSET m] | LIMIT m, n (ClickHouse) | LIMIT n BY expr (ClickHouse)
+ru: Не больше n строк, пропустив первые m. В ClickHouse LIMIT n BY x — по n строк на каждое x.
+en: At most n rows, skipping the first m. In ClickHouse LIMIT n BY x: n rows per x.
+ex: SELECT * FROM orders ORDER BY total DESC LIMIT 10;
+
+@ fetch | pg ora | k
+sig: OFFSET m ROWS FETCH FIRST n ROWS ONLY
+ru: Стандартный LIMIT (Oracle 12c+).
+en: The standard LIMIT (Oracle 12c+).
+ex: SELECT * FROM orders ORDER BY total DESC FETCH FIRST 10 ROWS ONLY;
+
+@ rownum | ora | k
+sig: ROWNUM
+ru: Номер строки по мере выборки (до ORDER BY!) — для «первых n» сортируйте в подзапросе.
+en: The row's number as it's fetched (before ORDER BY!); sort in a subquery for "first n".
+ex: SELECT * FROM (SELECT * FROM orders ORDER BY total DESC) WHERE ROWNUM <= 10;
+
+@ connect | ora | k
+sig: START WITH cond CONNECT BY PRIOR child = parent
+ru: Иерархический запрос (дерево): LEVEL — глубина, SYS_CONNECT_BY_PATH — путь.
+en: A hierarchical query (a tree): LEVEL is the depth, SYS_CONNECT_BY_PATH the path.
+ex: SELECT LPAD(' ', 2 * (LEVEL - 1)) || name FROM departments
+ex:  START WITH parent_id IS NULL CONNECT BY PRIOR id = parent_id;
+
+@ prewhere | ch | k
+sig: SELECT … FROM t PREWHERE cond WHERE …
+ru: Фильтр, который читает сначала только свои столбцы — быстрее WHERE для селективных условий.
+en: A filter reading only its own columns first, faster than WHERE for selective conditions.
+ex: SELECT * FROM events PREWHERE event_type = 'click' WHERE user_id = 42;
+
+@ final | ch | k
+sig: SELECT … FROM t FINAL
+ru: Сливает части на лету (ReplacingMergeTree и др.): видны итоговые строки. Медленнее.
+en: Merges parts on the fly (ReplacingMergeTree etc.): the final rows are seen. Slower.
+ex: SELECT * FROM users FINAL WHERE id = 42;
+
+@ sample | ch | k
+sig: SELECT … FROM t SAMPLE 0.1
+ru: Выборка доли данных (таблица должна иметь SAMPLE BY) — приблизительные результаты быстрее.
+en: Reads a share of the data (the table needs SAMPLE BY): approximate results, faster.
+ex: SELECT count() * 10 FROM events SAMPLE 0.1;
+
+@ array | ch | k
+sig: SELECT … FROM t ARRAY JOIN arr [AS x] | LEFT ARRAY JOIN …
+ru: Разворачивает массив в строки (по строке на элемент); LEFT — оставляет строки с пустым массивом.
+en: Unfolds an array into rows (one per element); LEFT keeps the rows with an empty array.
+ex: SELECT id, tag FROM posts ARRAY JOIN tags AS tag;
+
+@ qualify | ch | k
+sig: … QUALIFY cond_on_window_function
+ru: Фильтр по результату оконной функции (как HAVING для окон).
+en: A filter on a window function's result (like HAVING for windows).
+ex: SELECT * FROM orders QUALIFY row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC) = 1;
+
+@ returning | pg lite | k
+sig: INSERT / UPDATE / DELETE … RETURNING cols
+ru: Возвращает затронутые строки (например, новый id).
+en: Gives back the rows touched (a new id, say).
+ex: INSERT INTO orders (customer_id, total) VALUES (1, 100) RETURNING id;
+
+@ conflict | pg lite | k
+sig: INSERT … ON CONFLICT (cols) DO UPDATE SET … | DO NOTHING
+ru: «Вставить или обновить»: при конфликте по ключу — обновить (EXCLUDED — вставляемая строка) или пропустить.
+en: "Insert or update": on a key conflict, update (EXCLUDED is the row being inserted) or skip.
+ex: INSERT INTO stock (product_id, qty) VALUES (1, 5)
+ex: ON CONFLICT (product_id) DO UPDATE SET qty = stock.qty + EXCLUDED.qty;
+
+@ merge | pg ora | k
+sig: MERGE INTO target USING source ON cond WHEN MATCHED THEN UPDATE … WHEN NOT MATCHED THEN INSERT …
+ru: Синхронизация таблицы с источником: обновить совпавшие, вставить новые.
+en: Syncs a table with a source: update the matched, insert the new.
+ex: MERGE INTO stock s USING incoming i ON (s.product_id = i.product_id)
+ex: WHEN MATCHED THEN UPDATE SET s.qty = s.qty + i.qty
+ex: WHEN NOT MATCHED THEN INSERT (product_id, qty) VALUES (i.product_id, i.qty);
+
+@ filter | pg lite | k
+sig: агрегат(…) FILTER (WHERE cond)
+ru: Агрегат только по строкам, где условие истинно.
+en: An aggregate over only the rows where the condition holds.
+ex: SELECT count(*) FILTER (WHERE status = 'paid') AS paid FROM orders;
+
+# ----------------------------------------------------------- operators
+
+@ || | pg ora lite | o
+sig: a || b
+ru: Склейка строк. Если одна из частей NULL — результат NULL (кроме Oracle, где NULL = пустая строка). В PostgreSQL также склеивает массивы и jsonb.
+en: String concatenation. A NULL part makes it NULL (not in Oracle, where NULL is ''). In PostgreSQL also joins arrays and jsonb.
+ex: SELECT first_name || ' ' || last_name AS full_name FROM customers;
+
+@ || | ch | o
+sig: a || b
+ru: Склейка строк (то же, что concat).
+en: String concatenation (same as concat).
+ex: SELECT 'id-' || toString(id) FROM orders;
+
+@ :: | pg | o
+sig: expr::type
+ru: Приведение типа (короткая запись CAST).
+en: A type cast (short for CAST).
+ex: SELECT '42'::int, now()::date, total::numeric(10, 2) FROM orders;
+
+@ -> | pg lite | o
+sig: json -> 'key' | json -> index
+ru: Поле JSON по ключу или элемент по индексу — результат JSON.
+en: A JSON field by key or element by index, as JSON.
+ex: SELECT payload -> 'user' FROM events;
+
+@ ->> | pg lite | o
+sig: json ->> 'key'
+ru: Поле JSON по ключу — результат текстом.
+en: A JSON field by key, as text.
+ex: SELECT payload ->> 'email' FROM events WHERE payload ->> 'type' = 'signup';
+
+@ #>, #>> | pg | o
+sig: json #> '{a,b}' / json #>> '{a,b}'
+ru: Значение JSON по пути (массив ключей): как JSON / как текст.
+en: A JSON value by path (an array of keys): as JSON / as text.
+ex: SELECT payload #>> '{user,address,city}' FROM events;
+
+@ @> | pg | o
+sig: a @> b
+ru: Содержит: jsonb содержит jsonb, массив — все элементы другого, диапазон — значение.
+en: Contains: jsonb contains jsonb, an array all of another's elements, a range the value.
+ex: SELECT * FROM events WHERE payload @> '{"type": "click"}';
+
+@ <@ | pg | o
+sig: a <@ b
+ru: Содержится в (обратное @>).
+en: Is contained in (the reverse of @>).
+ex: SELECT * FROM posts WHERE ARRAY['sql'] <@ tags;
+
+@ ? | pg | o
+sig: jsonb ? 'key'
+ru: Есть ли ключ на верхнем уровне jsonb (?| — любой из, ?& — все).
+en: Whether jsonb has the key at the top level (?| any of, ?& all).
+ex: SELECT * FROM events WHERE payload ? 'error';
+
+@ && | pg | o
+sig: a && b
+ru: Пересекаются ли массивы / диапазоны (есть общие элементы).
+en: Whether the arrays / ranges overlap (share elements).
+ex: SELECT * FROM posts WHERE tags && ARRAY['sql', 'postgres'];
+
+@ ~, ~*, !~, !~* | pg | o
+sig: s ~ 'regex' | s ~* 'regex' (без регистра) | !~ — не подходит
+ru: Сравнение с регулярным выражением.
+en: A regular expression match.
+ex: SELECT * FROM customers WHERE phone ~ '^\+7';
+
+@ % | * | o
+sig: a % b
+ru: Остаток от деления (в Oracle — функция MOD).
+en: The remainder of a division (in Oracle, the MOD function).
+ex: SELECT * FROM orders WHERE id % 10 = 0;
+
+@ <>, != | * | o
+sig: a <> b | a != b
+ru: Не равно. С NULL даёт NULL — для «не равно с учётом NULL» есть IS DISTINCT FROM.
+en: Not equal. With NULL it's NULL; IS DISTINCT FROM counts NULL in.
+ex: SELECT * FROM orders WHERE status <> 'cancelled';
+
+@ = | * | o
+sig: a = b
+ru: Равно. Сравнение с NULL всегда NULL — используйте IS NULL.
+en: Equal. A comparison with NULL is always NULL: use IS NULL.
+ex: SELECT * FROM orders WHERE customer_id = 42;
+
+@ <=> | ch | o
+sig: a <=> b
+ru: Равно, считая NULL = NULL истиной (как IS NOT DISTINCT FROM).
+en: Equal, NULL = NULL being true (as IS NOT DISTINCT FROM).
+ex: SELECT * FROM a JOIN b ON a.code <=> b.code;
+
+@ / | * | o
+sig: a / b
+ru: Деление. В PostgreSQL и SQLite целое на целое — целое (7 / 2 = 3): умножьте на 1.0 или приведите к numeric.
+en: Division. In PostgreSQL and SQLite integer by integer is an integer (7 / 2 = 3): multiply by 1.0 or cast.
+ex: SELECT paid * 1.0 / total AS share FROM orders;
+
+@ (+) | ora | o
+sig: WHERE a.id = b.a_id(+)
+ru: Старая запись внешнего соединения в Oracle: (+) у таблицы, которой может не быть. Лучше LEFT JOIN.
+en: Oracle's old outer join notation: (+) on the side that may be missing. LEFT JOIN is better.
+ex: SELECT c.name, o.id FROM customers c, orders o WHERE c.id = o.customer_id(+);

@@ -36,6 +36,77 @@ pub fn all(app: &mut App, ctx: &egui::Context) {
     settings(app, ctx);
     workspace(app, ctx);
     small(app, ctx);
+    help(app, ctx);
+}
+
+/// A function's, operator's or keyword's help (Ctrl+click on it): how it's
+/// written, what it does, an example to copy.
+fn help(app: &mut App, ctx: &egui::Context) {
+    let Some((i, at)) = app.help else { return };
+    let Some(e) = crate::sql::help::entries().get(i) else {
+        app.help = None;
+        return;
+    };
+    let mut open = true;
+    let dark = ctx.theme() == egui::Theme::Dark;
+    let d = app.dialect_of(app.tab_conn(app.ws(), app.tab()).as_deref());
+    let snapshot = app.settings.clone();
+    let mut copy = false;
+    let kind = match e.kind {
+        'o' => t("оператор", "operator"),
+        'k' => t("ключевое слово", "keyword"),
+        _ => t("функция", "function"),
+    };
+    egui::Window::new(format!("{} — {kind}", e.title()))
+        .id(egui::Id::new("help-window"))
+        .open(&mut open)
+        .default_pos(at + egui::vec2(12.0, 16.0))
+        .resizable(false)
+        .collapsible(false)
+        .default_width(520.0)
+        .show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            let font = snapshot.font_size;
+            let mono = egui::FontId::monospace(font);
+            ui.label(RichText::new(&e.sig).font(mono.clone()).strong());
+            if !e.dialects.is_empty() {
+                let names: Vec<&str> = e.dialects.iter().map(|x| match x.as_str() {
+                    "pg" => "PostgreSQL",
+                    "ch" => "ClickHouse",
+                    "ora" => "Oracle",
+                    "lite" => "SQLite",
+                    o => o,
+                }).collect();
+                ui.label(RichText::new(names.join(" · ")).small().weak());
+            }
+            ui.add_space(4.0);
+            ui.label(e.about());
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("Пример", "Example")).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(crate::ui::tinted(format!("🗐 {}", t("Копировать", "Copy")), crate::ui::BLUE)).clicked() {
+                        copy = true;
+                    }
+                });
+            });
+            let ex = e.example();
+            let cx = crate::editor::Ctx { dialect: d, settings: &snapshot, dark, issues: &[], server_err: None, rels: &[], rows: 1 };
+            let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
+            let job = crate::editor::layout(&ex, &cx, None, font, mono_bold);
+            egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+                ui.add(egui::Label::new(job).selectable(true).wrap_mode(egui::TextWrapMode::Extend));
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new(t("Ctrl+клик по функции, оператору или ключевому слову — его справка", "Ctrl+click a function, operator or keyword: its help")).small().weak());
+        });
+    if copy {
+        ctx.copy_text(e.example());
+        app.toast(t("Пример скопирован", "Example copied"));
+    }
+    if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.help = None;
+    }
 }
 
 /// Width of a dialog's text fields; of its number fields.

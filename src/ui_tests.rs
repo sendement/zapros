@@ -2205,3 +2205,58 @@ fn notebook_cells_stop_and_explain_themselves() {
     assert!(rt.log.iter().any(|l| l.text == "Запрос отменён"), "{:?}", rt.log.iter().map(|l| &l.text).collect::<Vec<_>>());
     shot(&mut h, "notebook-buttons");
 }
+
+#[test]
+fn bands_cross_blank_lines_rounded() {
+    let script = "select o.id\n     , (select max(total)\n\n          from orders x\n\n         where x.customer_id = o.customer_id) as top\n  from orders o\n\n where o.total > 10";
+    let (mut h, _g) = harness("bands-blank", script, false);
+    focus_editor(&mut h, 0);
+    for _ in 0..4 {
+        h.step();
+    }
+    let id = h.state().tab().id.clone();
+    assert!(!h.state().rt[&id].ed.blank_bands.is_empty());
+    let img = h.render().unwrap();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    if let Some(dir) = std::env::var_os("ZAPROS_SHOT_DIR") {
+        let crop = image::imageops::crop_imm(&img, r.left() as u32 - 4, r.top() as u32, 460, 180).to_image();
+        image::imageops::resize(&crop, 460 * 3, 180 * 3, image::imageops::FilterType::Nearest).save(PathBuf::from(dir).join("bands-blank.png")).unwrap();
+    }
+}
+
+#[test]
+fn ctrl_click_opens_help() {
+    let script = "select coalesce(note, 'нет') || ' / ' || name, count(*) over (partition by c.id)\n  from orders o\n  left join customers c on c.id = o.customer_id\n group by c.id";
+    let (mut h, _g) = harness("help", script, false);
+    focus_editor(&mut h, 0);
+    // A function.
+    ctrl_click_text(&mut h, 0, 9);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    let (i, _) = h.state().help.expect("help for coalesce");
+    assert_eq!(crate::sql::help::entries()[i].names[0], "coalesce");
+    let _ = h.get_by_label_contains("coalesce — функция");
+    let _ = h.get_by_label_contains("Первое значение");
+    shot(&mut h, "help-coalesce");
+    // An operator.
+    h.state_mut().help = None;
+    let col = script[..script.find("||").unwrap()].chars().count();
+    ctrl_click_text(&mut h, 0, col);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    let (i, _) = h.state().help.expect("help for ||");
+    assert_eq!(crate::sql::help::entries()[i].names[0], "||");
+    // A keyword: LEFT (JOIN), not left(s, n).
+    h.state_mut().help = None;
+    ctrl_click_text(&mut h, 2, 3);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    let (i, _) = h.state().help.expect("help for LEFT");
+    assert_eq!(crate::sql::help::entries()[i].kind, 'k');
+    // A table still opens as before (no help).
+    h.state_mut().help = None;
+    ctrl_click_text(&mut h, 1, 8);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(&mut h);
+    assert!(h.state().help.is_none());
+}

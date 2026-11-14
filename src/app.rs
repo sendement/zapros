@@ -257,6 +257,8 @@ pub struct App {
     decorations: Option<bool>,
     /// Ctrl+F's bar; the tree's search by name.
     pub find: crate::search::Find,
+    /// The reference's entry shown (by Ctrl+click), and where.
+    pub help: Option<(usize, egui::Pos2)>,
     pub tree_search: crate::search::TreeSearch,
     pub about: bool,
     ctx: egui::Context,
@@ -327,6 +329,7 @@ impl App {
             fonts_applied,
             decorations: None,
             find: Default::default(),
+            help: None,
             tree_search: Default::default(),
             settings,
             conns: config::load(&conns_path()),
@@ -1704,6 +1707,7 @@ impl eframe::App for App {
                     self.save_tab(wi, ti);
                 }
                 Action::Open { schema, name, call } => self.locate(&ctx, schema, name, call),
+                Action::Help { entry, at } => self.help = Some((entry, at)),
             }
         }
         crate::dialogs::all(self, &ctx);

@@ -18,6 +18,9 @@ use super::lex::{self, Tk};
 pub struct Band {
     pub range: Range<usize>,
     pub level: usize,
+    /// On a blank line inside a construct (no text to lie on): the columns
+    /// it spans; `range` is then the line's start, empty.
+    pub cols: Option<(usize, usize)>,
 }
 
 /// The indent's width of a line (tabs to 4).
@@ -427,6 +430,9 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
     let mut st = Stack { rec: true, ..Default::default() };
     let mut e = 0;
     let mut out = Vec::new();
+    // Per line laid: its bands as (construct, level, from col, to col);
+    // None for a blank one.
+    let mut laid: Vec<Option<Vec<(usize, usize, usize, usize)>>> = vec![None; n];
     for (li, &ls) in starts.iter().enumerate() {
         let le = starts.get(li + 1).map_or(code.len(), |&n| n - 1);
         let l = &code[ls..le];
@@ -449,6 +455,10 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
             e += 1;
         }
         if l.trim().is_empty() || quiet[li] {
+            // (A quiet line — in a string, a comment — stops a band going on.)
+            if !l.trim().is_empty() {
+                laid[li] = Some(Vec::new());
+            }
             continue;
         }
         let w = match into {
@@ -465,6 +475,7 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
         }
         let o: Vec<&Open> = here.open.iter().filter(|o| o.kind != Kind::Fence).collect();
         let at = |col: usize| if into.is_some() { byte_at(l, col) } else { byte_at_col(l, col) };
+        let mut mine = Vec::new();
         for (n, c) in o.iter().enumerate() {
             let a = c.col;
             // To where the next one starts (one right of a later one, as
@@ -473,9 +484,10 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
             if a >= b {
                 continue;
             }
+            mine.push((c.at, c.level, a, b));
             let (a, b) = (at(a), at(b));
             if into.is_none() {
-                out.push(Band { range: ls + a..ls + b, level: c.level });
+                out.push(Band { range: ls + a..ls + b, level: c.level, cols: None });
                 continue;
             }
             // Only on the indent and the blanks inside the quote: not over
@@ -487,10 +499,39 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
                 match (blank, run) {
                     (true, None) => run = Some(i),
                     (false, Some(r)) => {
-                        out.push(Band { range: ls + r..ls + i, level: c.level });
+                        out.push(Band { range: ls + r..ls + i, level: c.level, cols: None });
                         run = None;
                     }
                     _ => {}
+                }
+            }
+        }
+        laid[li] = Some(mine);
+    }
+    // Blank lines inside a construct: its band goes on across them, as far
+    // as on both the lines around (no gap where the text stops).
+    let mut prev: Option<usize> = None;
+    let mut li = 0;
+    while li < n {
+        if laid[li].is_some() {
+            prev = Some(li);
+            li += 1;
+            continue;
+        }
+        let run = li;
+        while li < n && laid[li].is_none() {
+            li += 1;
+        }
+        if let (Some(p), true) = (prev, li < n) {
+            let (above, below) = (laid[p].as_ref().unwrap(), laid[li].as_ref().unwrap());
+            for &(id, level, a, b) in above {
+                if let Some(&(_, _, a2, b2)) = below.iter().find(|x| x.0 == id && x.1 == level) {
+                    let (a, b) = (a.max(a2), b.min(b2));
+                    if a < b {
+                        for bl in run..li {
+                            out.push(Band { range: starts[bl]..starts[bl], level, cols: Some((a, b)) });
+                        }
+                    }
                 }
             }
         }
@@ -611,5 +652,21 @@ mod tests {
         let at = |w: &str| src.find(w).unwrap();
         assert!(blocks.contains(&Block { range: at("for")..at("end loop"), col: 2, level: 1 }), "{blocks:?}");
         assert!(blocks.iter().any(|b| b.range.start == at("begin") && b.range.end == src.rfind("end;").unwrap()), "{blocks:?}");
+    }
+
+    #[test]
+    fn blank_lines_inside_keep_the_band() {
+        let code = "select a\n     , b\n  from t\n where x in (\n          1,\n\n          2\n       )";
+        let starts: Vec<usize> = std::iter::once(0).chain(code.match_indices('\n').map(|(i, _)| i + 1)).collect();
+        let blank = starts[5];
+        let on_blank: Vec<Band> = bands(code, Dialect::Postgres).into_iter().filter(|b| b.range.start == blank).collect();
+        assert!(!on_blank.is_empty(), "the blank line inside the brackets keeps its bands");
+        assert!(on_blank.iter().all(|b| b.cols.is_some() && b.range.is_empty()));
+        // As far as both lines around have them: up to the indent of 1 and 2.
+        assert!(on_blank.iter().all(|b| b.cols.unwrap().1 <= 10), "{on_blank:?}");
+        // A blank line between statements: nothing.
+        let two = "select 1\n  from t;\n\nselect 2\n  from u;";
+        let starts: Vec<usize> = std::iter::once(0).chain(two.match_indices('\n').map(|(i, _)| i + 1)).collect();
+        assert!(bands(two, Dialect::Postgres).iter().all(|b| b.range.start != starts[2]));
     }
 }
