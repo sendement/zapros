@@ -764,6 +764,12 @@ impl App {
     /// Runs notebook cells of the current tab (None: all of them, in
     /// order); each statement gets the CTEs it uses from WITH cells above.
     pub fn run_cells(&mut self, ctx: &egui::Context, only: Option<String>) {
+        self.run_cells_as(ctx, only, false);
+    }
+
+    /// As `run_cells`; `explain`: the cell's plan instead (its last
+    /// statement, with the CTEs it uses).
+    pub fn run_cells_as(&mut self, ctx: &egui::Context, only: Option<String>, explain: bool) {
         let tab = self.tab().clone();
         let Some(nb) = tab.notebook.as_ref() else { return };
         let Some(conn) = self.tab_conn(self.ws(), &tab) else {
@@ -802,7 +808,10 @@ impl App {
             }
             return;
         }
-        for (cell, stmts) in todo {
+        for (cell, mut stmts) in todo {
+            if explain {
+                stmts = explain_stmts(stmts.split_off(stmts.len() - 1), d);
+            }
             let key = Self::cell_key(&tab.id, &cell);
             if self.rt.get(&key).is_some_and(|r| r.run.is_some()) {
                 continue;
@@ -880,7 +889,7 @@ impl App {
         if self.tab().is_notebook() {
             let focus = self.rt.get(&self.tab().id).and_then(|r| r.cell_focus.clone());
             match (all, focus) {
-                (false, Some(c)) => self.run_cells(ctx, Some(c)),
+                (false, Some(c)) => self.run_cells_as(ctx, Some(c), explain),
                 (false, None) => self.toast(t("Выберите блок", "Pick a cell")),
                 (true, _) => self.run_cells(ctx, None),
             }
@@ -896,14 +905,7 @@ impl App {
         };
         if explain {
             stmts.truncate(1);
-            let s = &stmts[0].sql;
-            let q = s.trim_end_matches(';');
-            stmts = match d {
-                Dialect::Oracle => vec![Stmt { sql: format!("EXPLAIN PLAN FOR {q}"), at: stmts[0].at }, Stmt { sql: "SELECT plan_table_output AS plan FROM TABLE(DBMS_XPLAN.DISPLAY())".into(), at: stmts[0].at }],
-                Dialect::Sqlite => vec![Stmt { sql: format!("EXPLAIN QUERY PLAN {q}"), at: stmts[0].at }],
-                Dialect::ClickHouse => vec![Stmt { sql: format!("EXPLAIN indexes = 1 {q}"), at: stmts[0].at }],
-                _ => vec![Stmt { sql: format!("EXPLAIN {q}"), at: stmts[0].at }],
-            };
+            stmts = explain_stmts(stmts, d);
         }
         let tab_id = self.tab().id.clone();
         if self.rt.get(&tab_id).is_some_and(|r| r.run.is_some()) {
@@ -1000,6 +1002,13 @@ impl App {
             }
             return;
         }
+        self.cancel_key(&id);
+    }
+
+    /// Stops what runs under `id` (a tab or a notebook's cell): its
+    /// statement, or else the rows being loaded.
+    pub fn cancel_key(&mut self, id: &str) {
+        let id = id.to_string();
         // Nothing running: rows being loaded stop.
         if self.rt.get(&id).is_some_and(|r| r.run.is_none()) {
             let loading: Vec<usize> = self.rt[&id].results.iter().enumerate().filter(|(_, v)| v.loading.is_some()).map(|(i, _)| i).collect();
@@ -1604,6 +1613,19 @@ pub fn stopwatch_label(ui: &mut egui::Ui, since: Instant, small: bool) {
 }
 
 /// The last run's time, where its stopwatch was.
+/// The plan of the first statement, each database's way.
+fn explain_stmts(stmts: Vec<Stmt>, d: Dialect) -> Vec<Stmt> {
+    let Some(first) = stmts.first() else { return stmts };
+    let q = first.sql.trim_end_matches(';');
+    let at = first.at;
+    match d {
+        Dialect::Oracle => vec![Stmt { sql: format!("EXPLAIN PLAN FOR {q}"), at }, Stmt { sql: "SELECT plan_table_output AS plan FROM TABLE(DBMS_XPLAN.DISPLAY())".into(), at }],
+        Dialect::Sqlite => vec![Stmt { sql: format!("EXPLAIN QUERY PLAN {q}"), at }],
+        Dialect::ClickHouse => vec![Stmt { sql: format!("EXPLAIN indexes = 1 {q}"), at }],
+        _ => vec![Stmt { sql: format!("EXPLAIN {q}"), at }],
+    }
+}
+
 pub fn last_run_label(ui: &mut egui::Ui, took: Duration, cancelled: bool) {
     let c = if cancelled { egui::Color32::from_rgb(230, 160, 40) } else { ui.visuals().weak_text_color() };
     if let Some(img) = crate::icons::image(crate::icons::Ic::Done, 13.0, c).filter(|_| !cancelled) {

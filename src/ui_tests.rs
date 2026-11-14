@@ -2170,3 +2170,38 @@ fn selection_keeps_text_colours_rounded() {
     }
     assert!(hits > 15, "the selected keyword lost its colour ({hits} px)");
 }
+
+#[test]
+fn notebook_cells_stop_and_explain_themselves() {
+    let text = "-- %%\nselect count(*) from orders where total > 100;\n-- %%\nwith recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n;\n";
+    let (mut h, _g) = harness("nb-buttons", text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    // The toolbar's run / script / stop / plan stay with the plain text.
+    assert!(h.query_by_label("⏩ Скрипт").is_none() && h.query_by_label("⏩").is_none());
+    let plans = h.get_all_by_label_contains("План").count();
+    assert_eq!(plans, 2, "a plan button per SQL cell");
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    let key = |i: usize| crate::app::App::cell_key(&tab, &cells[i]);
+    // The first cell's plan.
+    h.get_all_by_label_contains("План").next().unwrap().click();
+    settle(&mut h);
+    let rt = &h.state().rt[&key(0)];
+    assert!(rt.results.first().is_some_and(|v| v.sql.starts_with("EXPLAIN QUERY PLAN")), "{:?}", rt.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    // The second runs forever: its own stop button ends it.
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, Some(cells[1].clone()));
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(h.state().rt[&key(1)].run.is_some());
+    // (The results' own stop, for rows loading, is there too: disabled.)
+    h.get_all_by_label("Стоп").find(|n| !format!("{n:?}").contains("disabled: true")).unwrap().click();
+    settle(&mut h);
+    let rt = &h.state().rt[&key(1)];
+    assert!(rt.run.is_none() && rt.last_run.is_some_and(|l| l.1), "{:?}", rt.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    assert!(rt.log.iter().any(|l| l.text == "Запрос отменён"), "{:?}", rt.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    shot(&mut h, "notebook-buttons");
+}

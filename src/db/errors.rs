@@ -559,6 +559,8 @@ fn lite(raw: &str) -> Option<Plain> {
         named(&mut p, "Не то число аргументов у функции «{}»", "Wrong number of arguments for «{}»", Thing::Function, Some(r.trim_end_matches("()").to_string()));
     } else if let Some(r) = head.strip_prefix("misuse of aggregate: ").or_else(|| head.strip_prefix("misuse of aggregate function ")) {
         named(&mut p, "Агрегатная функция «{}» здесь нельзя", "Aggregate «{}» can't be used here", Thing::Function, Some(r.trim_end_matches("()").to_string()));
+    } else if head == "interrupted" {
+        p.text = t("Запрос отменён", "The statement was cancelled").into();
     } else if head.contains("database is locked") {
         p.text = t("База занята другим процессом", "The database is locked by another process").into();
     } else if head.contains("readonly database") {

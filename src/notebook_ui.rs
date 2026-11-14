@@ -18,6 +18,10 @@ enum Op {
     Down(usize),
     Kind(usize, CellKind),
     Run(String),
+    /// The cell's plan.
+    Explain(String),
+    /// What the cell runs (or loads) stops.
+    Stop(String),
     Pin(String),
     Unpin(usize),
     Clear(String),
@@ -451,6 +455,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         if ui.add_enabled(!running, tinted(lbl("▶", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
                             ops.push(Op::Run(cell.id.clone()));
                         }
+                        if ui.add_enabled(!running, tinted(lbl("🔍", t("План", "Plan")), crate::ui::BLUE)).on_hover_text(t("План запроса блока   Ctrl+E / F7", "The cell's plan   Ctrl+E / F7")).clicked() {
+                            ops.push(Op::Explain(cell.id.clone()));
+                        }
+                        let loading = app.rt.get(&key).is_some_and(|r| r.results.iter().any(|v| v.loading.is_some()));
+                        if running || loading {
+                            if ui.add(tinted(lbl("■", t("Стоп", "Stop")), crate::ui::RED)).on_hover_text(t("Остановить блок   Shift+Esc — все блоки", "Stop the cell   Shift+Esc: every cell")).clicked() {
+                                ops.push(Op::Stop(key.clone()));
+                            }
+                        }
                         if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
                             ui.add(egui::Spinner::new().size(14.0));
                             crate::app::stopwatch_label(ui, since, true);
@@ -798,9 +811,13 @@ fn ops_text(app: &mut App, tab: &str, cell: &str, text: String) {
 
 fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
     let tab_id = app.tab().id.clone();
-    if let Op::Run(c) = &op {
+    if let Op::Run(c) | Op::Explain(c) = &op {
         app.rt.entry(tab_id.clone()).or_default().cell_focus = Some(c.clone());
-        app.run_cells(ctx, Some(c.clone()));
+        app.run_cells_as(ctx, Some(c.clone()), matches!(op, Op::Explain(_)));
+        return;
+    }
+    if let Op::Stop(key) = &op {
+        app.cancel_key(key);
         return;
     }
     if let Op::Pin(c) = &op {

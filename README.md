@@ -120,6 +120,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   whole database by name (not only what's open), grouped by schema; a
   filter button picks the schemas / databases each connection shows
   (hide the ticked, or only the ticked).
+- **Notebook cells** run, stop and explain themselves (▶ Run, 🔍 Plan, ■
+  Stop on each SQL cell; the toolbar's run / script / stop / plan stay with
+  the plain text; Shift+Esc stops every cell).
 - **Notebook cells** carry the time they were made and colour labels
   (their colours and names set in the filter's menu, more added, any
   removed); the notebook's filter — text, labels wanted (any / all) or left

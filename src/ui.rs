@@ -801,6 +801,9 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.separator();
         let running = app.rt.get(&tab.id).and_then(|r| r.run.as_ref()).map(|r| r.since.elapsed());
+        // (A notebook runs, stops and explains each cell from the cell.)
+        let nb = app.tab().is_notebook();
+        if !nb {
         if ui.add_enabled(running.is_none(), tinted(lbl("▶", t("Выполнить", "Run")), GREEN)).on_hover_text(tip(t("Выполнить запрос", "Run statement"), "Ctrl+Enter")).clicked() {
             app.run(&ctx, false, false);
         }
@@ -813,7 +816,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
             app.run(&ctx, false, true);
         }
-        let nb = app.tab().is_notebook();
+        }
         let fmt_tip = if nb { t("Форматировать все SQL-блоки (Markdown не трогается)", "Format every SQL cell (Markdown stays)") } else { t("Форматировать", "Format") };
         if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(fmt_tip, "Ctrl+Shift+F")).clicked() {
             if nb { app.format_all_cells() } else { app.format() }
