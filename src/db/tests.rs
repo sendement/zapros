@@ -395,3 +395,71 @@ fn searches_on_real_servers() {
     }
 }
 
+
+/// Real servers' errors in plain words, each with the place it's about.
+#[test]
+fn plain_errors_on_real_servers() {
+    use crate::db::errors::{explain, place};
+    use crate::sql::Dialect;
+    crate::i18n::set_ru(true);
+    // (statement, plain text, underlined, guess)
+    let cases: &[(&str, Kind, Dialect, &[&str], &[(&str, &str, &str, Option<&str>)])] = &[
+        ("ZAPROS_TEST_PG", Kind::Postgres, Dialect::Postgres, &["create temp table zz(id int primary key, total int not null, name text)", "insert into zz values (1,1,'a')"], &[
+            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("Может быть, «total»?")),
+            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("Может быть, «total»?")),
+            ("select * from zzz", "Нет такой таблицы «zzz»", "zzz", None),
+            ("select lenght(name) from zz", "Нет такой функции «lenght» (или для таких типов аргументов)", "lenght", None),
+            ("select from where", "Синтаксическая ошибка у «where»", "where", None),
+            ("select * from zz where", "Запрос оборвался: после этого места чего-то не хватает", "where", None),
+            ("select id from zz a join zz b on true", "Неоднозначное поле «id»: оно есть в нескольких таблицах", "id", None),
+            ("insert into zz values (1,1,'a')", "Такое значение уже есть (должно быть уникальным): id = 1", "", None),
+            ("select 'abc'::int", "Значение «abc» не подходит по типу (integer)", "'abc'", None),
+            ("select total, count(*) from zz", "Поле «total» должно быть в GROUP BY или внутри агрегатной функции", "total", None),
+        ]),
+        ("ZAPROS_TEST_CH", Kind::ClickHouse, Dialect::ClickHouse, &["create table if not exists zz(id UInt32, total UInt32, name String) engine=Memory"], &[
+            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("Может быть, «total»?")),
+            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("Может быть, «z.total»?")),
+            ("select * from zzz", "Нет такой таблицы «zzz»", "zzz", Some("Может быть, «default.zz»?")),
+            ("select lenght(name) from zz", "Нет такой функции «lenght»", "lenght", Some("Может быть, «length»?")),
+            ("select from where", "Запрос оборвался: после этого места чего-то не хватает", "where", None),
+            ("select total, count() from zz", "Поле «total» не в GROUP BY и не внутри агрегатной функции", "total", None),
+            ("select * from nodb.t", "Нет такой базы данных «nodb»", "nodb", None),
+            ("select plus(1)", "Не то число аргументов у функции «plus»", "plus", Some("передано 1, нужно 2")),
+        ]),
+        ("ZAPROS_TEST_ORA", Kind::Oracle, Dialect::Oracle, &[], &[
+            ("select totl from dual", "Нет такого поля «TOTL»", "totl", None),
+            ("select z.totl from dual z", "Нет такого поля «TOTL»", "totl", None),
+            ("select * from zzz", "Нет таблицы или представления «ZZZ»", "zzz", None),
+            ("select from where", "Не хватает выражения (поля, значения…) в этом месте", "from", None),
+            ("select to_number('abc') from dual", "Строку «abc» не перевести в число", "'abc'", None),
+            ("select 1/0 from dual", "Деление на ноль", "/", None),
+            ("begin nosuch(1); end;", "Не объявлено: «NOSUCH»", "nosuch", None),
+            ("select (1 from dual", "Не хватает закрывающей скобки", "from", None),
+        ]),
+    ];
+    for (var, kind, d, setup, list) in cases {
+        let Some((sp, pw)) = spec(var, *kind) else { continue };
+        let mut s = open(&sp, &pw).unwrap();
+        for q in *setup {
+            s.run_limit(q, 10, &mut |_| {}).unwrap();
+        }
+        eprintln!("plain errors: {kind:?}, {} cases", list.len());
+        for (q, text, under, hint) in *list {
+            let f = s.run_limit(q, 10, &mut |_| {}).unwrap_err();
+            let p = explain(&f.message, *d);
+            assert_eq!(p.text, *text, "{kind:?} {q}: {}", f.message);
+            if let Some(h) = hint {
+                assert_eq!(p.hint.as_deref(), Some(*h), "{kind:?} {q}: {}", f.message);
+            }
+            assert!(p.code.is_some(), "{kind:?} {q}");
+            let got = place(q, f.at, &p, *d).map(|r| &q[r]);
+            if under.is_empty() {
+                continue;
+            }
+            assert_eq!(got, Some(*under), "{kind:?} {q}: at {:?}", f.at);
+        }
+        if *kind == Kind::ClickHouse {
+            let _ = s.run_limit("drop table zz", 10, &mut |_| {});
+        }
+    }
+}

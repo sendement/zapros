@@ -6,6 +6,7 @@
 //! late answers are dropped).
 
 pub mod ch;
+pub mod errors;
 #[cfg(feature = "oracle")]
 pub mod ora;
 pub mod pg;

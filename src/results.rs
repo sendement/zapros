@@ -121,8 +121,36 @@ fn save_dir(app: &App) -> std::path::PathBuf {
     app.session.project.clone().or_else(dirs::download_dir).or_else(dirs::home_dir).unwrap_or_default()
 }
 
+/// An error's code as a small button that copies it.
+fn code_chip(ui: &mut egui::Ui, code: &str, id: egui::Id) {
+    let now = ui.input(|i| i.time);
+    let copied: Option<f64> = ui.data(|d| d.get_temp(id));
+    let fresh = copied.is_some_and(|c| now - c < 1.5);
+    let tint = ui.visuals().weak_text_color();
+    let text = RichText::new(code).monospace().small();
+    let b = if fresh {
+        egui::Button::new(RichText::new(format!("✓ {}", t("скопировано", "copied"))).small().color(Color32::from_rgb(80, 180, 90)))
+    } else if let Some(img) = crate::icons::image(crate::icons::Ic::Copy, 12.0, tint) {
+        egui::Button::image_and_text(img, text)
+    } else {
+        egui::Button::new(RichText::new(format!("{code}  🗐")).monospace().small())
+    };
+    let r = ui.add(b.fill(ui.visuals().faint_bg_color).corner_radius(4.0)).on_hover_text(t("Код ошибки — щелчок копирует", "The error's code: click to copy"));
+    if r.clicked() {
+        ui.ctx().copy_text(code.to_string());
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+    if fresh {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    }
+}
+
 fn log_lines(ui: &mut egui::Ui, lines: &[crate::app::LogLine], goto: &mut Option<usize>, mono: bool) {
-    for l in lines {
+    for (n, l) in lines.iter().enumerate() {
+        if let Some(err) = &l.err {
+            error_line(ui, l, err, n, goto);
+            continue;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&l.when).small().weak().monospace());
             let (icon, color) = match l.kind {
@@ -141,6 +169,52 @@ fn log_lines(ui: &mut egui::Ui, lines: &[crate::app::LogLine], goto: &mut Option
             }
         });
     }
+}
+
+/// A database's error: in plain words (a click goes to its place), its
+/// code to copy, a guess at what was meant, and the server's whole text
+/// unfolded on demand.
+fn error_line(ui: &mut egui::Ui, l: &crate::app::LogLine, err: &crate::app::ErrInfo, n: usize, goto: &mut Option<usize>) {
+    let red = Color32::from_rgb(230, 80, 80);
+    let id = ui.id().with(("err", n, &l.when));
+    let mut open: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&l.when).small().weak().monospace());
+        let r = ui.add(egui::Label::new(RichText::new(format!("⛔ {}", l.text)).color(red).strong()).sense(if l.at.is_some() { egui::Sense::click() } else { egui::Sense::hover() }));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("error: {}", l.text)));
+        if let Some(at) = l.at {
+            if r.on_hover_text(t("Щелчок — к месту ошибки в коде", "Click: go to the error in the code")).clicked() {
+                *goto = Some(at);
+            }
+        }
+        if let Some(code) = &err.code {
+            code_chip(ui, code, id.with("copied"));
+        }
+        let more = if open { t("Скрыть лог", "Hide the log") } else { t("Весь лог…", "Full log…") };
+        if ui.add(egui::Button::new(RichText::new(more).small().underline().color(crate::ui::BLUE)).frame(false)).on_hover_text(t("Полный текст ошибки от сервера", "The server's whole error text")).clicked() {
+            open = !open;
+        }
+    });
+    if let Some(h) = &err.hint {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(ui.spacing().indent * 2.5);
+            ui.label(RichText::new(format!("↳ {h}")).color(ui.visuals().text_color()));
+        });
+    }
+    if open {
+        egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("Ответ сервера", "The server's answer")).small().weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(crate::ui::tinted(format!("🗐 {}", t("Копировать всё", "Copy all")), crate::ui::BLUE)).clicked() {
+                        ui.ctx().copy_text(err.raw.clone());
+                    }
+                });
+            });
+            ui.add(egui::Label::new(RichText::new(&err.raw).monospace().small()).selectable(true).wrap_mode(egui::TextWrapMode::Wrap));
+        });
+    }
+    ui.data_mut(|d| d.insert_temp(id, open));
 }
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {

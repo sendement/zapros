@@ -126,7 +126,17 @@ pub enum LogKind {
     Error,
 }
 
+/// An error's code, the server's whole text and a guess (the line's text
+/// is the error in plain words).
+#[derive(Clone, Debug)]
+pub struct ErrInfo {
+    pub code: Option<String>,
+    pub raw: String,
+    pub hint: Option<String>,
+}
+
 pub struct LogLine {
+    pub err: Option<Box<ErrInfo>>,
     pub when: String,
     pub kind: LogKind,
     pub text: String,
@@ -524,7 +534,7 @@ impl App {
         for rt in self.rt.values_mut() {
             if rt.run.as_ref().is_some_and(|r| r.conn == conn) {
                 rt.run = None;
-                rt.log.push(LogLine { when: now(), kind: LogKind::Note, text: t("Отключено", "Disconnected").into(), at: None });
+                rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: t("Отключено", "Disconnected").into(), at: None });
             }
         }
     }
@@ -829,8 +839,8 @@ impl App {
                 let table = Table { cols: tb.cols.iter().map(|(name, ty, numeric)| crate::db::Col { name: name.clone(), ty: ty.clone(), numeric: *numeric }).collect(), rows: tb.rows.clone(), more: tb.more };
                 rt.results.push(ResultView::new(tb.sql.clone(), table, Duration::ZERO, None));
             }
-            rt.output = s.output.iter().map(|o| LogLine { when: s.when.clone(), kind: LogKind::Note, text: o.clone(), at: None }).collect();
-            rt.log.push(LogLine { when: s.when.clone(), kind: LogKind::Note, text: t("Сохранённый вывод", "Saved output").into(), at: None });
+            rt.output = s.output.iter().map(|o| LogLine { err: None, when: s.when.clone(), kind: LogKind::Note, text: o.clone(), at: None }).collect();
+            rt.log.push(LogLine { err: None, when: s.when.clone(), kind: LogKind::Note, text: t("Сохранённый вывод", "Saved output").into(), at: None });
             rt.shown = if rt.results.is_empty() { if rt.output.is_empty() { Pane::Messages } else { Pane::Output } } else { Pane::Result(0) };
         }
         self.rt.insert(key, rt);
@@ -998,7 +1008,7 @@ impl App {
                     let pw = l.password.clone();
                     let rt = self.rt.get_mut(&id).unwrap();
                     rt.run = None;
-                    rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: t("Запрос брошен: сервер не отвечает на отмену, сессия пересоздана", "Run abandoned: the server didn't answer the cancel, session recreated").into(), at: None });
+                    rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: t("Запрос брошен: сервер не отвечает на отмену, сессия пересоздана", "Run abandoned: the server didn't answer the cancel, session recreated").into(), at: None });
                     let ctx = self.ctx.clone();
                     if let Some(l) = self.live.get_mut(&conn) {
                         l.query = Worker::spawn(spec, pw, self.tx.clone(), ctx);
@@ -1088,7 +1098,7 @@ impl App {
                     for rt in self.rt.values_mut() {
                         if rt.run.as_ref().is_some_and(|r| r.conn == conn) && !from_meta {
                             rt.run = None;
-                            rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: format!("{}: {m}", t("Нет подключения", "Not connected")), at: None });
+                            rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: format!("{}: {m}", t("Нет подключения", "Not connected")), at: None });
                             rt.shown = Pane::Messages;
                         }
                     }
@@ -1133,19 +1143,19 @@ impl App {
                 }
                 What::Started { run, index: _, at, sql } => {
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
-                        rt.log.push(LogLine { when: now(), kind: LogKind::Run, text: head(&sql, 200), at: Some(at) });
+                        rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Run, text: head(&sql, 200), at: Some(at) });
                     }
                 }
                 What::Note { run, text } => {
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
-                        rt.output.push(LogLine { when: now(), kind: LogKind::Note, text, at: None });
+                        rt.output.push(LogLine { err: None, when: now(), kind: LogKind::Note, text, at: None });
                     }
                 }
                 What::Page { run, at, sql, table, took } => {
                     let conn = ev.conn.clone();
                     if let Some(tab) = self.runs.get(&run).cloned() {
                         let rt = self.rt.entry(tab.clone()).or_default();
-                        rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {} ({}) · {}", table.rows.len(), t("строк", "rows"), t("есть ещё — догружаются по запросу", "more to load on demand"), fmt_took(took)), at: Some(at) });
+                        rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Ok, text: format!("{} {} ({}) · {}", table.rows.len(), t("строк", "rows"), t("есть ещё — догружаются по запросу", "more to load on demand"), fmt_took(took)), at: Some(at) });
                         let mut v = ResultView::new(sql, table, took, Some((run, conn)));
                         v.arrange(&rt.col_orders);
                         rt.results.push(v);
@@ -1162,7 +1172,7 @@ impl App {
                     }
                     let Some(rt) = self.rt.get_mut(&tab) else { continue };
                     if let Some(e) = error {
-                        rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: e, at: None });
+                        rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: e, at: None });
                     }
                     let mut done_export = None;
                     if let Some(v) = rt.results.iter_mut().find(|v| v.cursor.as_ref().is_some_and(|c| c.0 == run)) {
@@ -1189,13 +1199,15 @@ impl App {
                     }
                 }
                 What::Result { run, index: _, at, sql, outcome, took } => {
+                    let dialect = self.dialect_of(Some(&ev.conn));
+                    let rels = self.live.get(&ev.conn).map(|l| l.rels.clone()).unwrap_or_default();
                     let ddl = matches!(sql::first_word(&sql).to_ascii_uppercase().as_str(), "CREATE" | "DROP" | "ALTER" | "RENAME" | "TRUNCATE" | "COMMENT");
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
                         let ms = fmt_took(took);
                         match outcome {
                             Ok(Outcome::Rows(table)) => {
                                 let more = if table.more { format!(" ({})", t("есть ещё", "more exist")) } else { String::new() };
-                                rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{} {}{more} · {ms}", table.rows.len(), t("строк", "rows")), at: Some(at) });
+                                rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Ok, text: format!("{} {}{more} · {ms}", table.rows.len(), t("строк", "rows")), at: Some(at) });
                                 let mut v = ResultView::new(sql, table, took, None);
                                 v.arrange(&rt.col_orders);
                                 rt.results.push(v);
@@ -1208,16 +1220,20 @@ impl App {
                                     Some(n) => format!("{} {n}", t("Готово, строк затронуто:", "Done, rows affected:")),
                                     None => t("Готово", "Done").to_string(),
                                 };
-                                rt.log.push(LogLine { when: now(), kind: LogKind::Ok, text: format!("{what} · {ms}"), at: Some(at) });
+                                rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Ok, text: format!("{what} · {ms}"), at: Some(at) });
                             }
                             Err(f) => {
-                                let pos = f.at.map(|p| at + p);
-                                if let Some(p) = pos {
-                                    rt.server_err = Some((p..p + 1, f.message.clone()));
-                                } else {
-                                    rt.server_err = Some((at..at + sql.len().min(1), f.message.clone()));
-                                }
-                                rt.log.push(LogLine { when: now(), kind: LogKind::Error, text: f.message, at: pos.or(Some(at)) });
+                                // In plain words, the name it's about underlined.
+                                let mut plain = crate::db::errors::explain(&f.message, dialect);
+                                crate::db::errors::add_guess(&mut plain, &sql, &rels, dialect);
+                                let place = crate::db::errors::place(&sql, f.at, &plain, dialect).map(|r| at + r.start..at + r.end);
+                                let tip = match &plain.hint {
+                                    Some(h) => format!("{}\n{h}", plain.text),
+                                    None => plain.text.clone(),
+                                };
+                                rt.server_err = Some((place.clone().unwrap_or(at..at + sql.len().min(1)), tip));
+                                let err = crate::app::ErrInfo { code: plain.code, raw: f.message, hint: plain.hint };
+                                rt.log.push(LogLine { err: Some(Box::new(err)), when: now(), kind: LogKind::Error, text: plain.text, at: place.map(|r| r.start).or(f.at.map(|p| at + p)).or(Some(at)) });
                                 rt.shown = Pane::Messages;
                             }
                         }
@@ -1243,9 +1259,9 @@ impl App {
                                 let took = rt.run.take().map(|r| r.since.elapsed()).unwrap_or_default();
                                 rt.last_run = Some((took, cancelled));
                                 if cancelled {
-                                    rt.log.push(LogLine { when: now(), kind: LogKind::Note, text: t("Отменено", "Cancelled").into(), at: None });
+                                    rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: t("Отменено", "Cancelled").into(), at: None });
                                 } else {
-                                    rt.log.push(LogLine { when: now(), kind: LogKind::Note, text: format!("{} · {}", t("Завершено", "Finished"), fmt_took(took)), at: None });
+                                    rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: format!("{} · {}", t("Завершено", "Finished"), fmt_took(took)), at: None });
                                 }
                             }
                         }

@@ -29,6 +29,14 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   window asks what to do with them. In PostgreSQL each statement runs under
   a savepoint, so one that fails is undone alone and the transaction goes
   on. ClickHouse has no transactions: the controls hide.
+- **Errors in plain words** (PostgreSQL, ClickHouse, Oracle, SQLite): the
+  server's answer read by its code — "no column «totl»", "the statement ends
+  too early", "column «total» must be in GROUP BY…" — with the name it's
+  about underlined in the code (the server's position, or where the name
+  is), a guess at what was meant (the server's own, or the nearest names of
+  the statement's tables, the database's tables or functions), the code as
+  a button that copies it, and the server's whole text unfolded under
+  "Full log…" with Copy all.
 - **Object tree** per connection: schemas / databases, tables, views,
   materialized views, functions, procedures, packages, sequences, triggers,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,

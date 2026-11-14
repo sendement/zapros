@@ -2088,3 +2088,27 @@ fn empty_cells_stay_apart() {
     assert!(nb.fix_ids());
     assert_ne!(nb.cells[0].id, nb.cells[1].id);
 }
+
+#[test]
+fn errors_in_plain_words() {
+    let script = "select totl, name\n  from orders o\n  join customers c on c.id = o.customer_id";
+    let (mut h, _g) = harness("errors", script, false);
+    focus_editor(&mut h, 3);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let rt = h.state().rt.get(&h.state().tab().id).unwrap();
+    let l = rt.log.iter().find(|l| l.err.is_some()).expect("an error line");
+    assert_eq!(l.text, "Нет такого поля «totl»");
+    // A guess from the tables of the statement, the name underlined.
+    assert_eq!(l.err.as_ref().unwrap().hint.as_deref(), Some("Может быть, «total»?"));
+    let (r, tip) = rt.server_err.clone().unwrap();
+    assert_eq!(&script[r.clone()], "totl");
+    assert!(tip.contains("total"), "{tip}");
+    assert!(l.err.as_ref().unwrap().raw.contains("no such column"));
+    // The whole log unfolds.
+    let _ = h.get_by_label_contains("SQLITE_ERROR");
+    h.get_by_label("Весь лог…").click();
+    settle(&mut h);
+    let _ = h.get_by_label_contains("no such column: totl");
+    shot(&mut h, "errors");
+}

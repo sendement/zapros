@@ -19,7 +19,30 @@ fn fail(e: rusqlite::Error) -> Failure {
         rusqlite::Error::SqlInputError { offset, .. } if *offset >= 0 => Some(*offset as usize),
         _ => None,
     };
-    Failure { message: e.to_string(), at, lost: false }
+    // The code's name on a line of its own (shown, copied).
+    let ffi = match &e {
+        rusqlite::Error::SqlInputError { error, .. } => Some(error),
+        e => e.sqlite_error(),
+    };
+    let code = ffi.map(|x| match x.extended_code {
+        2067 => "SQLITE_CONSTRAINT_UNIQUE",
+        1555 => "SQLITE_CONSTRAINT_PRIMARYKEY",
+        1299 => "SQLITE_CONSTRAINT_NOTNULL",
+        787 => "SQLITE_CONSTRAINT_FOREIGNKEY",
+        275 => "SQLITE_CONSTRAINT_CHECK",
+        c if c & 0xff == 19 => "SQLITE_CONSTRAINT",
+        c if c & 0xff == 5 => "SQLITE_BUSY",
+        c if c & 0xff == 6 => "SQLITE_LOCKED",
+        c if c & 0xff == 8 => "SQLITE_READONLY",
+        c if c & 0xff == 20 => "SQLITE_MISMATCH",
+        c if c & 0xff == 9 => "SQLITE_INTERRUPT",
+        _ => "SQLITE_ERROR",
+    });
+    let message = match code {
+        Some(c) => format!("{e}\n[{c}]"),
+        None => e.to_string(),
+    };
+    Failure { message, at, lost: false }
 }
 
 fn text(v: ValueRef) -> Option<String> {
