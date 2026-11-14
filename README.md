@@ -33,7 +33,16 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   server's answer read by its code — "no column «totl»", "the statement ends
   too early", "column «total» must be in GROUP BY…" — with the name it's
   about underlined in the code (the server's position, or where the name
-  is), a guess at what was meant (the server's own, or the nearest names of
+  is). An unknown name is read in its context, whatever the server's
+  words: a wrong alias before a dot ("no table or alias «x» in the
+  statement — maybe «o.total»?", the aliases whose tables have that
+  column; for `x.*` just the aliases there are), a column its alias'
+  table lacks (that table's alike columns, or the other table that has
+  it), a bare column (alike ones, with their alias when there are several
+  tables; or the table the statement doesn't name that has it; "Bob" in
+  double quotes → strings take single quotes), a call (no such function,
+  alike functions; a column called like one), a table after FROM / JOIN
+  (alike tables, or another schema that has it). Then a guess at what was meant (the server's own, or the nearest names of
   the statement's tables, the database's tables or functions), the code as
   a button that copies it, and the server's whole text unfolded under
   "Full log…" with Copy all.

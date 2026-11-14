@@ -405,8 +405,8 @@ fn plain_errors_on_real_servers() {
     // (statement, plain text, underlined, guess)
     let cases: &[(&str, Kind, Dialect, &[&str], &[(&str, &str, &str, Option<&str>)])] = &[
         ("ZAPROS_TEST_PG", Kind::Postgres, Dialect::Postgres, &["create temp table zz(id int primary key, total int not null, name text)", "insert into zz values (1,1,'a')"], &[
-            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("Может быть, «total»?")),
-            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("Может быть, «total»?")),
+            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("MEANT:total")),
+            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("MEANT:total")),
             ("select * from zzz", "Нет такой таблицы «zzz»", "zzz", None),
             ("select lenght(name) from zz", "Нет такой функции «lenght» (или для таких типов аргументов)", "lenght", None),
             ("select from where", "Синтаксическая ошибка у «where»", "where", None),
@@ -417,10 +417,10 @@ fn plain_errors_on_real_servers() {
             ("select total, count(*) from zz", "Поле «total» должно быть в GROUP BY или внутри агрегатной функции", "total", None),
         ]),
         ("ZAPROS_TEST_CH", Kind::ClickHouse, Dialect::ClickHouse, &["create table if not exists zz(id UInt32, total UInt32, name String) engine=Memory"], &[
-            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("Может быть, «total»?")),
-            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("Может быть, «z.total»?")),
-            ("select * from zzz", "Нет такой таблицы «zzz»", "zzz", Some("Может быть, «default.zz»?")),
-            ("select lenght(name) from zz", "Нет такой функции «lenght»", "lenght", Some("Может быть, «length»?")),
+            ("select totl from zz", "Нет такого поля «totl»", "totl", Some("MEANT:total")),
+            ("select z.totl from zz z", "Нет такого поля «z.totl»", "z.totl", Some("MEANT:z.total")),
+            ("select * from zzz", "Нет такой таблицы «zzz»", "zzz", Some("MEANT:default.zz")),
+            ("select lenght(name) from zz", "Нет такой функции «lenght»", "lenght", Some("MEANT:length")),
             ("select from where", "Запрос оборвался: после этого места чего-то не хватает", "where", None),
             ("select total, count() from zz", "Поле «total» не в GROUP BY и не внутри агрегатной функции", "total", None),
             ("select * from nodb.t", "Нет такой базы данных «nodb»", "nodb", None),
@@ -449,7 +449,10 @@ fn plain_errors_on_real_servers() {
             let p = explain(&f.message, *d);
             assert_eq!(p.text, *text, "{kind:?} {q}: {}", f.message);
             if let Some(h) = hint {
-                assert_eq!(p.hint.as_deref(), Some(*h), "{kind:?} {q}: {}", f.message);
+                match h.strip_prefix("MEANT:") {
+                    Some(m) => assert_eq!(p.meant.join(", "), m, "{kind:?} {q}: {}", f.message),
+                    None => assert_eq!(p.hint.as_deref(), Some(*h), "{kind:?} {q}: {}", f.message),
+                }
             }
             assert!(p.code.is_some(), "{kind:?} {q}");
             let got = place(q, f.at, &p, *d).map(|r| &q[r]);
@@ -463,3 +466,50 @@ fn plain_errors_on_real_servers() {
         }
     }
 }
+
+/// Real servers' unknown names read in their context: a wrong alias, a
+/// column not of the alias' table, a typo, a call, a table.
+#[test]
+fn names_in_context_on_real_servers() {
+    use crate::db::errors::understand;
+    use crate::sql::Dialect;
+    crate::i18n::set_ru(true);
+    let two = "select x.total, c.name from zz_orders o join zz_customers c on c.id = o.customer_id";
+    let cases: &[(&str, Kind, Dialect, &str, &[&str], &[&str])] = &[
+        ("ZAPROS_TEST_PG", Kind::Postgres, Dialect::Postgres, "zzerr", &["drop schema if exists zzerr cascade", "create schema zzerr", "set search_path = zzerr, public", "create table zz_orders(id int, customer_id int, total int, note text)", "create table zz_customers(id int, name text)"], &["drop schema zzerr cascade"]),
+        ("ZAPROS_TEST_CH", Kind::ClickHouse, Dialect::ClickHouse, "default", &["drop table if exists zz_orders", "drop table if exists zz_customers", "create table zz_orders(id UInt32, customer_id UInt32, total UInt32, note String) engine=Memory", "create table zz_customers(id UInt32, name String) engine=Memory"], &["drop table zz_orders", "drop table zz_customers"]),
+        ("ZAPROS_TEST_ORA", Kind::Oracle, Dialect::Oracle, "ZAPROS", &["begin execute immediate 'drop table zz_orders'; exception when others then null; end;", "begin execute immediate 'drop table zz_customers'; exception when others then null; end;", "create table zz_orders(id number, customer_id number, total number, note varchar2(100))", "create table zz_customers(id number, name varchar2(100))"], &["drop table zz_orders", "drop table zz_customers"]),
+    ];
+    for (var, kind, d, schema, setup, down) in cases {
+        let Some((sp, pw)) = spec(var, *kind) else { continue };
+        let mut s = open(&sp, &pw).unwrap();
+        for q in *setup {
+            s.run_limit(q, 10, &mut |_| {}).unwrap_or_else(|e| panic!("{q}: {}", e.message));
+            if *kind == Kind::Oracle {
+                let _ = s.run_limit("commit", 10, &mut |_| {});
+            }
+        }
+        let rels = s.relations(&[schema.to_string()]).unwrap();
+        assert!(rels.iter().any(|r| r.name.eq_ignore_ascii_case("zz_orders")), "{kind:?}: {:?}", rels.iter().map(|r| &r.name).collect::<Vec<_>>());
+        let list: &[(&str, &str, &str)] = &[
+            (two, "В запросе нет таблицы или алиаса «x» — может быть, «o.total»?", "x"),
+            ("select x.* from zz_orders o", "В запросе нет таблицы или алиаса «x»", "x"),
+            ("select o.totl from zz_orders o", "У таблицы «zz_orders» (o) нет поля «totl» — может быть, «o.total»?", "totl"),
+            ("select o.name from zz_orders o join zz_customers c on c.id = o.customer_id", "У таблицы «zz_orders» (o) нет поля «name»", "name"),
+            ("select totl from zz_orders", "Нет такого поля «totl» — может быть, «total»?", "totl"),
+            ("select lenght(note) from zz_orders", "Нет такой функции «lenght» — может быть, «length»?", "lenght"),
+            ("select * from zz_ordrs", "Нет такой таблицы «zz_ordrs» — может быть, «zz_orders»?", "zz_ordrs"),
+        ];
+        for (q, sentence, under) in list {
+            let f = s.run_limit(q, 10, &mut |_| {}).unwrap_err();
+            let (p, r) = understand(&f.message, f.at, q, &rels, *d);
+            eprintln!("{kind:?} {q}\n  {}\n  {}\n  {:?} → {:?}", f.message.lines().next().unwrap_or(""), p.sentence(), p.hint, r.clone().map(|r| &q[r]));
+            assert_eq!(p.sentence(), *sentence, "{kind:?} {q}: {}", f.message);
+            assert_eq!(r.map(|r| &q[r]), Some(*under), "{kind:?} {q}: {}", f.message);
+        }
+        for q in *down {
+            let _ = s.run_limit(q, 10, &mut |_| {});
+        }
+    }
+}
+

@@ -98,6 +98,30 @@ fn tables(src: &str, toks: &[Tok]) -> Vec<Named> {
     out
 }
 
+/// A statement's tables and what they're called there: (alias, table) —
+/// the alias is the table's name when none is given; subqueries and
+/// table functions ("(…) x") give their alias with no table ("").
+pub fn sources(src: &str, d: Dialect) -> Vec<(String, String)> {
+    let toks: Vec<Tok> = lex::lex(src, d).into_iter().filter(|t| !t.trivia()).collect();
+    let mut out: Vec<(String, String)> = tables(src, &toks).into_iter().map(|n| (n.alias, n.table)).collect();
+    for (name, _) in ctes(src, &toks) {
+        out.push((name.clone(), name));
+    }
+    for k in 0..toks.len() {
+        if toks[k].kind != Tk::Close {
+            continue;
+        }
+        let mut a = k + 1;
+        if toks.get(a).is_some_and(|t| t.text(src).eq_ignore_ascii_case("as")) {
+            a += 1;
+        }
+        if let Some(name) = toks.get(a).filter(|t| matches!(t.kind, Tk::Word | Tk::Quoted)).and_then(|t| ident(src, t)) {
+            out.push((name, String::new()));
+        }
+    }
+    out
+}
+
 /// WITH name AS (…), name2 AS (…): the names and where they are.
 fn ctes(src: &str, toks: &[Tok]) -> Vec<(String, Range<usize>)> {
     let up = |k: usize| toks.get(k).map(|t| t.text(src).to_ascii_uppercase()).unwrap_or_default();

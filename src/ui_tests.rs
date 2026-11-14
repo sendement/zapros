@@ -2098,9 +2098,9 @@ fn errors_in_plain_words() {
     settle(&mut h);
     let rt = h.state().rt.get(&h.state().tab().id).unwrap();
     let l = rt.log.iter().find(|l| l.err.is_some()).expect("an error line");
-    assert_eq!(l.text, "Нет такого поля «totl»");
-    // A guess from the tables of the statement, the name underlined.
-    assert_eq!(l.err.as_ref().unwrap().hint.as_deref(), Some("Может быть, «total»?"));
+    // A guess from the tables of the statement (with its alias: two
+    // tables), the name underlined.
+    assert_eq!(l.text, "Нет такого поля «totl» — может быть, «o.total»?");
     let (r, tip) = rt.server_err.clone().unwrap();
     assert_eq!(&script[r.clone()], "totl");
     assert!(tip.contains("total"), "{tip}");

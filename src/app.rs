@@ -1224,16 +1224,16 @@ impl App {
                             }
                             Err(f) => {
                                 // In plain words, the name it's about underlined.
-                                let mut plain = crate::db::errors::explain(&f.message, dialect);
-                                crate::db::errors::add_guess(&mut plain, &sql, &rels, dialect);
-                                let place = crate::db::errors::place(&sql, f.at, &plain, dialect).map(|r| at + r.start..at + r.end);
+                                let (plain, place) = crate::db::errors::understand(&f.message, f.at, &sql, &rels, dialect);
+                                let place = place.map(|r| at + r.start..at + r.end);
                                 let tip = match &plain.hint {
-                                    Some(h) => format!("{}\n{h}", plain.text),
-                                    None => plain.text.clone(),
+                                    Some(h) => format!("{}\n{h}", plain.sentence()),
+                                    None => plain.sentence(),
                                 };
                                 rt.server_err = Some((place.clone().unwrap_or(at..at + sql.len().min(1)), tip));
+                                let text = plain.sentence();
                                 let err = crate::app::ErrInfo { code: plain.code, raw: f.message, hint: plain.hint };
-                                rt.log.push(LogLine { err: Some(Box::new(err)), when: now(), kind: LogKind::Error, text: plain.text, at: place.map(|r| r.start).or(f.at.map(|p| at + p)).or(Some(at)) });
+                                rt.log.push(LogLine { err: Some(Box::new(err)), when: now(), kind: LogKind::Error, text, at: place.map(|r| r.start).or(f.at.map(|p| at + p)).or(Some(at)) });
                                 rt.shown = Pane::Messages;
                             }
                         }

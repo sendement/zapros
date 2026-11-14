@@ -29,10 +29,26 @@ pub struct Plain {
     pub text: String,
     /// The name (or value) it's about, as the server wrote it.
     pub name: Option<(String, Thing)>,
-    /// What was meant, maybe; what to do.
+    /// What was meant, maybe (said in the sentence itself).
+    pub meant: Vec<String>,
+    /// What else to know or do.
     pub hint: Option<String>,
+    /// A name the database doesn't know (a column, a table, a function):
+    /// the code around it says which and what was meant.
+    pub unknown: bool,
     /// The statement ends too early.
     pub at_end: bool,
+}
+
+impl Plain {
+    /// The sentence with what was meant: "No column «totl» — maybe «total»?"
+    pub fn sentence(&self) -> String {
+        if self.meant.is_empty() {
+            return self.text.clone();
+        }
+        let list = self.meant.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
+        format!("{} — {} {list}?", self.text, t("может быть,", "maybe"))
+    }
 }
 
 /// The server's text made plain.
@@ -58,6 +74,10 @@ pub fn explain(raw: &str, d: Dialect) -> Plain {
     let mut p = p.unwrap_or_else(|| Plain { text: first_line(raw), ..Default::default() });
     if p.text.is_empty() {
         p.text = first_line(raw);
+    }
+    let unknown = ["42703", "42P01", "42883", "ORA-00904", "ORA-00942", "UNKNOWN_IDENTIFIER", "UNKNOWN_EXPRESSION_IDENTIFIER", "UNKNOWN_TABLE", "UNKNOWN_FUNCTION"];
+    if p.code.as_deref().is_some_and(|c| unknown.iter().any(|u| c == *u || c.ends_with(&format!(" {u}")))) {
+        p.unknown = true;
     }
     p
 }
@@ -95,13 +115,6 @@ fn t_owned(ru: &str, en: &str) -> String {
     if crate::i18n::is_ru() { ru.to_string() } else { en.to_string() }
 }
 
-fn guess(names: &[String]) -> Option<String> {
-    (!names.is_empty()).then(|| {
-        let list = names.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
-        format!("{} {list}?", t("Может быть,", "Maybe"))
-    })
-}
-
 // ---------------------------------------------------------------- PostgreSQL
 
 fn pg(raw: &str) -> Option<Plain> {
@@ -128,7 +141,7 @@ fn pg(raw: &str) -> Option<Plain> {
             // column "x" does not exist / column z.x does not exist
             let n = q.clone().or_else(|| head.split_whitespace().find(|w| w.contains('.')).map(str::to_string));
             named(&mut p, "Нет такого поля «{}»", "No column «{}»", Thing::Column, n);
-            p.hint = meant.map(|m| guess(&[m]).unwrap());
+            p.meant = meant.into_iter().collect();
         }
         "42P01" => named(&mut p, "Нет такой таблицы «{}»", "No table «{}»", Thing::Table, q),
         "42883" => {
@@ -397,7 +410,7 @@ fn ch(raw: &str) -> Option<Plain> {
     };
     let q = quoted(s);
     let mut p = Plain { code: Some(if name.is_empty() { num.to_string() } else { format!("{num} {name}") }), ..Default::default() };
-    p.hint = guess(&meant);
+    p.meant = meant.clone();
     let named = |p: &mut Plain, ru: &str, en: &str, thing: Thing, n: Option<String>| {
         if let Some(n) = n {
             p.text = msg(ru, en, &n);
@@ -405,7 +418,14 @@ fn ch(raw: &str) -> Option<Plain> {
         }
     };
     match name {
-        "UNKNOWN_IDENTIFIER" | "UNKNOWN_EXPRESSION_IDENTIFIER" => named(&mut p, "Нет такого поля «{}»", "No column «{}»", Thing::Column, q),
+        "UNKNOWN_IDENTIFIER" | "UNKNOWN_EXPRESSION_IDENTIFIER" => {
+            // "Qualified matcher x.* does not find table"
+            if let Some(m) = s.strip_prefix("Qualified matcher ").and_then(|r| r.split_whitespace().next()).and_then(|m| m.strip_suffix(".*")) {
+                named(&mut p, "В запросе нет таблицы или алиаса «{}»", "No table or alias «{}» in the statement", Thing::Table, Some(m.trim_matches('`').to_string()));
+            } else {
+                named(&mut p, "Нет такого поля «{}»", "No column «{}»", Thing::Column, q);
+            }
+        }
         "UNKNOWN_TABLE" => {
             named(&mut p, "Нет такой таблицы «{}»", "No table «{}»", Thing::Table, q.or_else(|| s.split_whitespace().nth(1).map(str::to_string)));
         }
@@ -509,10 +529,13 @@ fn lite(raw: &str) -> Option<Plain> {
     };
     if let Some(n) = after("no such column:") {
         named(&mut p, "Нет такого поля «{}»", "No column «{}»", Thing::Column, Some(n));
+        p.unknown = true;
     } else if let Some(n) = after("no such table:") {
         named(&mut p, "Нет такой таблицы «{}»", "No table «{}»", Thing::Table, Some(n));
+        p.unknown = true;
     } else if let Some(n) = after("no such function:") {
         named(&mut p, "Нет такой функции «{}»", "No function «{}»", Thing::Function, Some(n));
+        p.unknown = true;
     } else if let Some(n) = after("ambiguous column name:") {
         named(&mut p, "Неоднозначное поле «{}»: оно есть в нескольких таблицах", "Ambiguous column «{}»: more than one table has it", Thing::Column, Some(n));
         p.hint = Some(t("Укажите таблицу: t.поле", "Say which table: t.column").into());
@@ -629,8 +652,10 @@ pub fn alike(name: &str, known: &[String]) -> Vec<String> {
         })
         .collect();
     scored.sort_by_key(|(d, k)| (*d, k.len()));
+    // Only the nearest ones (one letter off beats two).
+    let best = scored.first().map_or(0, |x| x.0);
     let mut out: Vec<String> = Vec::new();
-    for (_, k) in scored {
+    for (_, k) in scored.into_iter().filter(|x| x.0 == best) {
         if !out.iter().any(|o| o.eq_ignore_ascii_case(k)) {
             out.push(k.clone());
         }
@@ -664,11 +689,201 @@ fn distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-/// A guess of our own when the server gave none: names the database has
-/// (from what's known of its tables and functions) alike the one it
-/// doesn't know.
-pub fn add_guess(p: &mut Plain, sql: &str, rels: &[super::Relation], d: Dialect) {
-    if p.hint.is_some() {
+/// The error in plain words and where it is in `sql`: what the server
+/// said, then — for a name it doesn't know — what the code around the
+/// name says it is (an alias before a dot, a call, a table after FROM)
+/// and what was meant.
+pub fn understand(raw: &str, at: Option<usize>, sql: &str, rels: &[super::Relation], d: Dialect) -> (Plain, Option<Range<usize>>) {
+    let mut p = explain(raw, d);
+    let mut r = place(sql, at, &p, d);
+    if p.unknown {
+        if let Some(rr) = r.clone() {
+            if let Some(nr) = in_context(&mut p, rr, sql, rels, d) {
+                r = Some(nr);
+            }
+        }
+    }
+    add_guess(&mut p, sql, rels, d);
+    (p, r)
+}
+
+fn eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || a.to_lowercase() == b.to_lowercase()
+}
+
+/// The known columns of table `name` (None: not known).
+fn cols_of<'a>(rels: &'a [super::Relation], name: &str) -> Option<Vec<&'a str>> {
+    let n = name.rsplit('.').next().unwrap_or(name);
+    rels.iter().find(|r| eq(&r.name, n)).map(|r| r.cols.iter().map(|c| c.0.as_str()).collect())
+}
+
+/// A name the dictionary keeps in capitals (Oracle) as it's typed.
+fn as_typed(d: Dialect, typed: &str, n: String) -> String {
+    if d == Dialect::Oracle && !n.chars().any(|c| c.is_lowercase()) && typed.chars().any(|c| c.is_lowercase()) { n.to_lowercase() } else { n }
+}
+
+/// Names used in "(alias, table)" lists: "o (orders), c (customers)".
+fn listed(srcs: &[(String, String)]) -> String {
+    srcs.iter()
+        .map(|(a, t)| if t.is_empty() || eq(a, t) { format!("«{a}»") } else { format!("«{a}» ({t})") })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What the code around an unknown name says: which of an alias, a
+/// column of an alias' table, a bare column, a function or a table it is,
+/// the sentence for that and what was meant; the place to underline.
+fn in_context(p: &mut Plain, r: Range<usize>, sql: &str, rels: &[super::Relation], d: Dialect) -> Option<Range<usize>> {
+    let toks: Vec<Tok> = lex::lex(sql, d).into_iter().filter(|t| !t.trivia()).collect();
+    let k = toks.iter().position(|t| t.start <= r.start && r.start < t.end)?;
+    ident(sql, &toks[k])?;
+    let is = |i: usize, kind: Tk| toks.get(i).is_some_and(|t| t.kind == kind);
+    let star = |i: usize| toks.get(i).is_some_and(|t| t.text(sql) == "*");
+    // The qualifier and the member: q.m, q.*, or m alone.
+    let (q, m) = if is(k + 1, Tk::Dot) && (toks.get(k + 2).is_some_and(|t| ident(sql, t).is_some()) || star(k + 2)) {
+        (Some(k), k + 2)
+    } else if k >= 2 && is(k - 1, Tk::Dot) && ident(sql, &toks[k - 2]).is_some() {
+        (Some(k - 2), k)
+    } else {
+        (None, k)
+    };
+    let first = q.unwrap_or(m);
+    let word = |i: usize| ident(sql, &toks[i]).unwrap_or_else(|| toks[i].text(sql).to_string());
+    let span = |i: usize| toks[i].start..toks[i].end;
+    let call = is(m + 1, Tk::Open);
+    let before = first.checked_sub(1).map(|i| toks[i].text(sql).to_ascii_uppercase()).unwrap_or_default();
+    let srcs = crate::sql::follow::sources(sql, d);
+    let plsql = toks.iter().any(|t| matches!(t.text(sql).to_ascii_uppercase().as_str(), "BEGIN" | "DECLARE"));
+    let set = |p: &mut Plain, text: String, meant: Vec<String>, hint: Option<String>| {
+        p.text = text;
+        p.meant = meant;
+        p.hint = hint;
+    };
+
+    // A table after FROM / JOIN …
+    if matches!(before.as_str(), "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE") && !call {
+        let name = word(m);
+        let other = rels.iter().find(|x| eq(&x.name, &name) && q.is_none_or(|q| !eq(&x.schema, &word(q))));
+        let hint = other.map(|x| format!("{} «{}»: {}.{}", t("Такая таблица есть в схеме", "There's such a table in schema"), x.schema, x.schema, x.name));
+        let names: Vec<String> = rels.iter().map(|x| if x.qualify { format!("{}.{}", x.schema, x.name) } else { x.name.clone() }).collect();
+        let meant: Vec<String> = if hint.is_some() { Vec::new() } else { alike(&name, &names).into_iter().map(|n| as_typed(d, &name, n)).collect() };
+        set(p, msg("Нет такой таблицы «{}»", "No table «{}»", &q.map_or(name.clone(), |q| format!("{}.{name}", word(q)))), if meant.is_empty() { p.meant.clone() } else { meant }, hint);
+        return Some(toks[first].start..toks[m].end);
+    }
+
+    // A call: a function.
+    if call {
+        let name = word(m);
+        let shown = q.map_or(name.clone(), |q| format!("{}.{name}", word(q)));
+        let mut known: Vec<String> = crate::sql::functions(d).into_iter().map(str::to_string).collect();
+        known.sort();
+        known.dedup();
+        // In the case it's typed in (ClickHouse's own names as they are).
+        let cased = |f: String| match d {
+            Dialect::ClickHouse => f,
+            _ if name.chars().any(|c| c.is_lowercase()) => f.to_lowercase(),
+            _ => f.to_uppercase(),
+        };
+        let meant: Vec<String> = if q.is_none() { alike(&name, &known).into_iter().map(cased).filter(|f| *f != name).collect() } else { Vec::new() };
+        let col = srcs.iter().any(|(_, tb)| cols_of(rels, tb).is_some_and(|c| c.iter().any(|c| eq(c, &name))));
+        let hint = col.then(|| format!("«{name}» — {}", t("это поле, а не функция: уберите скобки", "is a column, not a function: drop the brackets")));
+        let server = std::mem::take(&mut p.meant);
+        let hint = hint.or_else(|| p.hint.take().filter(|h| h.contains("ClickHouse")));
+        set(p, msg("Нет такой функции «{}»", "No function «{}»", &shown), if meant.is_empty() { server } else { meant }, hint);
+        return Some(span(m));
+    }
+
+    // q.m: is q the statement's table or alias?
+    if let Some(qi) = q {
+        let qn = word(qi);
+        let found = srcs.iter().find(|(a, _)| eq(a, &qn)).or_else(|| srcs.iter().find(|(_, tb)| !tb.is_empty() && eq(tb, &qn)));
+        let mname = word(m);
+        let Some((alias, table)) = found else {
+            // Not in the statement at all.
+            if plsql || ["excluded", "new", "old"].iter().any(|x| eq(x, &qn)) {
+                return None;
+            }
+            let aliases: Vec<String> = srcs.iter().map(|s| s.0.clone()).collect();
+            let text = msg("В запросе нет таблицы или алиаса «{}»", "No table or alias «{}» in the statement", &qn);
+            let meant: Vec<String>;
+            if !star(m) {
+                // The aliases whose tables have that column.
+                let exact: Vec<String> = srcs.iter().filter(|(_, tb)| cols_of(rels, tb).is_some_and(|c| c.iter().any(|c| eq(c, &mname)))).map(|(a, _)| format!("{a}.{mname}")).collect();
+                meant = if exact.is_empty() { alike(&qn, &aliases).into_iter().map(|a| format!("{a}.{mname}")).collect() } else { exact };
+            } else {
+                meant = alike(&qn, &aliases).into_iter().map(|a| format!("{a}.*")).collect();
+            }
+            let hint = if rels.iter().any(|x| eq(&x.name, &qn)) {
+                Some(msg("Таблица «{}» в базе есть, но её нет в FROM этого запроса", "Table «{}» exists, but it's not in this statement's FROM", &qn))
+            } else if !srcs.is_empty() {
+                Some(format!("{} {}", t("В запросе есть:", "The statement has:"), listed(&srcs)))
+            } else {
+                None
+            };
+            set(p, text, meant, hint);
+            return Some(span(qi));
+        };
+        if star(m) {
+            return None;
+        }
+        let shown = if table.is_empty() || eq(alias, table) { format!("«{alias}»") } else { format!("«{table}» ({alias})") };
+        match cols_of(rels, table).filter(|_| !table.is_empty()) {
+            Some(cols) if !cols.iter().any(|c| eq(c, &mname)) => {
+                let meant: Vec<String> = alike(&mname, &cols.iter().map(|c| c.to_string()).collect::<Vec<_>>()).into_iter().map(|c| format!("{alias}.{}", as_typed(d, &mname, c))).collect();
+                // Or another table of the statement has it.
+                let elsewhere = srcs.iter().find(|(a, tb)| !eq(a, alias) && cols_of(rels, tb).is_some_and(|c| c.iter().any(|c| eq(c, &mname))));
+                let hint = elsewhere.map(|(a, tb)| format!("{} «{tb}»: {a}.{mname}", t("Такое поле есть у таблицы", "Table has such a column:")));
+                let text = format!("{} {shown} {} «{mname}»", t("У таблицы", "Table"), t("нет поля", "has no column"));
+                set(p, text, meant, hint);
+            }
+            _ => {
+                let text = format!("{} {shown} {} «{mname}»", t("У", "Table"), t("нет поля", "has no column"));
+                let server = std::mem::take(&mut p.meant);
+                set(p, text, server, None);
+            }
+        }
+        return Some(span(m));
+    }
+
+    // A bare name: a column of the statement's tables.
+    let name = word(m);
+    let many = srcs.len() > 1;
+    let mut cols: Vec<(String, String)> = Vec::new();
+    for (a, tb) in &srcs {
+        for c in cols_of(rels, tb).unwrap_or_default() {
+            cols.push((a.clone(), c.to_string()));
+        }
+    }
+    let names: Vec<String> = cols.iter().map(|c| c.1.clone()).collect();
+    let mut meant: Vec<String> = alike(&name, &names)
+        .into_iter()
+        .map(|c| match cols.iter().find(|(_, x)| *x == c) {
+            Some((a, _)) if many => format!("{a}.{}", as_typed(d, &name, c)),
+            _ => as_typed(d, &name, c),
+        })
+        .collect();
+    if meant.is_empty() {
+        meant = std::mem::take(&mut p.meant);
+    }
+    let mut hint = None;
+    // "Bob" meant as a string.
+    if toks[m].kind == Tk::Quoted && toks[m].text(sql).starts_with('"') && d != Dialect::ClickHouse {
+        hint = Some(format!("{} '{name}'", t("Строки пишутся в одинарных кавычках:", "Strings take single quotes:")));
+        meant.clear();
+    } else if meant.is_empty() {
+        // The column is in a table the statement doesn't name.
+        if let Some(x) = rels.iter().find(|x| x.cols.iter().any(|c| eq(&c.0, &name)) && !srcs.iter().any(|(_, tb)| eq(tb, &x.name))) {
+            hint = Some(format!("{} «{}» — {}", t("Такое поле есть в таблице", "Table"), x.name, t("её нет в запросе", "has it, but it's not in the statement")));
+        }
+    }
+    set(p, msg("Нет такого поля «{}»", "No column «{}»", &name), meant, hint);
+    Some(span(m))
+}
+
+/// A guess of our own when nothing's meant yet: names the database has
+/// alike the one it doesn't know.
+fn add_guess(p: &mut Plain, sql: &str, rels: &[super::Relation], d: Dialect) {
+    if !p.meant.is_empty() || p.hint.is_some() || !p.unknown {
         return;
     }
     let Some((n, thing)) = &p.name else { return };
@@ -684,7 +899,7 @@ pub fn add_guess(p: &mut Plain, sql: &str, rels: &[super::Relation], d: Dialect)
         Thing::Function => crate::sql::functions(d).into_iter().map(str::to_string).collect(),
         _ => return,
     };
-    p.hint = guess(&alike(part, &known));
+    p.meant = alike(part, &known);
 }
 
 #[cfg(test)]
@@ -703,7 +918,7 @@ mod tests {
         let p = explain("42703: столбец \"totl\" не существует\nHINT: Возможно, предполагалась ссылка на столбец \"zz.total\".", Dialect::Postgres);
         assert_eq!(p.code.as_deref(), Some("42703"));
         assert_eq!(p.text, "Нет такого поля «totl»");
-        assert_eq!(p.hint.as_deref(), Some("Может быть, «total»?"));
+        assert_eq!(p.sentence(), "Нет такого поля «totl» — может быть, «total»?");
         assert_eq!(place(sql, Some(7), &p, Dialect::Postgres), Some(r(sql, "totl")));
         let sql = "select z.totl from zz z";
         let p = explain("42703: столбец z.totl не существует\nHINT: Возможно, предполагалась ссылка на столбец \"z.total\".", Dialect::Postgres);
@@ -726,11 +941,11 @@ mod tests {
     fn clickhouse() {
         crate::i18n::set_ru(true);
         let p = explain("Code: 47. DB::Exception: Unknown expression identifier `totl`. Maybe you meant: ['total']. In scope SELECT totl FROM zz. (UNKNOWN_IDENTIFIER)", Dialect::ClickHouse);
-        assert_eq!((p.code.as_deref(), p.text.as_str(), p.hint.as_deref()), (Some("47 UNKNOWN_IDENTIFIER"), "Нет такого поля «totl»", Some("Может быть, «total»?")));
+        assert_eq!((p.code.as_deref(), p.sentence().as_str()), (Some("47 UNKNOWN_IDENTIFIER"), "Нет такого поля «totl» — может быть, «total»?"));
         let p = explain("Code: 46. DB::Exception: Function with name `lenght` does not exist. Maybe you meant: ['length']. In scope SELECT lenght(name) FROM zz. (UNKNOWN_FUNCTION)", Dialect::ClickHouse);
         assert_eq!(p.text, "Нет такой функции «lenght»");
         let p = explain("Code: 60. DB::Exception: Unknown table expression identifier 'zzz'. Maybe you meant default.zz? In scope SELECT * FROM zzz. (UNKNOWN_TABLE)", Dialect::ClickHouse);
-        assert_eq!((p.text.as_str(), p.hint.as_deref()), ("Нет такой таблицы «zzz»", Some("Может быть, «default.zz»?")));
+        assert_eq!(p.sentence(), "Нет такой таблицы «zzz» — может быть, «default.zz»?");
         let sql = "select from where";
         let p = explain("Code: 62. DB::Exception: Syntax error: failed at position 26 (JSONCompactEachRowWithNamesAndTypes) (line 2, col 8): JSONCompactEachRowWithNamesAndTypes. Expected one of: token sequence, Dot, OR, AND, end of query. (SYNTAX_ERROR)", Dialect::ClickHouse);
         assert!(p.at_end);
@@ -764,16 +979,61 @@ mod tests {
     fn sqlite_and_guesses() {
         crate::i18n::set_ru(true);
         let sql = "select totl from orders";
-        let mut p = explain("no such column: totl in select totl from orders at offset 7", Dialect::Sqlite);
-        assert_eq!(p.text, "Нет такого поля «totl»");
+        let rels = rels();
+        let (p, at) = understand("no such column: totl in select totl from orders at offset 7", Some(7), sql, &rels, Dialect::Sqlite);
+        assert_eq!(p.sentence(), "Нет такого поля «totl» — может быть, «total»?");
+        assert_eq!(at, Some(r(sql, "totl")));
+        let p = explain("no such column: totl in select totl from orders at offset 7", Dialect::Sqlite);
         let u = explain("UNIQUE constraint failed: orders.id\n[SQLITE_CONSTRAINT_PRIMARYKEY]", Dialect::Sqlite);
         assert_eq!((u.code.as_deref(), u.text.as_str()), (Some("SQLITE_CONSTRAINT_PRIMARYKEY"), "Такое значение уже есть (должно быть уникальным): orders.id"));
-        let rels = vec![super::super::Relation { schema: "main".into(), name: "orders".into(), cols: vec![("total".into(), "int".into()), ("id".into(), "int".into())], qualify: false }];
-        add_guess(&mut p, sql, &rels, Dialect::Sqlite);
-        assert_eq!(p.hint.as_deref(), Some("Может быть, «total»?"));
         assert_eq!(place(sql, Some(7), &p, Dialect::Sqlite), Some(r(sql, "totl")));
         let p = explain("near \"form\": syntax error in select 1 form t at offset 9", Dialect::Sqlite);
         assert_eq!(p.text, "Синтаксическая ошибка у «form»");
         assert_eq!(alike("lenght", &["length".into(), "left".into(), "upper".into()]), vec!["length".to_string()]);
+    }
+
+    fn rels() -> Vec<super::super::Relation> {
+        let rel = |name: &str, cols: &[&str]| super::super::Relation { schema: "main".into(), name: name.into(), cols: cols.iter().map(|c| (c.to_string(), "int".into())).collect(), qualify: false };
+        vec![rel("orders", &["id", "customer_id", "total", "note"]), rel("customers", &["id", "name", "email", "active"]), rel("payments", &["id", "amount", "paid_at"])]
+    }
+
+    /// What the code around an unknown name says, whatever the server's
+    /// words: (statement, the server's text, its position) → (sentence,
+    /// hint, underlined).
+    #[test]
+    fn names_in_context() {
+        crate::i18n::set_ru(true);
+        let rels = rels();
+        let q = "select x.total, c.name from orders o join customers c on c.id = o.customer_id";
+        let cases: &[(Dialect, &str, &str, Option<usize>, &str, Option<&str>, &str)] = &[
+            // An alias that isn't there: the aliases with that column.
+            (Dialect::Postgres, q, "42P01: missing FROM-clause entry for table \"x\"", Some(7), "В запросе нет таблицы или алиаса «x» — может быть, «o.total»?", Some("В запросе есть: «o» (orders), «c» (customers)"), "x"),
+            (Dialect::Oracle, q, "ORA-00904: \"X\".\"TOTAL\": invalid identifier", Some(7), "В запросе нет таблицы или алиаса «x» — может быть, «o.total»?", Some("В запросе есть: «o» (orders), «c» (customers)"), "x"),
+            (Dialect::Sqlite, q, "no such column: x.total", None, "В запросе нет таблицы или алиаса «x» — может быть, «o.total»?", Some("В запросе есть: «o» (orders), «c» (customers)"), "x"),
+            // x.*: the alias is wrong, that's all.
+            (Dialect::Sqlite, "select x.* from orders o", "no such table: x", None, "В запросе нет таблицы или алиаса «x»", Some("В запросе есть: «o» (orders)"), "x"),
+            // A typo after a right alias: that table's columns.
+            (Dialect::Postgres, "select o.totl from orders o", "42703: column o.totl does not exist", Some(7), "У таблицы «orders» (o) нет поля «totl» — может быть, «o.total»?", None, "totl"),
+            // A column of the other table.
+            (Dialect::Sqlite, "select o.name from orders o join customers c on c.id = o.customer_id", "no such column: o.name", None, "У таблицы «orders» (o) нет поля «name»", Some("Такое поле есть у таблицы «customers»: c.name"), "name"),
+            // A bare column with a typo, two tables: with its alias.
+            (Dialect::ClickHouse, "select amout from payments p join orders o on o.id = p.id", "Code: 47. DB::Exception: Unknown expression identifier `amout`. In scope … (UNKNOWN_IDENTIFIER)", Some(7), "Нет такого поля «amout» — может быть, «p.amount»?", None, "amout"),
+            // In a table the statement doesn't name.
+            (Dialect::Sqlite, "select email from orders", "no such column: email", None, "Нет такого поля «email»", Some("Такое поле есть в таблице «customers» — её нет в запросе"), "email"),
+            // Looks like a call: a function (Oracle calls it an identifier).
+            (Dialect::Oracle, "select lenght(note) from orders", "ORA-00904: \"LENGHT\": invalid identifier", Some(7), "Нет такой функции «lenght» — может быть, «length»?", None, "lenght"),
+            (Dialect::Sqlite, "select note(1) from orders", "no such function: note", None, "Нет такой функции «note»", Some("«note» — это поле, а не функция: уберите скобки"), "note"),
+            // After FROM: a table.
+            (Dialect::Postgres, "select * from order o", "42601: syntax error at or near \"order\"", Some(14), "Синтаксическая ошибка у «order»", None, "order"),
+            (Dialect::Postgres, "select * from ordrs o", "42P01: relation \"ordrs\" does not exist", Some(14), "Нет такой таблицы «ordrs» — может быть, «orders»?", None, "ordrs"),
+            // "Bob" is a name, not a string.
+            (Dialect::Postgres, "select * from customers where name = \"Bob\"", "42703: column \"Bob\" does not exist", Some(37), "Нет такого поля «Bob»", Some("Строки пишутся в одинарных кавычках: 'Bob'"), "\"Bob\""),
+        ];
+        for (d, sql, raw, at, sentence, hint, under) in cases {
+            let (p, place) = understand(raw, *at, sql, &rels, *d);
+            assert_eq!(p.sentence(), *sentence, "{d:?} {sql}");
+            assert_eq!(p.hint.as_deref(), *hint, "{d:?} {sql}");
+            assert_eq!(place.map(|r| &sql[r]), Some(*under), "{d:?} {sql}");
+        }
     }
 }
