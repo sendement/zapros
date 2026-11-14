@@ -1,0 +1,63 @@
+# Flatpak build of zapros. Locally (from the repository root):
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.sendement.Zapros.yml
+# cargo-sources.json comes from flatpak-cargo-generator.py over Cargo.lock.
+id: io.github.sendement.Zapros
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: zapros
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # databases over the network; Oracle Instant Client downloads
+  - --share=network
+  # SQLite files, scripts and projects anywhere
+  - --filesystem=host
+  # saved passwords in the desktop keyring
+  - --talk-name=org.freedesktop.secrets
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  # Oracle Instant Client needs libaio, which the runtime lacks.
+  - name: libaio
+    buildsystem: simple
+    build-commands:
+      - make prefix=/app install
+    cleanup:
+      - /include
+      - /lib/*.a
+    sources:
+      - type: archive
+        url: http://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz
+        sha256: 2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b
+
+  - name: zapros
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/zapros/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/zapros /app/bin/zapros
+      - install -Dm644 packaging/flatpak/io.github.sendement.Zapros.desktop /app/share/applications/io.github.sendement.Zapros.desktop
+      - install -Dm644 packaging/zapros.svg /app/share/icons/hicolor/scalable/apps/io.github.sendement.Zapros.svg
+      - install -Dm644 packaging/flatpak/io.github.sendement.Zapros.metainfo.xml /app/share/metainfo/io.github.sendement.Zapros.metainfo.xml
+    sources:
+      # The working tree; a Flathub build points at a git tag instead.
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
+          - .dbs
+          - packaging/arch
+      - cargo-sources.json

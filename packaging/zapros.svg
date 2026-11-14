@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b4aa8"/>
+      <stop offset="1" stop-color="#1b2347"/>
+    </linearGradient>
+    <linearGradient id="db" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8ecff"/>
+      <stop offset="1" stop-color="#b9c2ea"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#bg)"/>
+  <!-- the database -->
+  <path d="M52 70v104c0 15 30 26 66 26s66-11 66-26V70z" fill="url(#db)"/>
+  <ellipse cx="118" cy="70" rx="66" ry="24" fill="#f4f6ff"/>
+  <path d="M52 105c0 15 30 26 66 26s66-11 66-26M52 140c0 15 30 26 66 26s66-11 66-26" fill="none" stroke="#3b4aa8" stroke-width="6" opacity=".35"/>
+  <!-- the query: a prompt with rainbow bands -->
+  <rect x="120" y="128" width="104" height="88" rx="20" fill="#14182e" stroke="#f4f6ff" stroke-width="6"/>
+  <rect x="136" y="148" width="14" height="52" rx="5" fill="#7ed3aa" opacity=".9"/>
+  <rect x="152" y="160" width="14" height="40" rx="5" fill="#f0a0c8" opacity=".9"/>
+  <path d="M174 158l16 13-16 13" fill="none" stroke="#ffd36b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M192 196h16" stroke="#f4f6ff" stroke-width="8" stroke-linecap="round"/>
+</svg>

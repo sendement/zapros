@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.sendement.Zapros</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>zapros</name>
+  <summary>SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite</summary>
+  <summary xml:lang="ru">Среда для SQL: PostgreSQL, ClickHouse, Oracle и SQLite</summary>
+  <developer id="io.github.sendement">
+    <name>Sendem</name>
+  </developer>
+  <description>
+    <p>
+      zapros is a fast SQL IDE that never freezes on the network: every
+      connection works on its own threads, and long queries can be stopped
+      or abandoned.
+    </p>
+    <ul>
+      <li>Object tree, DDL, table and job designers, Ctrl+click from the code to an object</li>
+      <li>Hints, checks while typing, a formatter with its own code style, rainbow bands for nesting</li>
+      <li>Database errors in plain words, the name underlined in the code, a guess at what was meant</li>
+      <li>Help on functions, operators and keywords on Ctrl+click</li>
+      <li>Results fetched in batches, filtered, exported to CSV, JSON, XLSX, SQL</li>
+      <li>Notebooks of SQL and Markdown cells, workspaces with their own tabs</li>
+      <li>Oracle Instant Client downloaded from the settings, no system install needed</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.sendement.Zapros.desktop</launchable>
+  <url type="homepage">https://github.com/sendement/zapros</url>
+  <url type="bugtracker">https://github.com/sendement/zapros/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/sendement/zapros/master/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-14"/>
+  </releases>
+</component>

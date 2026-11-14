@@ -1,0 +1,146 @@
+# zapros's own Flatpak repository on GitHub Pages: every release tag builds
+# the app, signs it and publishes https://sendement.github.io/zapros/, so a
+# Flatpak installed from there updates with the releases. The published
+# repository is carried on, so earlier versions stay in it (flatpak update
+# --commit=… goes back to one); versions.json says which is which.
+#   flatpak install --user https://sendement.github.io/zapros/zapros.flatpakref
+name: Flatpak repository
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE: https://sendement.github.io/zapros
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Flatpak tools
+        # (apt has hung here before: better to fail and run again.)
+        timeout-minutes: 25
+        run: |
+          sudo apt-get update
+          # flatpak without what it recommends (portals, video drivers,
+          # ffmpeg: slow on a slow mirror); flatpak-builder with them —
+          # appstream's compose reads the SVG icon through those.
+          sudo apt-get install -y --no-install-recommends flatpak ostree jq
+          sudo apt-get install -y flatpak-builder
+
+      - name: Runtime and SDK
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Signing key
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Earlier versions
+        run: |
+          mkdir -p site
+          ostree --repo=site/repo init --mode=archive-z2
+          ref=app/io.github.sendement.Zapros/x86_64/stable
+          if curl -fsI "$SITE/repo/config" > /dev/null; then
+            ostree --repo=site/repo remote add --no-gpg-verify published "$SITE/repo/"
+            ostree --repo=site/repo pull --mirror --depth=-1 published "$ref" || echo "earlier versions not carried over"
+            ostree --repo=site/repo remote delete published
+          fi
+          curl -fsSL "$SITE/versions.json" -o versions.json || echo '[]' > versions.json
+          # The one published before versions.json was kept: its version from the page.
+          prev=$(ostree --repo=site/repo rev-parse "$ref" 2> /dev/null || true)
+          if [ -n "$prev" ] && ! jq -e --arg c "$prev" 'any(.[]; .commit == $c)' versions.json > /dev/null; then
+            v=$(curl -fsSL "$SITE/" | sed -n 's/.*Version \([0-9][0-9.]*[0-9]\)\..*/\1/p' | head -1)
+            if [ -n "$v" ]; then
+              jq --arg v "$v" --arg c "$prev" '[.[] | select(.version != $v)] + [{version: $v, commit: $c}]' versions.json > v.json
+              mv v.json versions.json
+            fi
+          fi
+          cat versions.json
+
+      - name: Build
+        run: |
+          mkdir -p site
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --default-branch=stable \
+            --gpg-sign="$KEY_ID" --gpg-homedir="$GNUPGHOME" \
+            --repo=site/repo build-dir packaging/flatpak/io.github.sendement.Zapros.yml
+
+      - name: Repository files
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          commit=$(ostree --repo=site/repo rev-parse app/io.github.sendement.Zapros/x86_64/stable)
+          jq --arg v "$version" --arg c "$commit" '[.[] | select(.version != $v)] + [{version: $v, commit: $c}]' versions.json > site/versions.json
+          cat site/versions.json
+          flatpak build-update-repo --generate-static-deltas --prune \
+            --gpg-sign="$KEY_ID" --gpg-homedir="$GNUPGHOME" \
+            --title=zapros --default-branch=stable site/repo
+          key=$(gpg --export "$KEY_ID" | base64 -w0)
+          cp packaging/zapros.svg site/zapros.svg
+          cp packaging/flatpak/repo-key.asc site/zapros.asc
+          {
+            echo '[Flatpak Repo]'
+            echo 'Title=zapros'
+            echo "Url=$SITE/repo/"
+            echo 'Homepage=https://github.com/sendement/zapros'
+            echo 'Comment=SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite'
+            echo "Icon=$SITE/zapros.svg"
+            echo "GPGKey=$key"
+          } > site/zapros.flatpakrepo
+          {
+            echo '[Flatpak Ref]'
+            echo 'Name=io.github.sendement.Zapros'
+            echo 'Branch=stable'
+            echo 'Title=zapros'
+            echo "Url=$SITE/repo/"
+            echo 'SuggestRemoteName=zapros'
+            echo 'Homepage=https://github.com/sendement/zapros'
+            echo "Icon=$SITE/zapros.svg"
+            echo 'RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo'
+            echo 'IsRuntime=false'
+            echo "GPGKey=$key"
+          } > site/zapros.flatpakref
+          cat > site/index.html <<HTML
+          <!doctype html><meta charset="utf-8"><title>zapros Flatpak repository</title>
+          <style>body{font:16px/1.5 sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem}code,pre{background:#8882;padding:.1em .3em;border-radius:4px}pre{padding:.8em}</style>
+          <h1>zapros</h1>
+          <p>Flatpak repository of <a href="https://github.com/sendement/zapros">zapros</a>, the SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite. Version $version.</p>
+          <pre>flatpak install --user $SITE/zapros.flatpakref</pre>
+          <p>Updates then come with <code>flatpak update</code> (or Discover). Signing key: <a href="zapros.asc">zapros.asc</a>.</p>
+          HTML
+          du -sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

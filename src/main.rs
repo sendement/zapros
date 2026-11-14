@@ -36,7 +36,7 @@ fn main() -> eframe::Result {
     // once, on the first connection).
     drivers::prepare(&settings.oracle_client);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("zapros").with_app_id("zapros").with_inner_size([1400.0, 900.0]).with_min_inner_size([700.0, 400.0]).with_decorations(settings.system_titlebar),
+        viewport: egui::ViewportBuilder::default().with_title("zapros").with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapros".into())).with_inner_size([1400.0, 900.0]).with_min_inner_size([700.0, 400.0]).with_decorations(settings.system_titlebar),
         // No waiting for the display in eglSwapBuffers: on Wayland a window
         // the compositor doesn't show (another workspace or screen, behind a
         // full-screen one) gets no frame callbacks, so the wait never ended

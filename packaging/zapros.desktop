@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=zapros
+GenericName=SQL IDE
+GenericName[ru]=Среда для SQL
+Comment=SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite
+Comment[ru]=Среда для SQL: PostgreSQL, ClickHouse, Oracle и SQLite
+Exec=zapros
+Icon=zapros
+Terminal=false
+Categories=Development;Database;IDE;
+Keywords=sql;database;postgresql;postgres;clickhouse;oracle;sqlite;query;
+StartupWMClass=zapros

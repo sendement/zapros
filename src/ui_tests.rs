@@ -2260,3 +2260,31 @@ fn ctrl_click_opens_help() {
     settle(&mut h);
     assert!(h.state().help.is_none());
 }
+
+/// The README's picture (docs/screenshot.png): `cargo test --release
+/// readme_picture -- --ignored`.
+#[test]
+#[ignore]
+fn readme_picture() {
+    let script = "-- Best customers this year\nselect c.name, count(o.id) as orders, sum(o.total) total,\n       case when sum(o.total) > 5000 then 'vip' else 'regular' end as kind\n  from customers c\n  join orders o on o.customer_id = c.id\n where c.active = 1\n group by c.name\n order by total desc;\n\nselect * from big_orders where note = 'gift';\n";
+    let (mut h, _g) = harness("readme", script, false);
+    crate::i18n::set_ru(false);
+    {
+        let st = h.state_mut();
+        st.settings.russian = Some(false);
+        for (w, (name, tab)) in st.session.workspaces.iter_mut().zip([("Reports", "Customers"), ("Migrations", "v42"), ("Production", "hotfix")]) {
+            w.name = name.into();
+            w.tabs[0].title = tab.into();
+        }
+        st.session.workspaces[0].tabs[1].title = "Draft".into();
+    }
+    focus_editor(&mut h, 30);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    h.state_mut().open_nodes.insert(("lite".into(), vec!["tables".into()]));
+    settle(&mut h);
+    h.state_mut().open_nodes.insert(("lite".into(), vec!["tables".into(), "orders".into()]));
+    settle(&mut h);
+    let img = h.render().expect("render");
+    img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/screenshot.png")).unwrap();
+}

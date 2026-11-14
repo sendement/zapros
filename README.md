@@ -3,6 +3,27 @@
 An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 **Oracle** and **SQLite**.
 
+![zapros](docs/screenshot.png)
+
+## Install
+
+- **Arch Linux**: the `.pkg.tar.zst` from
+  [Releases](https://github.com/sendement/zapros/releases)
+  (`sudo pacman -U zapros-*.pkg.tar.zst`), or build it with the
+  [PKGBUILD](packaging/arch/PKGBUILD) there.
+- **Flatpak** (any distribution), from zapros' own repository — updates
+  come with `flatpak update`:
+
+  ```sh
+  flatpak install --user https://sendement.github.io/zapros/zapros.flatpakref
+  ```
+
+  The Flatpak carries libaio, so an Oracle Instant Client downloaded in
+  Settings → Drivers works there as is.
+- From source: see [Building](#building).
+
+## Features
+
 - **Never freezes on the network.** Each connection runs on its own threads:
   one session for scripts, one for the object tree and hints. Slow links,
   dropped connections and long queries never block the window; a lost

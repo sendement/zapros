@@ -1,0 +1,55 @@
+# Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
+pkgname=zapros
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite"
+arch=('x86_64')
+url="https://github.com/sendement/zapros"
+license=('MIT')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'openssl'          # TLS to PostgreSQL and ClickHouse
+  'dbus'             # the desktop keyring
+  # loaded at runtime by winit/glow
+  'libxkbcommon'
+  'wayland'
+  'libglvnd'
+  'fontconfig'
+  'hicolor-icon-theme'
+)
+optdepends=(
+  'libaio: Oracle Instant Client'
+  'oracle-instantclient-basic: a system-wide Oracle client (or download one in Settings → Drivers)'
+  'gnome-keyring: saved passwords in a keyring'
+  'kwallet: saved passwords in a keyring'
+)
+makedepends=('cargo')
+# Rust links with lld here; GCC LTO objects from C build scripts break that.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Keep the registry inside $srcdir so --remap-path-prefix hides it.
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  cargo build --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/zapros "$pkgdir/usr/bin/zapros"
+  install -Dm644 packaging/zapros.desktop "$pkgdir/usr/share/applications/zapros.desktop"
+  install -Dm644 packaging/zapros.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/zapros.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  cp -r examples "$pkgdir/usr/share/doc/$pkgname/examples"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

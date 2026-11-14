@@ -1,2 +1,7 @@
 .dbs/
 target/
+build-dir/
+.flatpak-builder/
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.tar.*
