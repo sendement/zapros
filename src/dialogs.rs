@@ -690,6 +690,8 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         row(ui, t("Алиасы таблиц", "Table aliases"), &mut p.table_alias);
         row(ui, t("Алиасы полей", "Column aliases"), &mut p.column_alias);
         ui.end_row();
+        row(ui, t("Схемы / пользователи", "Schemas / users"), &mut p.schema);
+        ui.end_row();
     });
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut p.bold_keywords, t("Ключевые слова жирным", "Bold keywords"));

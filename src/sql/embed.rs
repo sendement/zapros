@@ -404,6 +404,7 @@ pub enum Class {
     Bracket(u8),
     TableAlias,
     ColumnAlias,
+    Schema,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -474,7 +475,11 @@ fn base_spans(src: &str, toks: &[Tok], level: u8, d: Dialect) -> Vec<Span> {
         .map(|(k, mut sp)| {
             if let Some(a) = &aliases[k] {
                 if matches!(sp.class, Class::Text | Class::Quoted | Class::Type) {
-                    sp.class = if *a == super::aliases::Alias::Table { Class::TableAlias } else { Class::ColumnAlias };
+                    sp.class = match a {
+                        super::aliases::Alias::Table => Class::TableAlias,
+                        super::aliases::Alias::Column => Class::ColumnAlias,
+                        super::aliases::Alias::Schema => Class::Schema,
+                    };
                 }
             }
             sp

@@ -8,6 +8,8 @@ use super::lex::{Tk, Tok};
 pub enum Alias {
     Table,
     Column,
+    /// A schema (or user, or database) before a table's name.
+    Schema,
 }
 
 fn upper(src: &str, t: &Tok) -> String {
@@ -169,6 +171,7 @@ fn statement(src: &str, code: &[(usize, Tok)], out: &mut Vec<(usize, Alias)>) {
                     *clause.last_mut().unwrap() = c;
                 }
             }
+            Tk::Comma if matches!(*clause.last().unwrap(), "ON") => *clause.last_mut().unwrap() = "FROM",
             Tk::Word | Tk::Quoted => {
                 if declared.contains(&k) {
                     continue;
@@ -177,6 +180,25 @@ fn statement(src: &str, code: &[(usize, Tok)], out: &mut Vec<(usize, Alias)>) {
                 let after_dot = k > 0 && code[k - 1].1.kind == Tk::Dot;
                 if kind(k + 1) == Some(Tk::Dot) && !after_dot && table_names.contains(n.as_str()) {
                     out.push((code[k].0, Alias::Table));
+                } else if kind(k + 1) == Some(Tk::Dot) && !after_dot && is_name(k + 2) {
+                    // schema.table where a table's named (FROM, JOIN, CREATE
+                    // TABLE…), or the first of three parts anywhere.
+                    let mut parts = 1;
+                    while kind(k + 2 * parts - 1) == Some(Tk::Dot) && is_name(k + 2 * parts) {
+                        parts += 1;
+                    }
+                    let prev = k.checked_sub(1).map(|p| code[p].1);
+                    let names_table = prev.is_some_and(|p| {
+                        (p.kind == Tk::Keyword && matches!(upper(src, &p).as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE" | "VIEW" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "BODY" | "SEQUENCE" | "TRIGGER" | "TYPE" | "SYNONYM" | "INDEX" | "EXISTS" | "ONLY" | "LATERAL" | "DICTIONARY" | "TRUNCATE" | "DESCRIBE"))
+                            || (p.kind == Tk::Comma && matches!(*clause.last().unwrap(), "FROM" | "JOIN"))
+                    });
+                    if names_table || parts >= 3 {
+                        // All but the last part (and the column, for three).
+                        let quals = if names_table { parts - 1 } else { parts - 2 };
+                        for q in 0..quals {
+                            out.push((code[k + 2 * q].0, Alias::Schema));
+                        }
+                    }
                 } else if !after_dot && kind(k + 1) != Some(Tk::Dot) && kind(k + 1) != Some(Tk::Open) && matches!(*clause.last().unwrap(), "ORDER" | "GROUP" | "HAVING" | "QUALIFY") && column_names.contains(n.as_str()) {
                     out.push((code[k].0, Alias::Column));
                 }
@@ -213,6 +235,7 @@ mod tests {
                 ("n".into(), Column),
                 ("o".into(), Table),
                 ("o".into(), Table),
+                ("shop".into(), Schema),
                 ("c".into(), Table),
                 ("c".into(), Table),
                 ("o".into(), Table),
@@ -225,6 +248,13 @@ mod tests {
         );
         // No alias: nothing; a schema before a dot isn't one; CAST's AS isn't.
         assert!(found("select orders.id, cast(x as int) from orders where shop.f(1) > 0").is_empty());
+        // Schemas: before a table's name, or the first of three parts.
+        let s: Vec<String> = found("select shop.orders.id, o.x from shop.orders o join zapros.t on 1=1, s2.u; create table app.users (id int); select f.g(1) from dual")
+            .into_iter()
+            .filter(|x| x.1 == Schema)
+            .map(|x| x.0)
+            .collect();
+        assert_eq!(s, ["shop", "shop", "zapros", "s2", "app"]);
         // Statements apart: an alias of one isn't the next one's.
         assert_eq!(found("select 1 from t a; select a.x from b").len(), 1);
     }

@@ -2134,3 +2134,39 @@ fn aliases_coloured() {
     assert_ne!(pal.table_alias, pal.column_alias);
     shot(&mut h, "aliases");
 }
+
+#[test]
+fn selection_keeps_text_colours_rounded() {
+    let script = "select o.id, sum(o.total) as total\n  from orders o\n where o.total > (select avg(total)\n                    from orders)\n group by o.id";
+    let (mut h, _g) = harness("selection", script, false);
+    focus_editor(&mut h, 0);
+    let id = h.state().tab().id.clone();
+    let a = script.find("sum").unwrap();
+    let b = script.find("avg").unwrap();
+    h.state_mut().rt.get_mut(&id).unwrap().ed.select = Some((a, b));
+    for _ in 0..4 {
+        h.step();
+    }
+    let img = h.render().unwrap();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    if let Some(dir) = std::env::var_os("ZAPROS_SHOT_DIR") {
+        let crop = image::imageops::crop_imm(&img, r.left() as u32, r.top() as u32, 460, 110).to_image();
+        let big = image::imageops::resize(&crop, 460 * 3, 110 * 3, image::imageops::FilterType::Nearest);
+        big.save(PathBuf::from(dir).join("selection.png")).unwrap();
+    }
+    // "from" (line 2) is selected: still drawn in the keyword colour.
+    let kw = h.state().settings.dark.keyword;
+    let line_h = 19.0;
+    let row = egui::Rect::from_min_size(egui::pos2(r.left(), r.top() + line_h), egui::vec2(120.0, line_h + 4.0));
+    let mut hits = 0;
+    for y in row.top() as u32..row.bottom() as u32 {
+        for x in row.left() as u32..row.right() as u32 {
+            let p = img.get_pixel(x, y);
+            let d = (p[0] as i32 - kw[0] as i32).abs() + (p[1] as i32 - kw[1] as i32).abs() + (p[2] as i32 - kw[2] as i32).abs();
+            if d < 50 {
+                hits += 1;
+            }
+        }
+    }
+    assert!(hits > 15, "the selected keyword lost its colour ({hits} px)");
+}

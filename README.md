@@ -84,7 +84,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Aliases in their own colours** (Settings → Colours): a table's alias
   ("orders o", "(select …) t") and where it's used ("o.id"), a column's
   alias ("sum(x) AS total", "count(*) n") and where it's used (ORDER BY,
-  GROUP BY, HAVING).
+  GROUP BY, HAVING). Schemas / users before a table's name ("shop.orders",
+  CREATE TABLE app.users, the first of three parts) in a colour of their
+  own too.
+- **Selection** drawn by zapros: the text keeps its colours, the rainbow
+  bands show through in another shade, the corners rounded outside and in.
 - **Code style** (Settings → Code style): keyword and function case;
   calls (if(…), coalesce(…)) and windows (OVER (PARTITION BY … ORDER BY …))
   longer than a set length split over lines even when the line fits;

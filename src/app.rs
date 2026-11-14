@@ -290,10 +290,13 @@ impl App {
         // Settings saved before the alias colours: the light palette's are
         // filled from the dark default (light on white) — its own instead.
         let dark = crate::config::Palette::dark();
+        let light = crate::config::Palette::light();
         if settings.light.table_alias == dark.table_alias && settings.light.column_alias == dark.column_alias {
-            let light = crate::config::Palette::light();
             settings.light.table_alias = light.table_alias;
             settings.light.column_alias = light.column_alias;
+        }
+        if settings.light.schema == dark.schema {
+            settings.light.schema = light.schema;
         }
         crate::i18n::set_ru(settings.russian.unwrap_or_else(crate::i18n::system_is_ru));
         egui_extras::install_image_loaders(&cc.egui_ctx);

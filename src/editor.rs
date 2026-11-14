@@ -328,6 +328,7 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
             Class::Bracket(depth) => f.color = if pal.rainbow { rainbow[depth as usize % 4] } else { rgb(pal.operator) },
             Class::TableAlias => f.color = rgb(pal.table_alias),
             Class::ColumnAlias => f.color = rgb(pal.column_alias),
+            Class::Schema => f.color = rgb(pal.schema),
             Class::Text => {}
         }
         if sp.level > 0 {
@@ -513,6 +514,131 @@ fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text:
     let cx = if b.head.1 == c1 { x(c1) } else { x(c0) };
     ui.painter().line_segment([egui::pos2(cx, top), egui::pos2(cx, bottom)], egui::Stroke::new(stroke.width.max(1.5), stroke.color));
     ctx.request_repaint_after(std::time::Duration::from_millis(500));
+}
+
+/// A selection's rows on screen (as egui lays them: a selected line end
+/// shows as half a row's height).
+fn selection_rows(g: &egui::Galley, at: egui::Pos2, cr: &egui::text_selection::CCursorRange) -> Vec<egui::Rect> {
+    let [a, b] = cr.sorted_cursors();
+    if a == b || g.rows.is_empty() {
+        return Vec::new();
+    }
+    let (la, lb) = (g.layout_from_cursor(a), g.layout_from_cursor(b));
+    let mut out = Vec::new();
+    for ri in la.row..=lb.row.min(g.rows.len() - 1) {
+        let pr = &g.rows[ri];
+        let left = if ri == la.row { pr.row.x_offset(la.column) } else { 0.0 };
+        let right = if ri == lb.row {
+            pr.row.x_offset(lb.column)
+        } else {
+            pr.row.size.x + if pr.ends_with_newline { pr.row.height() / 2.0 } else { 0.0 }
+        };
+        if right - left < 0.5 {
+            continue;
+        }
+        let o = at + pr.pos.to_vec2();
+        out.push(egui::Rect::from_min_max(egui::pos2(o.x + left, o.y), egui::pos2(o.x + right, o.y + pr.row.size.y)));
+    }
+    out
+}
+
+/// Rows stacked into one shape: its outer corners rounded, and where a
+/// row sticks out past the next, the inner corner filled round too.
+fn rounded_rows(rows: &[egui::Rect], radius: f32, color: Color32) -> egui::Mesh {
+    use std::f32::consts::FRAC_PI_2;
+    const STEPS: usize = 6;
+    let mut mesh = egui::Mesh::default();
+    // A fan from `c` through `pts`.
+    let fan = |mesh: &mut egui::Mesh, c: egui::Pos2, pts: &[egui::Pos2], closed: bool| {
+        let i0 = mesh.vertices.len() as u32;
+        mesh.colored_vertex(c, color);
+        for p in pts {
+            mesh.colored_vertex(*p, color);
+        }
+        let n = pts.len() as u32;
+        for k in 0..n {
+            if k + 1 == n && !closed {
+                break;
+            }
+            mesh.add_triangle(i0, i0 + 1 + k, i0 + 1 + (k + 1) % n);
+        }
+    };
+    // Touching and overlapping: the same shape.
+    let joined = |a: &egui::Rect, b: &egui::Rect| (a.bottom() - b.top()).abs() < 1.0 && a.right() > b.left() + 0.5 && a.left() < b.right() - 0.5;
+    for (i, r) in rows.iter().enumerate() {
+        let up = i.checked_sub(1).map(|j| rows[j]).filter(|u| joined(u, r));
+        let down = rows.get(i + 1).copied().filter(|d| joined(r, d));
+        let h = r.height();
+        let lim = |d: f32| radius.min(h / 2.0).min(r.width() / 2.0).min(d / 2.0);
+        // Outer radius of a corner, given the neighbour's edge there
+        // (None: no neighbour) and on which side being further out rounds it.
+        let outer = |n: Option<f32>, mine: f32, out_is_less: bool| match n {
+            None => lim(f32::INFINITY),
+            Some(x) if (out_is_less && x > mine + 0.5) || (!out_is_less && x < mine - 0.5) => lim((x - mine).abs()),
+            _ => 0.0,
+        };
+        let nw = outer(up.map(|u| u.left()), r.left(), true);
+        let ne = outer(up.map(|u| u.right()), r.right(), false);
+        let sw = outer(down.map(|d| d.left()), r.left(), true);
+        let se = outer(down.map(|d| d.right()), r.right(), false);
+        // The row: a convex outline, clockwise.
+        let mut pts: Vec<egui::Pos2> = Vec::new();
+        let mut corner = |c: egui::Pos2, ix: f32, iy: f32, rr: f32, rev: bool| {
+            if rr <= 0.1 {
+                pts.push(c);
+                return;
+            }
+            let center = c + egui::vec2(ix * rr, iy * rr);
+            let mut arc: Vec<egui::Pos2> = (0..=STEPS)
+                .map(|k| {
+                    let f = k as f32 / STEPS as f32 * FRAC_PI_2;
+                    center + egui::vec2(-ix * f.cos(), -iy * f.sin()) * rr
+                })
+                .collect();
+            if rev {
+                arc.reverse();
+            }
+            pts.extend(arc);
+        };
+        corner(r.left_top(), 1.0, 1.0, nw, false);
+        corner(r.right_top(), -1.0, 1.0, ne, true);
+        corner(r.right_bottom(), -1.0, -1.0, se, false);
+        corner(r.left_bottom(), 1.0, -1.0, sw, true);
+        fan(&mut mesh, r.center(), &pts, true);
+        // Inner corners: where the neighbour sticks out past this row, the
+        // angle between them filled round.
+        let mut inner = |c: egui::Pos2, dx: f32, dy: f32, d: f32| {
+            let rr = lim(d);
+            if rr <= 0.1 {
+                return;
+            }
+            let center = c + egui::vec2(dx * rr, dy * rr);
+            let arc: Vec<egui::Pos2> = (0..=STEPS)
+                .map(|k| {
+                    let f = k as f32 / STEPS as f32 * FRAC_PI_2;
+                    center + egui::vec2(-dx * f.sin(), -dy * f.cos()) * rr
+                })
+                .collect();
+            fan(&mut mesh, c, &arc, false);
+        };
+        if let Some(u) = up {
+            if u.left() < r.left() - 0.5 {
+                inner(r.left_top(), -1.0, 1.0, r.left() - u.left());
+            }
+            if u.right() > r.right() + 0.5 {
+                inner(r.right_top(), 1.0, 1.0, u.right() - r.right());
+            }
+        }
+        if let Some(d) = down {
+            if d.left() < r.left() - 0.5 {
+                inner(r.left_bottom(), -1.0, -1.0, r.left() - d.left());
+            }
+            if d.right() > r.right() + 0.5 {
+                inner(r.right_bottom(), 1.0, -1.0, d.right() - r.right());
+            }
+        }
+    }
+    mesh
 }
 
 /// A rounded frame a whole screen pixel wide, on the pixel grid (at any
@@ -977,6 +1103,9 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             ctx.request_repaint();
         }
     }
+    // The text as laid out (egui's own copy has the selection's glyphs
+    // recoloured): the selected part is drawn again from it.
+    let mut plain: Option<Arc<egui::Galley>> = None;
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| -> Arc<egui::Galley> {
         let s = buf.as_str();
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -996,11 +1125,14 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 j
             }
         };
-        ui.fonts_mut(|f| f.layout_job(job))
+        let g = ui.fonts_mut(|f| f.layout_job(job));
+        plain = Some(g.clone());
+        g
     };
     let before = text.clone();
     // Under the text: the caret's line, the same words, a bracket pair.
     let under = ui.painter().add(egui::Shape::Noop);
+    let mut sel_rows: Vec<egui::Rect> = Vec::new();
     // (egui moves the caret on any button's press: a right click inside the
     // selection must keep it — the selection as of before the press.)
     let right_press = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
@@ -1025,10 +1157,10 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let output = ui
         .horizontal_top(|ui| {
             ui.add_space(gutter);
-            // (The text's own selection hidden while a block is made.)
-            if blocky {
-                ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
-            }
+            // egui's selection hidden: drawn here instead (rounded, under
+            // the text, the text keeping its colours).
+            ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
+            ui.visuals_mut().selection.stroke.color = Color32::TRANSPARENT;
             egui::TextEdit::multiline(text)
         .id(id)
         .font(FontId::monospace(font))
@@ -1181,6 +1313,18 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         if !st.bands.is_empty() {
             shapes.push(egui::Shape::mesh(band_mesh(text, &st.bands, &output.galley, output.galley_pos, clip, ctx.pixels_per_point())));
         }
+        // The selection: over the bands (they show through, another shade),
+        // its corners rounded, outside and in.
+        if ctx.memory(|m| m.has_focus(id)) && !blocky {
+            if let Some(cr) = &output.cursor_range {
+                let at = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
+                sel_rows = selection_rows(&output.galley, at, cr);
+                let base = ui.visuals().selection.bg_fill;
+                let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), if cx.dark { 120 } else { 100 });
+                let r = (font * 0.32).clamp(2.0, 6.0);
+                shapes.push(egui::Shape::mesh(rounded_rows(&sel_rows, r, fill)));
+            }
+        }
         // What a search found: lit (the one it's on, more).
         if !st.marks.is_empty() {
             let rect_of = |r: &Range<usize>| {
@@ -1327,6 +1471,17 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             }
         }
         painter.set(under, egui::Shape::Vec(shapes));
+    }
+    // The selected text again over egui's (hidden) glyphs, in its colours.
+    if let Some(g) = &plain {
+        let at = output.galley_pos - egui::vec2(g.rect.left(), 0.0);
+        let color = ui.visuals().text_color();
+        for r in &sel_rows {
+            let c = r.intersect(clip);
+            if c.is_positive() {
+                ui.painter().with_clip_rect(c).galley(at, g.clone(), color);
+            }
+        }
     }
 
     // Frames round the block at the caret and the one under the pointer.
