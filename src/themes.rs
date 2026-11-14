@@ -36,7 +36,13 @@ impl Scheme {
     pub fn palette(&self) -> Palette {
         let w = self.words;
         let base = if self.dark { Palette::dark() } else { Palette::light() };
-        Palette { keyword: w[0], function: w[1], type_: w[2], string: w[3], number: w[4], comment: w[5], quoted: w[6], param: w[7], operator: w[8], text: w[9], ..base }
+        // Aliases: between the scheme's own colours (types and strings for
+        // tables', parameters and keywords for columns').
+        let between = |a: Rgb, b: Rgb| {
+            let c = mix(Color32::from_rgb(a[0], a[1], a[2]), Color32::from_rgb(b[0], b[1], b[2]), 0.5);
+            [c.r(), c.g(), c.b()]
+        };
+        Palette { keyword: w[0], function: w[1], type_: w[2], string: w[3], number: w[4], comment: w[5], quoted: w[6], param: w[7], operator: w[8], text: w[9], table_alias: between(w[2], w[3]), column_alias: between(w[7], w[0]), ..base }
     }
 }
 

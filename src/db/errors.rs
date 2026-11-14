@@ -647,8 +647,20 @@ pub fn alike(name: &str, known: &[String]) -> Vec<String> {
         .iter()
         .filter(|k| !k.eq_ignore_ascii_case(name) || *k != name)
         .filter_map(|k| {
-            let d = distance(&n, &k.to_lowercase());
-            (d <= max).then_some((d, k))
+            let kl = k.to_lowercase();
+            let mut d = distance(&n, &kl);
+            if d > max {
+                // A part of the name: customer → customer_id, name →
+                // customer_name (a typo's one letter off counts the same).
+                if len >= 3 && kl.starts_with(&n) {
+                    d = 1;
+                } else if len >= 4 && kl.contains(&n) {
+                    d = 2;
+                } else {
+                    return None;
+                }
+            }
+            Some((d, k))
         })
         .collect();
     scored.sort_by_key(|(d, k)| (*d, k.len()));
@@ -990,6 +1002,10 @@ mod tests {
         let p = explain("near \"form\": syntax error in select 1 form t at offset 9", Dialect::Sqlite);
         assert_eq!(p.text, "Синтаксическая ошибка у «form»");
         assert_eq!(alike("lenght", &["length".into(), "left".into(), "upper".into()]), vec!["length".to_string()]);
+        // A part of the name.
+        let cols: Vec<String> = ["id", "customer_id", "total", "created_at"].map(String::from).to_vec();
+        assert_eq!(alike("customer", &cols), vec!["customer_id".to_string()]);
+        assert_eq!(alike("created", &cols), vec!["created_at".to_string()]);
     }
 
     fn rels() -> Vec<super::super::Relation> {

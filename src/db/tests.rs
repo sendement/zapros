@@ -497,6 +497,7 @@ fn names_in_context_on_real_servers() {
             ("select o.totl from zz_orders o", "У таблицы «zz_orders» (o) нет поля «totl» — может быть, «o.total»?", "totl"),
             ("select o.name from zz_orders o join zz_customers c on c.id = o.customer_id", "У таблицы «zz_orders» (o) нет поля «name»", "name"),
             ("select totl from zz_orders", "Нет такого поля «totl» — может быть, «total»?", "totl"),
+            ("select customer from zz_orders", "Нет такого поля «customer» — может быть, «customer_id»?", "customer"),
             ("select lenght(note) from zz_orders", "Нет такой функции «lenght» — может быть, «length»?", "lenght"),
             ("select * from zz_ordrs", "Нет такой таблицы «zz_ordrs» — может быть, «zz_orders»?", "zz_ordrs"),
         ];

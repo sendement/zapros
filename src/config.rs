@@ -54,6 +54,10 @@ pub struct Palette {
     pub param: Rgb,
     pub operator: Rgb,
     pub text: Rgb,
+    /// A table's alias ("orders o", "o.id").
+    pub table_alias: Rgb,
+    /// A column's alias ("sum(x) AS total", "ORDER BY total").
+    pub column_alias: Rgb,
     pub bold_keywords: bool,
     pub italic_comments: bool,
     /// Brackets coloured by depth.
@@ -78,6 +82,8 @@ impl Palette {
             param: [224, 108, 117],
             operator: [171, 178, 191],
             text: [220, 223, 228],
+            table_alias: [126, 211, 170],
+            column_alias: [240, 160, 200],
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,
@@ -98,6 +104,8 @@ impl Palette {
             param: [190, 30, 60],
             operator: [60, 60, 60],
             text: [30, 30, 30],
+            table_alias: [0, 128, 96],
+            column_alias: [176, 48, 140],
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,

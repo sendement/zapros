@@ -286,7 +286,15 @@ fn auth_failed(m: &str) -> bool {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        let settings: Settings = config::load(&settings_path());
+        let mut settings: Settings = config::load(&settings_path());
+        // Settings saved before the alias colours: the light palette's are
+        // filled from the dark default (light on white) — its own instead.
+        let dark = crate::config::Palette::dark();
+        if settings.light.table_alias == dark.table_alias && settings.light.column_alias == dark.column_alias {
+            let light = crate::config::Palette::light();
+            settings.light.table_alias = light.table_alias;
+            settings.light.column_alias = light.column_alias;
+        }
         crate::i18n::set_ru(settings.russian.unwrap_or_else(crate::i18n::system_is_ru));
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // Before the first frame: what it draws asks for these families

@@ -2112,3 +2112,25 @@ fn errors_in_plain_words() {
     let _ = h.get_by_label_contains("no such column: totl");
     shot(&mut h, "errors");
 }
+
+#[test]
+fn aliases_coloured() {
+    let script = "select o.id, c.name as who, count(*) n, sum(o.total) over (partition by o.customer_id) as running\n  from orders o\n  join customers c on c.id = o.customer_id\n group by o.id, who\n order by n desc";
+    let (mut h, _g) = harness("aliases", script, false);
+    settle(&mut h);
+    let st = h.state();
+    let pal = st.settings.dark.clone();
+    let spans = crate::sql::embed::classify(script, crate::sql::Dialect::Sqlite, false);
+    let class_of = |s: &str, nth: usize| {
+        let at = script.match_indices(s).nth(nth).unwrap().0;
+        spans.iter().find(|x| x.range.start == at).map(|x| x.class)
+    };
+    use crate::sql::embed::Class;
+    assert_eq!(class_of("o.id", 0), Some(Class::TableAlias));
+    assert_eq!(class_of("who", 0), Some(Class::ColumnAlias));
+    assert_eq!(class_of("who", 1), Some(Class::ColumnAlias));
+    assert_eq!(class_of("n,", 0), Some(Class::ColumnAlias));
+    assert_eq!(class_of("n desc", 0), Some(Class::ColumnAlias));
+    assert_ne!(pal.table_alias, pal.column_alias);
+    shot(&mut h, "aliases");
+}

@@ -402,6 +402,8 @@ pub enum Class {
     Op,
     /// A bracket at this depth.
     Bracket(u8),
+    TableAlias,
+    ColumnAlias,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -425,6 +427,11 @@ fn base_spans(src: &str, toks: &[Tok], level: u8, d: Dialect) -> Vec<Span> {
     // FROM (…), BY (…), JOIN (…), IN (…), VALUES (…) stay keywords).
     let functions = super::functions(d);
     let is_function = |w: &str| super::is_function_in(w, &functions);
+    // Each token's alias kind, by its index.
+    let mut aliases: Vec<Option<super::aliases::Alias>> = vec![None; toks.len()];
+    for (k, a) in super::aliases::find(src, toks) {
+        aliases[k] = Some(a);
+    }
     let next_is_call = |k: usize| toks[k + 1..].iter().find(|x| x.kind != Tk::Space).is_some_and(|x| x.kind == Tk::Open && x.text(src) == "(");
     toks.iter()
         .enumerate()
@@ -460,6 +467,17 @@ fn base_spans(src: &str, toks: &[Tok], level: u8, d: Dialect) -> Vec<Span> {
                 Tk::Space | Tk::Other => Class::Text,
             };
             Span { range: t.start..t.end, class, level }
+        })
+        .collect::<Vec<Span>>()
+        .into_iter()
+        .enumerate()
+        .map(|(k, mut sp)| {
+            if let Some(a) = &aliases[k] {
+                if matches!(sp.class, Class::Text | Class::Quoted | Class::Type) {
+                    sp.class = if *a == super::aliases::Alias::Table { Class::TableAlias } else { Class::ColumnAlias };
+                }
+            }
+            sp
         })
         .collect()
 }

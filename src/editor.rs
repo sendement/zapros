@@ -326,6 +326,8 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
             Class::Param => f.color = rgb(pal.param),
             Class::Op => f.color = rgb(pal.operator),
             Class::Bracket(depth) => f.color = if pal.rainbow { rainbow[depth as usize % 4] } else { rgb(pal.operator) },
+            Class::TableAlias => f.color = rgb(pal.table_alias),
+            Class::ColumnAlias => f.color = rgb(pal.column_alias),
             Class::Text => {}
         }
         if sp.level > 0 {

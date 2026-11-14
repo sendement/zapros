@@ -687,6 +687,9 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         row(ui, t("Операторы", "Operators"), &mut p.operator);
         row(ui, t("Текст", "Text"), &mut p.text);
         ui.end_row();
+        row(ui, t("Алиасы таблиц", "Table aliases"), &mut p.table_alias);
+        row(ui, t("Алиасы полей", "Column aliases"), &mut p.column_alias);
+        ui.end_row();
     });
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut p.bold_keywords, t("Ключевые слова жирным", "Bold keywords"));
@@ -969,6 +972,12 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 })
                 .response
                 .on_hover_text(t("Например, select * from orders остаётся одной строкой", "E.g. select * from orders stays one line"));
+                ui.horizontal(|ui| {
+                    ui.label(t("Делить вызов или окно длиннее", "Split a call or window longer than"));
+                    ui.add(egui::Slider::new(&mut s.format.split, 0..=200).custom_formatter(|v, _| if v == 0.0 { t("только по ширине строки", "only by the line's width").to_string() } else { format!("{v:.0}") }));
+                })
+                .response
+                .on_hover_text(t("if(…), coalesce(…) — по аргументу на строку; sum(…) OVER (…) — PARTITION BY, ORDER BY, ROWS каждое с новой строки. Даже если строка целиком помещается", "if(…), coalesce(…): an argument per line; sum(…) OVER (…): PARTITION BY, ORDER BY, ROWS each on its line. Even when the whole line fits"));
                 ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
                 ui.add_enabled_ui(s.format.embedded, |ui| {
                     ui.checkbox(&mut s.format.split_strings, t("Разбивать строку с запросом на несколько строк", "Split a string holding a statement over several lines"))

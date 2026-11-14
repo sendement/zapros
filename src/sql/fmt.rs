@@ -27,10 +27,13 @@ struct Style {
     wrap: usize,
     /// A statement this short stays on one line (0: never).
     one_line: usize,
+    /// A call or window longer than this goes over several lines, however
+    /// long the line (0: only by `wrap`).
+    split: usize,
 }
 
 thread_local! {
-    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2, wrap: 0, one_line: 0 }) };
+    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2, wrap: 0, one_line: 0, split: 0 }) };
 }
 
 fn style() -> Style {
@@ -168,6 +171,13 @@ fn tree(toks: &[Tok], i: &mut usize) -> Vec<Node> {
         }
     }
     out
+}
+
+/// A call or window `len` long (brackets in), starting at column `col`:
+/// too long for its line, or longer than the style lets a construct be.
+fn too_long(col: usize, len: usize) -> bool {
+    let st = style();
+    (st.wrap > 0 && col + len > st.wrap) || (st.split > 0 && len > st.split)
 }
 
 fn is_kw(n: Option<&Node>, w: &str) -> bool {
@@ -573,9 +583,36 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 }
                 fresh = false;
             }
-            // A call too long for the line: its arguments one to a line, a
-            // level in; its ")" back under the line's start.
-            Node::Group(g) if style().wrap > 0 && out.col() + inline(g).chars().count() + 2 > style().wrap && g.iter().any(|x| matches!(x, Node::T(t) if t.k == K::Comma)) => {
+            // A window too long: OVER (
+            //   PARTITION BY …
+            //   ORDER BY …
+            //   ROWS …
+            // ) — each part a line, a level in.
+            Node::Group(g) if i > 0 && is_kw(Some(&nodes[i - 1]), "OVER") && too_long(out.col(), inline(g).chars().count() + 2) && g.iter().any(|x| is_kw(Some(x), "PARTITION") || is_kw(Some(x), "ORDER")) => {
+                let lead = out.cur.len() - out.cur.trim_start().len();
+                let back = if is_list(&clause) { item } else { lead };
+                let col = back + ind();
+                out.word("(", true);
+                let mut parts: Vec<Vec<Node>> = Vec::new();
+                for x in g {
+                    let starts = ["PARTITION", "ORDER", "ROWS", "RANGE", "GROUPS"].iter().any(|w| is_kw(Some(x), w));
+                    if starts || parts.is_empty() {
+                        parts.push(Vec::new());
+                    }
+                    parts.last_mut().unwrap().push(x.clone());
+                }
+                for p in &parts {
+                    out.start(col);
+                    out.cur += &inline(p);
+                }
+                out.start(back);
+                out.cur.push(')');
+                last_col = back;
+                fresh = false;
+            }
+            // A call too long: its arguments one to a line, a level in; its
+            // ")" back under the line's start.
+            Node::Group(g) if too_long(out.col(), inline(g).chars().count() + 2) && g.iter().any(|x| matches!(x, Node::T(t) if t.k == K::Comma)) => {
                 let lead = out.cur.len() - out.cur.trim_start().len();
                 let back = if is_list(&clause) { item } else { lead };
                 let col = back + ind();
@@ -715,18 +752,21 @@ pub struct Options {
     pub wrap: u16,
     /// Statements this short stay on one line (0: never).
     pub one_line: u16,
+    /// A call (if(…), coalesce(…)) or a window (OVER (…)) longer than this
+    /// is split, however long its line (0: only by the line's width).
+    pub split: u16,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0 }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60 }
     }
 }
 
 /// Lays out a script statement by statement; PL/SQL units and bodies in
 /// $$ are left as written. Comments between statements stay.
 pub fn format(src: &str, d: Dialect, o: Options) -> String {
-    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize }));
+    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize, split: o.split as usize }));
     let ranges = super::split(src, d, false);
     let mut s = String::new();
     let mut prev = 0;
@@ -1103,7 +1143,7 @@ mod wrap_tests {
         assert!(f.lines().all(|l| l.chars().count() <= 84), "{f}");
         assert!(f.lines().any(|l| l.trim_start().starts_with("|| ")), "{f}");
         // Off: one long line as before.
-        let g = format(q, Dialect::Postgres, Options { wrap: 0, ..Options::default() });
+        let g = format(q, Dialect::Postgres, Options { wrap: 0, split: 0, ..Options::default() });
         assert!(g.lines().any(|l| l.chars().count() > 100), "{g}");
         // Short statements on one line when asked.
         let o = Options { one_line: 60, ..Options::default() };
@@ -1113,3 +1153,25 @@ mod wrap_tests {
         println!("{f}");
     }
 }
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn calls_and_windows_split_by_their_length() {
+        let q = "select customer_id, if(total > 1000, 'big customer', 'small one') as kind, sum(total) over (partition by customer_id order by created_at) as running, count() as n from orders";
+        let f = format(q, Dialect::ClickHouse, Options { split: 40, ..Options::default() });
+        assert!(f.contains("if(\n"), "{f}");
+        assert!(f.contains("OVER (\n"), "{f}");
+        assert!(f.lines().any(|l| l.trim() == "PARTITION BY customer_id"), "{f}");
+        assert!(f.lines().any(|l| l.trim() == "ORDER BY created_at"), "{f}");
+        assert!(f.contains("count() AS n"), "{f}");
+        // Off: only the line's width splits (this line fits nothing).
+        let g = format(q, Dialect::ClickHouse, Options { split: 0, wrap: 0, ..Options::default() });
+        assert!(g.contains("if(total > 1000, 'big customer', 'small one')"), "{g}");
+        assert!(g.contains("OVER (PARTITION BY customer_id ORDER BY created_at)"), "{g}");
+        println!("{f}");
+    }
+}
+

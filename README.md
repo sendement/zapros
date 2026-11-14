@@ -81,7 +81,13 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   GitHub Dark / Light, Gruvbox, Catppuccin Mocha / Latte, Tokyo Night —
   window colours and the editor's palette together (Settings → Look); the
   standard look follows the system or is set dark / light.
+- **Aliases in their own colours** (Settings → Colours): a table's alias
+  ("orders o", "(select …) t") and where it's used ("o.id"), a column's
+  alias ("sum(x) AS total", "count(*) n") and where it's used (ORDER BY,
+  GROUP BY, HAVING).
 - **Code style** (Settings → Code style): keyword and function case;
+  calls (if(…), coalesce(…)) and windows (OVER (PARTITION BY … ORDER BY …))
+  longer than a set length split over lines even when the line fits;
   keywords take that case as they're typed (only SQL's own words where they
   are keywords — names, `x.word`, strings, comments and calls stay; in
   ClickHouse, whose functions and names are case-sensitive, neither typing
