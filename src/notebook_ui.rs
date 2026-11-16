@@ -366,12 +366,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
             let focused = focus.as_deref() == Some(cell.id.as_str());
             let stroke = if focused { Stroke::new(1.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
+            // How its last run went, on its header.
+            let shade = flag_shade(app, &key, focused, &ctx);
             let mut draw = |ui: &mut egui::Ui| egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
+                let shade_at = ui.painter().add(egui::Shape::Noop);
+                let inner = ui.max_rect();
                 // Its header: kind, run, what it gave; moving, adding, deleting.
-                ui.horizontal(|ui| {
+                let head = ui.horizontal(|ui| {
                     // A grip: dragged, the cell goes up or down.
                     // (Not while filtered: the cells hidden would be in the way.)
                     let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), if filtering { egui::Sense::hover() } else { egui::Sense::drag() });
@@ -525,7 +529,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             }
                         }
                     });
-                });
+                })
+                .response;
+                if let Some((c, k)) = shade {
+                    let r = egui::Rect::from_min_max(egui::pos2(inner.left() - 8.0, head.rect.top() - 6.0), egui::pos2(inner.right() + 8.0, head.rect.bottom() + 3.0));
+                    let round = egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
+                    let line = egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 2.0), r.max);
+                    ui.painter().set(shade_at, egui::Shape::Vec(vec![
+                        egui::Shape::rect_filled(r, round, c.gamma_multiply(if dark { 0.22 } else { 0.16 } * k)),
+                        egui::Shape::rect_filled(line, 0.0, c.gamma_multiply(0.85 * k)),
+                    ]));
+                }
                 if cell.collapsed && !filtering {
                     // Folded: its first line, a click opens it.
                     let first = cell.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
@@ -796,6 +810,48 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 }
 
 /// A cell's new text.
+/// A run's colour stays while its cell has the focus, and a while after
+/// it's gone; then it fades.
+const FLAG_HOLD: f32 = 4.0;
+const FLAG_FADE: f32 = 2.0;
+
+pub const YELLOW: Color32 = Color32::from_rgb(240, 180, 30);
+
+/// The colour of the cell's last run and how strong it is now.
+fn flag_shade(app: &mut App, key: &str, focused: bool, ctx: &egui::Context) -> Option<(Color32, f32)> {
+    use crate::app::Flag;
+    let rt = app.rt.get_mut(key)?;
+    let f = rt.flag.as_mut()?;
+    let c = match f.kind {
+        Flag::Running => crate::ui::BLUE,
+        Flag::Ok => crate::ui::GREEN,
+        Flag::Warn => YELLOW,
+        Flag::Error => crate::ui::RED,
+    };
+    if f.kind == Flag::Running {
+        // A slow breath while it runs.
+        ctx.request_repaint();
+        let t = ctx.input(|i| i.time) as f32;
+        return Some((c, 0.8 + 0.2 * (t * 3.0).sin()));
+    }
+    if focused {
+        f.quiet = None;
+        return Some((c, 1.0));
+    }
+    let e = f.quiet.get_or_insert_with(std::time::Instant::now).elapsed().as_secs_f32();
+    if e < FLAG_HOLD {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32(FLAG_HOLD - e + 0.01));
+        return Some((c, 1.0));
+    }
+    let k = 1.0 - (e - FLAG_HOLD) / FLAG_FADE;
+    if k <= 0.0 {
+        rt.flag = None;
+        return None;
+    }
+    ctx.request_repaint();
+    Some((c, k))
+}
+
 fn ops_text(app: &mut App, tab: &str, cell: &str, text: String) {
     let wi = app.session.active;
     let ws = &mut app.session.workspaces[wi];

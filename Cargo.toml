@@ -13,6 +13,7 @@ oracle = ["dep:oracle"]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["svg"] }
+egui_plot = "0.37"
 crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

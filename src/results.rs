@@ -293,6 +293,14 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
                 stop = Some(i);
             }
             ui.separator();
+            // The table or a chart of it.
+            if ui.selectable_label(!v.chart.on, format!("▦ {}", t("Таблица", "Table"))).clicked() {
+                v.chart.on = false;
+            }
+            if ui.selectable_label(v.chart.on, format!("📈 {}", t("График", "Chart"))).on_hover_text(t("Показать результат графиком: столбец по оси X, значения других — точками по Y", "Show the result as a chart: one column along X, the others' values as points over it")).clicked() {
+                v.chart.on = true;
+            }
+            ui.separator();
             if ui.add(crate::ui::tinted(format!("💾 {}", t("Экспорт…", "Export…")), crate::ui::BLUE)).on_hover_text(t("Сохранить в файл: CSV, TSV, JSON, INSERT, Markdown, HTML, XLSX — целиком или частями", "Save to a file: CSV, TSV, JSON, INSERT, Markdown, HTML, XLSX — whole or in parts")).clicked() {
                 export = Some(i);
             }
@@ -326,6 +334,7 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
     ui.add_space(6.0);
     let mut goto = None;
     match rt.shown {
+        Pane::Result(i) if rt.results[i].chart.on => crate::chart::show(ui, &format!("{tab_id}/{i}"), &mut rt.results[i]),
         Pane::Result(i) => {
             if table(ui, &tab_id, i, &mut rt.results[i]) {
                 let v = &rt.results[i];

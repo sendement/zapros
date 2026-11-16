@@ -392,7 +392,7 @@ impl Session for Ora {
             };
             Some((vec![r[0].clone(), folder.into(), r[1].clone()], kind))
         };
-        let q = "SELECT owner, object_name, object_type FROM all_objects WHERE object_name = :2 AND owner = NVL(:1, USER)
+        let q = "SELECT owner, object_name, object_type FROM all_objects WHERE owner = NVL(:1, USER) AND object_name = :2
                   AND object_type IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'FUNCTION', 'PROCEDURE', 'PACKAGE', 'SEQUENCE', 'TRIGGER', 'TYPE', 'JOB')
                   ORDER BY DECODE(object_type, 'TABLE', 0, 'MATERIALIZED VIEW', 1, 2)";
         let none: Option<&str> = None;

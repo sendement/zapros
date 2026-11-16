@@ -86,6 +86,8 @@ pub struct ResultView {
     pub loading_since: Option<Instant>,
     /// Saved once every row's in.
     pub export_after: Option<crate::export::Export>,
+    /// Shown as a chart: its settings.
+    pub chart: crate::chart::Chart,
 }
 
 impl ResultView {
@@ -106,6 +108,33 @@ impl ResultView {
             self.cols = o.clone();
         }
     }
+}
+
+/// How a run went, for a notebook cell's header.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flag {
+    Running,
+    Ok,
+    Warn,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub struct CellFlag {
+    pub kind: Flag,
+    /// Since when it's been out of focus (then it fades).
+    pub quiet: Option<Instant>,
+    /// The log's length when the run began (its lines are after).
+    pub from: usize,
+    /// Something to look at: a server warning, no rows changed.
+    pub warn: bool,
+}
+
+/// A server's notice that's a warning (PostgreSQL's WARNING, Oracle's
+/// and ClickHouse's own words).
+pub fn is_warning(text: &str) -> bool {
+    let up = text.trim_start().to_uppercase();
+    ["WARNING", "ПРЕДУПРЕЖДЕНИЕ", "WARN:"].iter().any(|w| up.starts_with(w))
 }
 
 /// What the results area shows.
@@ -184,6 +213,8 @@ pub struct TabRt {
     pub cell_focus: Option<String>,
     pub md_edit: std::collections::BTreeSet<String>,
     pub run: Option<Running>,
+    /// How the last run went (a notebook cell's header shows it).
+    pub flag: Option<CellFlag>,
     pub issues: Vec<Issue>,
     pub check_key: u64,
     pub check_due: Option<Instant>,
@@ -956,6 +987,7 @@ impl App {
         rt.shown = Pane::Messages;
         rt.server_err = None;
         rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now() });
+        rt.flag = Some(CellFlag { kind: Flag::Running, quiet: None, from: rt.log.len(), warn: false });
         let l = &self.live[conn];
         l.query.send(Req::Run { run, stmts, limit, go_on: self.settings.continue_on_error });
     }
@@ -1171,6 +1203,9 @@ impl App {
                 }
                 What::Note { run, text } => {
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
+                        if let Some(f) = rt.flag.as_mut().filter(|_| is_warning(&text)) {
+                            f.warn = true;
+                        }
                         rt.output.push(LogLine { err: None, when: now(), kind: LogKind::Note, text, at: None });
                     }
                 }
@@ -1239,6 +1274,12 @@ impl App {
                                 }
                             }
                             Ok(Outcome::Done(n)) => {
+                                // UPDATE / DELETE that changed nothing.
+                                if n == Some(0) {
+                                    if let Some(f) = rt.flag.as_mut() {
+                                        f.warn = true;
+                                    }
+                                }
                                 let what = match n {
                                     Some(n) => format!("{} {n}", t("Готово, строк затронуто:", "Done, rows affected:")),
                                     None => t("Готово", "Done").to_string(),
@@ -1281,6 +1322,12 @@ impl App {
                             if rt.run.as_ref().is_some_and(|r| r.run == run) {
                                 let took = rt.run.take().map(|r| r.since.elapsed()).unwrap_or_default();
                                 rt.last_run = Some((took, cancelled));
+                                if let Some(f) = rt.flag.as_mut() {
+                                    let failed = rt.log.get(f.from..).is_some_and(|l| l.iter().any(|l| l.kind == LogKind::Error));
+                                    // (Stopped by hand: a warning, whatever the server said about it.)
+                                    f.kind = if cancelled || (!failed && f.warn) { Flag::Warn } else if failed { Flag::Error } else { Flag::Ok };
+                                    f.quiet = None;
+                                }
                                 if cancelled {
                                     rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: t("Отменено", "Cancelled").into(), at: None });
                                 } else {

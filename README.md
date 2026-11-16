@@ -151,7 +151,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   (hide the ticked, or only the ticked).
 - **Notebook cells** run, stop and explain themselves (▶ Run, 🔍 Plan, ■
   Stop on each SQL cell; the toolbar's run / script / stop / plan stay with
-  the plain text; Shift+Esc stops every cell).
+  the plain text; Shift+Esc stops every cell). A cell's header shows how
+  its run went: blue while it runs, green when done, red on an error,
+  yellow on a warning (stopped by hand, a server WARNING, an UPDATE /
+  DELETE that changed no rows); the colour stays while the cell has the
+  focus and fades a few seconds after it's gone.
 - **Notebook cells** carry the time they were made and colour labels
   (their colours and names set in the filter's menu, more added, any
   removed); the notebook's filter — text, labels wanted (any / all) or left
@@ -263,6 +267,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   being dragged.
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
+- **Charts**: a result switches between Table and Chart. One column goes
+  along X — numbers, dates (and timestamps) or just labels in the order
+  they come — and the numeric columns picked go up as lines, points or
+  bars, each in its own colour; zoom and drag, hover a point for its
+  values. The rows charted are the ones shown (filtered, sorted).
 - **Results**: a tab per statement, virtual scrolling, sort by column,
   filter, copy cell / row / row as JSON / all as TSV. Rows load in batches
   (500 by default, "rows per batch" in the settings or per connection): the

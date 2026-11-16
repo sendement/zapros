@@ -1627,6 +1627,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/egui_plot/egui_plot-0.37.0.crate",
+        "sha256": "90f3711a5032bb65a41011b23fcdc6c4bb599757b82cc0181d41e7d1de16986a",
+        "dest": "cargo/vendor/egui_plot-0.37.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"90f3711a5032bb65a41011b23fcdc6c4bb599757b82cc0181d41e7d1de16986a\", \"files\": {}}",
+        "dest": "cargo/vendor/egui_plot-0.37.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/either/either-1.19.0.crate",
         "sha256": "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be",
         "dest": "cargo/vendor/either-1.19.0"

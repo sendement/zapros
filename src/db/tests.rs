@@ -514,3 +514,24 @@ fn names_in_context_on_real_servers() {
     }
 }
 
+
+/// Ctrl+click's lookup: a table by its bare name, with its schema, a
+/// package's member, and nothing for a name that isn't there.
+#[test]
+fn locate_on_real_servers() {
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
+        let mut s = open(&sp, &pw).unwrap();
+        let _ = s.run_limit("drop table zz_loc", 0, &mut |_| {});
+        s.run_limit("create table zz_loc (id number)", 0, &mut |_| {}).unwrap();
+        let user = sp.user.to_uppercase();
+        let (path, kind) = s.locate(None, "ZZ_LOC", false).unwrap().expect("bare name");
+        assert_eq!((path, kind), (vec![user.clone(), "tables".into(), "ZZ_LOC".into()], ObjKind::Table));
+        assert!(s.locate(Some(&user), "ZZ_LOC", false).unwrap().is_some(), "schema.table");
+        assert!(s.locate(None, "ZZ_NOT_THERE", false).unwrap().is_none());
+        s.run_limit("drop table zz_loc", 0, &mut |_| {}).unwrap();
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) {
+        let mut s = open(&sp, &pw).unwrap();
+        assert!(s.locate(None, "customers", false).unwrap().is_some());
+    }
+}

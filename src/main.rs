@@ -7,6 +7,7 @@ mod db;
 mod design;
 mod design_ui;
 mod dialogs;
+mod chart;
 mod drivers;
 mod editor;
 mod export;

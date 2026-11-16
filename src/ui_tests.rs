@@ -2288,3 +2288,94 @@ fn readme_picture() {
     let img = h.render().expect("render");
     img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/screenshot.png")).unwrap();
 }
+
+#[test]
+fn result_as_a_chart() {
+    let script = "select date('2026-01-01', '+' || (id % 30) || ' days') as day, count(*) as orders, round(sum(total) / 100) as hundreds\n  from orders\n group by 1\n order by 1;\n";
+    let (mut h, _g) = harness("chart", script, false);
+    focus_editor(&mut h, 10);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    assert_eq!(h.state().rt[&id].results[0].table.rows.len(), 30);
+    h.get_by_label("📈 График").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    let v = &h.state().rt[&id].results[0];
+    assert!(v.chart.on);
+    // The date along X, both numbers over it.
+    assert_eq!((v.chart.x, v.chart.ys.iter().copied().collect::<Vec<_>>()), (0, vec![1, 2]));
+    let img = h.render().unwrap();
+    // Lines in the two series' colours (blue and green) in the lower half.
+    let near = |c: egui::Color32| img.enumerate_pixels().filter(|(_, y, p)| *y > 560 && (p[0] as i32 - c.r() as i32).abs() < 30 && (p[1] as i32 - c.g() as i32).abs() < 30 && (p[2] as i32 - c.b() as i32).abs() < 30).count();
+    assert!(near(crate::chart::color(0)) > 200, "{}", near(crate::chart::color(0)));
+    assert!(near(crate::chart::color(1)) > 200, "{}", near(crate::chart::color(1)));
+    shot(&mut h, "chart-lines");
+    // Bars; one column hidden by its chip.
+    h.get_by_label("Столбцы").click();
+    h.get_by_label("● orders").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    let v = &h.state().rt[&id].results[0];
+    assert_eq!((v.chart.kind, v.chart.ys.len()), (crate::chart::Kind::Bars, 1));
+    shot(&mut h, "chart-bars");
+    // Back to the table.
+    h.get_by_label("▦ Таблица").click();
+    h.step();
+    assert!(!h.state().rt[&id].results[0].chart.on);
+}
+
+#[test]
+fn notebook_cells_show_how_they_ran() {
+    use crate::app::Flag;
+    let text = "-- %%\nselect count(*) from orders;\n-- %%\nselect totl from orders;\n-- %%\nupdate orders set note = 'x' where 1 = 0;\n-- %%\nwith recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n;\n";
+    let (mut h, _g) = harness("nb-flags", text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    let key = |i: usize| crate::app::App::cell_key(&tab, &cells[i]);
+    let ctx = h.ctx.clone();
+    for c in &cells[..3] {
+        h.state_mut().run_cells(&ctx, Some(c.clone()));
+        settle(&mut h);
+    }
+    // The last one runs on: blue while it does.
+    h.state_mut().run_cells(&ctx, Some(cells[3].clone()));
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let flag = |h: &Harness<'static, App>, i: usize| h.state().rt.get(&key(i)).and_then(|r| r.flag.as_ref()).map(|f| f.kind);
+    assert_eq!(flag(&h, 3), Some(Flag::Running));
+    assert_eq!([flag(&h, 0), flag(&h, 1), flag(&h, 2)], [Some(Flag::Ok), Some(Flag::Error), Some(Flag::Warn)]);
+    // (Folded: all four in sight.)
+    for c in h.state_mut().tab_mut().notebook.as_mut().unwrap().cells.iter_mut() {
+        c.collapsed = true;
+    }
+    h.step();
+    h.step();
+    shot(&mut h, "notebook-flags");
+    let img = h.render().unwrap();
+    // The headers tinted: green, red, yellow and blue all there.
+    let has = |c: egui::Color32| img.pixels().filter(|p| (p[0] as i32 - c.r() as i32 * 85 / 100).abs() < 16 && (p[1] as i32 - c.g() as i32 * 85 / 100).abs() < 16 && (p[2] as i32 - c.b() as i32 * 85 / 100).abs() < 16).count();
+    for c in [crate::ui::GREEN, crate::ui::RED, crate::notebook_ui::YELLOW, crate::ui::BLUE] {
+        assert!(has(c) > 40, "{c:?}: {}", has(c));
+    }
+    h.get_all_by_label("Стоп").find(|n| !format!("{n:?}").contains("disabled: true")).unwrap().click();
+    settle(&mut h);
+    // Stopped: a warning.
+    assert_eq!(flag(&h, 3), Some(Flag::Warn));
+    // The focused cell keeps its colour; the others fade some time after.
+    for i in 0..3 {
+        if let Some(f) = h.state_mut().rt.get_mut(&key(i)).and_then(|r| r.flag.as_mut()) {
+            f.quiet = Some(std::time::Instant::now() - Duration::from_secs(30));
+        }
+    }
+    h.step();
+    h.step();
+    assert_eq!(h.state().rt[&key(3)].flag.as_ref().map(|f| f.kind), Some(Flag::Warn), "focused: stays");
+    assert!((0..3).all(|i| flag(&h, i).is_none()));
+}
