@@ -67,6 +67,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   the statement's tables, the database's tables or functions), the code as
   a button that copies it, and the server's whole text unfolded under
   "Full log…" with Copy all.
+- **Another schema's code in Oracle** without SELECT_CATALOG_ROLE:
+  where DBMS_METADATA refuses (ORA-31603) though the object's own grants
+  let it be seen, its DDL is put together from ALL_SOURCE, ALL_VIEWS,
+  ALL_MVIEWS, ALL_SEQUENCES, ALL_SYNONYMS and the table's columns, keys
+  and comments (a package's body shows as far as Oracle lets the user see
+  it).
 - **Object tree** per connection: schemas / databases, tables, views,
   materialized views, functions, procedures, packages, sequences, triggers,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,

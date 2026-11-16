@@ -56,6 +56,89 @@ fn kind_folder(f: &str) -> Option<(&'static str, ObjKind)> {
 }
 
 impl Ora {
+
+    /// An object's DDL from the ALL_ views (what DBMS_METADATA won't give
+    /// for another schema without SELECT_CATALOG_ROLE); None: nothing seen.
+    fn source_by_hand(&mut self, schema: &str, name: &str, kind: ObjKind) -> Res<Option<String>> {
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let one = |rows: Vec<Vec<String>>| rows.into_iter().next();
+        let full = format!("{}.{}", q(schema), q(name));
+        Ok(match kind {
+            ObjKind::Function | ObjKind::Procedure | ObjKind::Package | ObjKind::Type | ObjKind::Trigger => {
+                let rows = self.rows("SELECT type, text FROM all_source WHERE owner = :1 AND name = :2 ORDER BY DECODE(type, 'PACKAGE BODY', 1, 'TYPE BODY', 1, 0), line", &[&schema, &name])?;
+                if rows.is_empty() {
+                    return Ok(None);
+                }
+                // Each unit (a spec, a body) on its own, "/" between them.
+                let mut units: Vec<(String, String)> = Vec::new();
+                for r in rows {
+                    match units.last_mut() {
+                        Some(u) if u.0 == r[0] => u.1.push_str(&r[1]),
+                        _ => units.push((r[0].clone(), r[1].clone())),
+                    }
+                }
+                let parts: Vec<String> = units.into_iter().map(|(ty, text)| format!("CREATE OR REPLACE {}", qualify_unit(text.trim_end(), &ty, schema))).collect();
+                Some(parts.join("\n/\n\n"))
+            }
+            ObjKind::View => one(self.rows("SELECT text FROM all_views WHERE owner = :1 AND view_name = :2", &[&schema, &name])?).map(|r| format!("CREATE OR REPLACE VIEW {full} AS\n{};", r[0].trim_end())),
+            ObjKind::MatView => one(self.rows("SELECT query FROM all_mviews WHERE owner = :1 AND mview_name = :2", &[&schema, &name])?).map(|r| format!("CREATE MATERIALIZED VIEW {full} AS\n{};", r[0].trim_end())),
+            ObjKind::Sequence => one(self.rows(
+                "SELECT min_value, max_value, increment_by, last_number, cache_size, cycle_flag, order_flag FROM all_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
+                &[&schema, &name],
+            )?)
+            .map(|r| {
+                let cache = if r[4] == "0" { "NOCACHE".to_string() } else { format!("CACHE {}", r[4]) };
+                format!(
+                    "CREATE SEQUENCE {full}\n  MINVALUE {} MAXVALUE {}\n  INCREMENT BY {} START WITH {}\n  {cache} {} {};",
+                    r[0], r[1], r[2], r[3], if r[5] == "Y" { "CYCLE" } else { "NOCYCLE" }, if r[6] == "Y" { "ORDER" } else { "NOORDER" }
+                )
+            }),
+            ObjKind::Synonym => one(self.rows("SELECT table_owner, table_name, db_link FROM all_synonyms WHERE owner = :1 AND synonym_name = :2", &[&schema, &name])?).map(|r| {
+                let link = if r[2].is_empty() { String::new() } else { format!("@{}", r[2]) };
+                let owner = if schema == "PUBLIC" { "PUBLIC SYNONYM ".to_string() } else { format!("SYNONYM {full}") };
+                let owner = if schema == "PUBLIC" { format!("{owner}{}", q(name)) } else { owner };
+                format!("CREATE OR REPLACE {owner} FOR {}.{}{link};", q(&r[0]), q(&r[1]))
+            }),
+            ObjKind::Table => {
+                let def = match self.describe(&[schema.to_string(), "tables".into(), name.to_string()], ObjKind::Table)? {
+                    crate::design::ObjDef::Table(t) => t,
+                    _ => return Ok(None),
+                };
+                if def.cols.is_empty() {
+                    return Ok(None);
+                }
+                let width = def.cols.iter().map(|c| q(&c.name).len()).max().unwrap_or(0);
+                let mut lines: Vec<String> = def
+                    .cols
+                    .iter()
+                    .map(|c| {
+                        let mut l = format!("  {:width$} {}", q(&c.name), c.ty);
+                        if !c.default.is_empty() {
+                            l += &format!(" DEFAULT {}", c.default);
+                        }
+                        if !c.nullable {
+                            l += " NOT NULL";
+                        }
+                        l
+                    })
+                    .collect();
+                let pk: Vec<String> = def.cols.iter().filter(|c| c.pk).map(|c| q(&c.name)).collect();
+                if !pk.is_empty() {
+                    lines.push(format!("  PRIMARY KEY ({})", pk.join(", ")));
+                }
+                let mut out = format!("CREATE TABLE {full} (\n{}\n);", lines.join(",\n"));
+                let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+                if !def.comment.is_empty() {
+                    out += &format!("\n\nCOMMENT ON TABLE {full} IS {};", lit(&def.comment));
+                }
+                for c in def.cols.iter().filter(|c| !c.comment.is_empty()) {
+                    out += &format!("\nCOMMENT ON COLUMN {full}.{} IS {};", q(&c.name), lit(&c.comment));
+                }
+                Some(out)
+            }
+            _ => None,
+        })
+    }
     pub fn open(spec: &Spec, password: &str) -> Res<Self> {
         if let Err(message) = crate::drivers::init_oracle() {
             return Err(Failure { message: format!("{message}\n\n{}", crate::drivers::hint()), at: None, lost: false });
@@ -311,8 +394,17 @@ impl Session for Ora {
             ObjKind::Job => "PROCOBJ",
             _ => return Err(Failure::new("nothing to show")),
         };
-        let r = self.rows("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual", &[&ty, &name, &schema])?;
-        let mut text = r.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default().trim().to_string();
+        let mut text = match self.rows("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual", &[&ty, &name, &schema]) {
+            Ok(r) => r.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or_default().trim().to_string(),
+            // Another schema's object without SELECT_CATALOG_ROLE (ORA-31603
+            // though the object's own grants let it be seen): put together
+            // from what the dictionary's ALL_ views show.
+            Err(e) => match self.source_by_hand(schema, name, kind) {
+                Ok(Some(t)) => t,
+                Ok(None) => return Err(e),
+                Err(_) => return Err(e),
+            },
+        };
         // Two PL/SQL units (a spec and its body): a "/" between them, for
         // running them as a script; none at the end (the last one runs to
         // the text's end).
@@ -532,4 +624,29 @@ mod slash_tests {
         assert_eq!(super::strip_slash("begin null; end;\n/\n/\n"), "begin null; end;");
         assert_eq!(super::strip_slash("select 4/2 from dual"), "select 4/2 from dual");
     }
+}
+
+/// A unit's source as ALL_SOURCE keeps it ("PACKAGE BODY pkg AS …"), its
+/// name given the schema: "PACKAGE BODY "S"."PKG" AS …".
+fn qualify_unit(text: &str, ty: &str, schema: &str) -> String {
+    let lead = text.len() - text.trim_start().len();
+    let rest = &text[lead..];
+    // The unit's keywords ("PACKAGE BODY", "TYPE", …), as many words as `ty`.
+    let mut at = 0;
+    for _ in ty.split_whitespace() {
+        let r = &rest[at..];
+        let skip = r.len() - r.trim_start().len();
+        let w = r[skip..].find(|c: char| c.is_whitespace()).unwrap_or(r.len() - skip);
+        at += skip + w;
+    }
+    let after = &rest[at..];
+    let gap = after.len() - after.trim_start().len();
+    let name_at = at + gap;
+    let tail = &rest[name_at..];
+    // Already qualified ("S".pkg / s.pkg): as it is.
+    let end = if tail.starts_with('"') { tail[1..].find('"').map_or(tail.len(), |i| i + 2) } else { tail.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '#')).unwrap_or(tail.len()) };
+    if tail[end..].starts_with('.') || end == 0 {
+        return rest.to_string();
+    }
+    format!("{}\"{}\".{}", &rest[..name_at], schema.replace('"', "\"\""), tail)
 }

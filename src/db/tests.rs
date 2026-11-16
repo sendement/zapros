@@ -551,3 +551,41 @@ fn server_sessions_ended_from_outside() {
         }
     }
 }
+
+/// Another schema's objects, seen through their own grants only (no
+/// SELECT_CATALOG_ROLE): their code still shows (ORA-31603 otherwise).
+/// ZAPROS_TEST_ORA_OTHER=user:password of a second schema.
+#[test]
+fn oracle_other_schema_code() {
+    let (Some((sp, pw)), Ok(other)) = (spec("ZAPROS_TEST_ORA", Kind::Oracle), std::env::var("ZAPROS_TEST_ORA_OTHER")) else { return };
+    let (ou, op) = other.split_once(':').unwrap();
+    let mut o = open(&Spec { user: ou.into(), ..sp.clone() }, op).unwrap();
+    let me = sp.user.to_uppercase();
+    for sql in [
+        "create or replace package zz_pkg as function two return number; end zz_pkg;",
+        "create or replace package body zz_pkg as function two return number is begin return 2; end; end zz_pkg;",
+        "create or replace view zz_v as select 1 as one from dual",
+        "begin execute immediate 'drop table zz_t'; exception when others then null; end;",
+        "create table zz_t (id number(10) primary key, name varchar2(40) default 'x' not null)",
+        "begin execute immediate 'drop sequence zz_s'; exception when others then null; end;",
+        "create sequence zz_s start with 5",
+    ] {
+        o.run_limit(sql, 0, &mut |_| {}).unwrap();
+    }
+    for g in ["grant execute on zz_pkg to ", "grant select on zz_v to ", "grant select, update on zz_t to ", "grant select on zz_s to "] {
+        o.run_limit(&format!("{g}{me}"), 0, &mut |_| {}).unwrap();
+    }
+    let owner = ou.to_uppercase();
+    let mut s = open(&sp, &pw).unwrap();
+    let src = |s: &mut Box<dyn Session>, folder: &str, name: &str, kind| s.source(&[owner.clone(), folder.into(), name.into()], kind);
+    let pkg = src(&mut s, "packages", "ZZ_PKG", ObjKind::Package).unwrap();
+    assert!(pkg.contains(&format!("CREATE OR REPLACE package \"{owner}\".zz_pkg as")) || pkg.contains(&format!("\"{owner}\".\"ZZ_PKG\"")), "{pkg}");
+    assert!(pkg.contains("function two return number"), "{pkg}");
+    let v = src(&mut s, "views", "ZZ_V", ObjKind::View).unwrap();
+    assert!(v.contains("select 1 as one from dual"), "{v}");
+    let t = src(&mut s, "tables", "ZZ_T", ObjKind::Table).unwrap();
+    assert!(t.contains("NUMBER(10)") && t.contains("NOT NULL") && t.contains("PRIMARY KEY"), "{t}");
+    let q = src(&mut s, "sequences", "ZZ_S", ObjKind::Sequence).unwrap();
+    assert!(q.contains("SEQUENCE") && q.contains("ZZ_S"), "{q}");
+    eprintln!("{pkg}\n{v}\n{t}\n{q}");
+}
