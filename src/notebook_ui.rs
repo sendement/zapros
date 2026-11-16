@@ -22,6 +22,8 @@ enum Op {
     Explain(String),
     /// What the cell runs (or loads) stops.
     Stop(String),
+    /// A hung cell's run ended by force.
+    Force(String),
     Pin(String),
     Unpin(usize),
     Clear(String),
@@ -372,338 +374,375 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
                 let has_out = app.rt.get(&key).is_some_and(|r| !r.results.is_empty() || !r.output.is_empty() || !r.log.is_empty());
-                let shade_at = ui.painter().add(egui::Shape::Noop);
                 let inner = ui.max_rect();
-                // Its header: kind, run, what it gave; moving, adding, deleting.
-                let head = ui.horizontal(|ui| {
-                    // A grip: dragged, the cell goes up or down.
-                    // (Not while filtered: the cells hidden would be in the way.)
-                    let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), if filtering { egui::Sense::hover() } else { egui::Sense::drag() });
-                    grip.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "⠿"));
-                    let gc = if grip.hovered() || grip.dragged() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-                    if !crate::icons::paint(ui, gr, crate::icons::Ic::Grip, 16.0, gc) {
-                        ui.painter().text(gr.center(), egui::Align2::CENTER_CENTER, "⠿", egui::FontId::proportional(14.0), gc);
-                    }
-                    let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(t("Тянуть — переставить блок", "Drag: move the cell"));
-                    if grip.drag_started() {
-                        if let Some(p) = ctx.pointer_interact_pos() {
-                            ctx.data_mut(|d| d.insert_temp(lift_id, (i, p.y)));
+                // Its header's place is kept; the header is drawn after the body
+                // (over it), at the top of the view while the cell's scrolled
+                // up under it.
+                let head_id = egui::Id::new(("nb-head-h", &cell.id));
+                let head_h: f32 = ctx.data(|d| d.get_temp(head_id)).unwrap_or(26.0);
+                let slot = ui.allocate_exact_size(egui::vec2(ui.available_width(), head_h), egui::Sense::hover()).0;
+                (|ui: &mut egui::Ui| {
+                    if cell.collapsed && !filtering {
+                        // Folded: its first line, a click opens it.
+                        let first = cell.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+                        let more = cell.text.trim().lines().count().saturating_sub(1);
+                        let label = if more > 0 { format!("{first}   ⋯ {more}") } else { first.to_string() };
+                        let r = ui.add(egui::Label::new(RichText::new(label).monospace().weak()).truncate().sense(egui::Sense::click())).on_hover_text(t("Свёрнуто — щелчок развернёт", "Folded: click to open"));
+                        if r.clicked() {
+                            ops.push(Op::Fold(i));
                         }
+                        return;
                     }
-                    if grip.dragged() {
-                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                        dragging = Some(i);
-                    }
-                    if grip.drag_stopped() {
-                        dropped = Some(i);
-                        ctx.data_mut(|d| d.remove::<(usize, f32)>(lift_id));
-                    }
-                    let fold = ui.add(egui::Button::new("").min_size(egui::vec2(24.0, 24.0)));
-                    crate::ui::paint_chevron(ui.painter(), fold.rect.center(), 11.0, if cell.collapsed { 0.0 } else { 1.0 }, if fold.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
-                    let fold = fold.on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
-                    if fold.clicked() {
-                        ops.push(Op::Fold(i));
-                    }
-                    ui.label(RichText::new(format!("[{}]", i + 1)).weak().small().monospace());
-                    // Its labels (a click: the menu to set them) and when it was made.
-                    // (The dots only draw; their row as a whole takes the click.)
-                    let shown = ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for &k in &cell.labels {
-                            label_dot(ui, color_of(&labels, k as usize), Dot::On, 11.0, egui::Sense::hover());
-                        }
-                        if cell.labels.is_empty() {
-                            label_dot(ui, None, Dot::Off, 11.0, egui::Sense::hover());
-                        }
-                    });
-                    let r = ui.interact(shown.response.rect.expand(2.0), ui.id().with(("cell-labels", &cell.id)), egui::Sense::click());
-                    if r.hovered() {
-                        ui.painter().rect_stroke(shown.response.rect.expand(2.0), 4.0, Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color), egui::StrokeKind::Inside);
-                    }
-                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "labels"));
-                    let r = r.on_hover_text(t("Метки блока", "The cell's labels"));
-                    egui::Popup::menu(&r).show(|ui| {
-                        for k in 0..labels.len() {
-                            let mut on = cell.labels.contains(&(k as u8));
-                            ui.horizontal(|ui| {
-                                label_dot(ui, color_of(&labels, k), Dot::On, 12.0, egui::Sense::hover());
-                                if ui.checkbox(&mut on, label_name(&labels, k)).changed() {
-                                    ops.push(Op::Label(i, k as u8));
+                    match cell.kind {
+                        CellKind::Sql => {
+                            let mut text = cell.text.clone();
+                            let mut rt = app.rt.remove(&key).unwrap_or_default();
+                            let issues = std::mem::take(&mut rt.issues);
+                            let server_err = rt.server_err.clone();
+                            let rows = text.lines().count().max(2) + 1;
+                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows };
+                            let id = egui::Id::new(("cell", &tab.id, &cell.id));
+                            // The code on a rounded ground of its own (a shade
+                            // off the cell's), as wide as the output's table.
+                            let v = ui.visuals();
+                            let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
+                            let out = egui::Frame::NONE
+                                .fill(ground)
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin { left: 0, right: 4, top: 2, bottom: 2 })
+                                .outer_margin(egui::Margin { left: 0, right: crate::ui::TABLE_BAR_ROOM as i8, top: 0, bottom: 0 })
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    egui::ScrollArea::horizontal().id_salt(("cell-h", &cell.id)).show(ui, |ui| editor::show(ui, id, &mut text, &mut rt.ed, &cx)).inner
+                                })
+                                .inner;
+                            rt.issues = issues;
+                            if ctx.memory(|m| m.has_focus(id)) || !out.actions.is_empty() {
+                                new_focus = Some(cell.id.clone());
+                            }
+                            actions.extend(out.actions);
+                            if out.changed {
+                                rt.server_err = None;
+                                ops_text(app, &tab.id, &cell.id, text);
+                            }
+                            app.rt.insert(key.clone(), rt);
+                            // Its output: the same results as a tab's, in a box of its own.
+                            let r = &app.rt[&key];
+                            if !r.results.is_empty() || !r.log.is_empty() || !r.output.is_empty() {
+                                let usual = if r.results.is_empty() { 110.0 } else { 300.0 };
+                                // Being dragged: the height as the drag goes.
+                                let drag_id = egui::Id::new(("cell-out-h", &cell.id));
+                                let h = ctx.data(|d| d.get_temp::<f32>(drag_id)).unwrap_or(if cell.out_h > 0.0 { cell.out_h } else { usual });
+                                // Its top edge: pulled up, the output grows upward (the
+                                // notebook scrolls along so the edge stays under the mouse),
+                                // as the results panel's edge does.
+                                let (edge, top) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
+                                let top = top.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода", "Drag: the output's height"));
+                                let c = if top.hovered() || top.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
+                                // (From where the grounds' roundings start.)
+                                ui.painter().hline(egui::Rangef::new(edge.left() + 6.0, edge.right() - 6.0 - crate::ui::TABLE_BAR_ROOM), edge.center().y, Stroke::new(if top.hovered() || top.dragged() { 2.0 } else { 1.0 }, c));
+                                if top.dragged() {
+                                    let dy = top.drag_delta().y;
+                                    let nh = (h - dy).clamp(80.0, 1600.0);
+                                    ctx.data_mut(|d| d.insert_temp(drag_id, nh));
+                                    // (Grown by so much: everything moves up by as much.)
+                                    pull += nh - h;
                                 }
-                            });
-                        }
-                    });
-                    if !cell.created.is_empty() {
-                        let when = chrono::NaiveDateTime::parse_from_str(&cell.created, "%Y-%m-%d %H:%M").map(|d| d.format("%d.%m %H:%M").to_string()).unwrap_or_else(|_| cell.created.clone());
-                        ui.label(RichText::new(when).weak().small()).on_hover_text(format!("{} {}", t("Создан", "Made"), cell.created));
-                    }
-                    for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, if narrow { "MD" } else { "Markdown" })] {
-                        if ui.selectable_label(cell.kind == k, name).clicked() && cell.kind != k {
-                            ops.push(Op::Kind(i, k));
-                        }
-                    }
-                    if cell.kind == CellKind::Markdown {
-                        // Shown or its text being edited.
-                        ui.separator();
-                        let editing = md_now.contains(&cell.id);
-                        if ui.selectable_label(!editing, t("Просмотр", "View")).on_hover_text(t("Показать оформленным   Esc", "Show it formatted   Esc")).clicked() {
-                            md_now.remove(&cell.id);
-                        }
-                        if ui.selectable_label(editing, t("Правка", "Edit")).on_hover_text(t("Редактировать текст (или двойной щелчок по нему)", "Edit the text (or double-click it)")).clicked() && !editing {
-                            md_now.insert(cell.id.clone());
-                            ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), cell.id.clone()));
-                        }
-                    }
-                    if cell.kind == CellKind::Sql {
-                        ui.separator();
-                        if ui.add_enabled(!running, tinted(lbl("▶", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
-                            ops.push(Op::Run(cell.id.clone()));
-                        }
-                        if ui.add_enabled(!running, tinted(lbl("🔍", t("План", "Plan")), crate::ui::BLUE)).on_hover_text(t("План запроса блока   Ctrl+E / F7", "The cell's plan   Ctrl+E / F7")).clicked() {
-                            ops.push(Op::Explain(cell.id.clone()));
-                        }
-                        let loading = app.rt.get(&key).is_some_and(|r| r.results.iter().any(|v| v.loading.is_some()));
-                        if running || loading {
-                            if ui.add(tinted(lbl("■", t("Стоп", "Stop")), crate::ui::RED)).on_hover_text(t("Остановить блок   Shift+Esc — все блоки", "Stop the cell   Shift+Esc: every cell")).clicked() {
-                                ops.push(Op::Stop(key.clone()));
+                                if top.drag_stopped() {
+                                    ops.push(Op::Height(i, h));
+                                    ctx.data_mut(|d| d.remove::<f32>(drag_id));
+                                }
+                                ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
+                                    ui.set_min_height(h);
+                                    ui.set_max_height(h);
+                                    ui.push_id(("cell-out", &cell.id), |ui| crate::results::panel_for(app, ui, &key));
+                                });
+                                // The grip under it: drag to make it taller or lower.
+                                let (grip, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::click_and_drag());
+                                let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода; двойной щелчок — обычная", "Drag: the output's height; double-click: the usual"));
+                                let c = if resp.hovered() || resp.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
+                                ui.painter().line_segment([egui::pos2(grip.center().x - 24.0, grip.center().y), egui::pos2(grip.center().x + 24.0, grip.center().y)], Stroke::new(3.0, c));
+                                if resp.dragged() {
+                                    let nh = (h + resp.drag_delta().y).clamp(80.0, 1600.0);
+                                    ctx.data_mut(|d| d.insert_temp(drag_id, nh));
+                                }
+                                if resp.drag_stopped() {
+                                    ops.push(Op::Height(i, h));
+                                    ctx.data_mut(|d| d.remove::<f32>(drag_id));
+                                }
+                                if resp.double_clicked() {
+                                    ops.push(Op::Height(i, 0.0));
+                                }
                             }
                         }
-                        if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
-                            ui.add(egui::Spinner::new().size(14.0));
-                            crate::app::stopwatch_label(ui, since, true);
-                        } else if let Some((took, cancelled)) = app.rt.get(&key).and_then(|r| r.last_run) {
-                            crate::app::last_run_label(ui, took, cancelled);
-                        }
-                        if crate::sql::notebook::parse_with(cell.text.trim().trim_end_matches(';'), dialect).is_some_and(|w| w.main.is_empty()) {
-                            ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
+                        CellKind::Markdown => {
+                            if md_edit.contains(&cell.id) {
+                                let mut text = cell.text.clone();
+                                let lines = text.lines().count().max(3);
+                                let md_id = egui::Id::new(("md", &cell.id));
+                                let r = ui.add(egui::TextEdit::multiline(&mut text).id(md_id).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(lines).hint_text(t("# Заголовок, **жирный**, *курсив*, `код`, - список   (правый щелчок — ещё)", "# Heading, **bold**, *italic*, `code`, - list   (right click: more)")));
+                                let mut changed = r.changed();
+                                // What's picked as of before a right click (a press
+                                // moves egui's caret): the menu works on it.
+                                let sel_key = md_id.with("sel");
+                                if !ctx.input(|i| i.pointer.secondary_pressed() || i.pointer.secondary_down()) {
+                                    if let Some(cr) = egui::TextEdit::load_state(&ctx, md_id).and_then(|s| s.cursor.char_range()) {
+                                        ctx.data_mut(|d| d.insert_temp(sel_key, (cr.primary.index.0, cr.secondary.index.0)));
+                                    }
+                                }
+                                r.context_menu(|ui| {
+                                    let (p, q) = ctx.data(|d| d.get_temp::<(usize, usize)>(sel_key)).unwrap_or((text.chars().count(), text.chars().count()));
+                                    let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+                                    let (a, b) = (byte(p.min(q)), byte(p.max(q)));
+                                    for (k, group) in crate::md::MENU.iter().enumerate() {
+                                        if k > 0 {
+                                            ui.separator();
+                                        }
+                                        for op in group.iter() {
+                                            let row = ui.horizontal(|ui| {
+                                                let r = ui.button(op.label());
+                                                ui.label(RichText::new(op.hint()).monospace().weak());
+                                                r
+                                            });
+                                            if row.inner.clicked() {
+                                                let (s, x, y) = crate::md::apply(&text, a, b, *op);
+                                                let ch = |b: usize| s[..b].chars().count();
+                                                let (cx, cy) = (ch(x), ch(y));
+                                                text = s;
+                                                changed = true;
+                                                let mut st = egui::TextEdit::load_state(&ctx, md_id).unwrap_or_default();
+                                                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(cx), egui::text::CCursor::new(cy))));
+                                                st.store(&ctx, md_id);
+                                                ctx.memory_mut(|m| m.request_focus(md_id));
+                                                ui.close();
+                                            }
+                                        }
+                                    }
+                                });
+                                if changed {
+                                    ops_text(app, &tab.id, &cell.id, text);
+                                }
+                                if r.has_focus() {
+                                    new_focus = Some(cell.id.clone());
+                                }
+                                // Just switched to: the caret goes in.
+                                let want = egui::Id::new("md-focus");
+                                if ctx.data(|d| d.get_temp::<String>(want)).as_deref() == Some(cell.id.as_str()) {
+                                    r.request_focus();
+                                    ctx.data_mut(|d| d.remove::<String>(want));
+                                }
+                                // Done: Esc or Ctrl+Enter (or the switch).
+                                if r.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::Enter))) {
+                                    md_now.remove(&cell.id);
+                                    r.surrender_focus();
+                                }
+                            } else {
+                                let r = ui.scope(|ui| markdown(ui, &cell.text)).response;
+                                let r = ui.interact(r.rect, egui::Id::new(("md-view", &cell.id)), egui::Sense::click()).on_hover_text(t("Двойной щелчок — редактировать", "Double-click to edit"));
+                                if r.double_clicked() || (cell.text.trim().is_empty() && r.clicked()) {
+                                    md_now.insert(cell.id.clone());
+                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), cell.id.clone()));
+                                    new_focus = Some(cell.id.clone());
+                                }
+                            }
                         }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("🗑").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Удалить блок", "Delete the cell")).clicked() {
-                            ops.push(Op::Delete(i));
+                })(ui);
+                let bottom = ui.min_rect().bottom();
+                let top = if lift.is_none() { slot.top().max(ui.clip_rect().top() + 6.0).min(bottom - head_h) } else { slot.top() }.max(slot.top());
+                let stuck = top > slot.top() + 0.5;
+                let hrect = egui::Rect::from_min_size(egui::pos2(slot.left(), top), slot.size());
+                let head = ui.scope_builder(egui::UiBuilder::new().max_rect(hrect), |ui| {
+                    let band = egui::Rect::from_min_max(egui::pos2(inner.left() - 8.0, top - 6.0), egui::pos2(inner.right() + 8.0, top + head_h + 3.0));
+                    let mut under = Vec::new();
+                    if stuck {
+                        // Over the body: opaque, a shade under it, and the body
+                        // beneath out of the pointer's reach.
+                        under.push(egui::Shape::rect_filled(band, 0.0, ui.visuals().panel_fill));
+                        let shadow = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom()), egui::pos2(band.right(), band.bottom() + 5.0));
+                        under.push(egui::Shape::rect_filled(shadow, 0.0, Color32::from_black_alpha(if dark { 90 } else { 30 })));
+                        ui.interact(band, egui::Id::new(("nb-head-cover", &cell.id)), egui::Sense::click());
+                    }
+                    if let Some((c, k)) = shade {
+                        let round = if stuck { egui::CornerRadius::ZERO } else { egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 } };
+                        let line = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom() - 2.0), band.max);
+                        under.push(egui::Shape::rect_filled(band, round, c.gamma_multiply(if dark { 0.22 } else { 0.16 } * k)));
+                        under.push(egui::Shape::rect_filled(line, 0.0, c.gamma_multiply(0.85 * k)));
+                    }
+                    ui.painter().extend(under);
+                    // Its header: kind, run, what it gave; moving, adding, deleting.
+                    let r = ui.horizontal(|ui| {
+                        // A grip: dragged, the cell goes up or down.
+                        // (Not while filtered: the cells hidden would be in the way.)
+                        let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), if filtering { egui::Sense::hover() } else { egui::Sense::drag() });
+                        grip.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "⠿"));
+                        let gc = if grip.hovered() || grip.dragged() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+                        if !crate::icons::paint(ui, gr, crate::icons::Ic::Grip, 16.0, gc) {
+                            ui.painter().text(gr.center(), egui::Align2::CENTER_CENTER, "⠿", egui::FontId::proportional(14.0), gc);
                         }
-                        if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Ниже", "Down")).clicked() {
-                            ops.push(Op::Down(i));
-                        }
-                        if ui.add_enabled(i > 0, egui::Button::new("⏶").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Выше", "Up")).clicked() {
-                            ops.push(Op::Up(i));
-                        }
-                        egui::containers::menu::MenuButton::from_button(egui::Button::new("+").min_size(egui::vec2(28.0, 24.0))).ui(ui, |ui| {
-                            if ui.button(t("SQL-блок ниже", "SQL cell below")).clicked() {
-                                ops.push(Op::Add(i + 1, CellKind::Sql));
-                                ui.close();
+                        let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(t("Тянуть — переставить блок", "Drag: move the cell"));
+                        if grip.drag_started() {
+                            if let Some(p) = ctx.pointer_interact_pos() {
+                                ctx.data_mut(|d| d.insert_temp(lift_id, (i, p.y)));
                             }
-                            if ui.button(t("Markdown-блок ниже", "Markdown cell below")).clicked() {
-                                ops.push(Op::Add(i + 1, CellKind::Markdown));
-                                ui.close();
+                        }
+                        if grip.dragged() {
+                            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                            dragging = Some(i);
+                        }
+                        if grip.drag_stopped() {
+                            dropped = Some(i);
+                            ctx.data_mut(|d| d.remove::<(usize, f32)>(lift_id));
+                        }
+                        let fold = ui.add(egui::Button::new("").min_size(egui::vec2(24.0, 24.0)));
+                        crate::ui::paint_chevron(ui.painter(), fold.rect.center(), 11.0, if cell.collapsed { 0.0 } else { 1.0 }, if fold.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
+                        let fold = fold.on_hover_text(if cell.collapsed { t("Развернуть блок", "Unfold the cell") } else { t("Свернуть блок", "Fold the cell") });
+                        if fold.clicked() {
+                            ops.push(Op::Fold(i));
+                        }
+                        ui.label(RichText::new(format!("[{}]", i + 1)).weak().small().monospace());
+                        // Its labels (a click: the menu to set them) and when it was made.
+                        // (The dots only draw; their row as a whole takes the click.)
+                        let shown = ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for &k in &cell.labels {
+                                label_dot(ui, color_of(&labels, k as usize), Dot::On, 11.0, egui::Sense::hover());
                             }
-                            if ui.button(t("SQL-блок выше", "SQL cell above")).clicked() {
-                                ops.push(Op::Add(i, CellKind::Sql));
-                                ui.close();
+                            if cell.labels.is_empty() {
+                                label_dot(ui, None, Dot::Off, 11.0, egui::Sense::hover());
                             }
                         });
-                        // Its text to the clipboard; a SQL cell's own formatting.
-                        if ui.add(tinted("🗐".into(), crate::ui::BLUE).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Скопировать текст блока", "Copy the cell's text")).clicked() {
-                            ctx.copy_text(cell.text.clone());
+                        let r = ui.interact(shown.response.rect.expand(2.0), ui.id().with(("cell-labels", &cell.id)), egui::Sense::click());
+                        if r.hovered() {
+                            ui.painter().rect_stroke(shown.response.rect.expand(2.0), 4.0, Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color), egui::StrokeKind::Inside);
                         }
-                        if cell.kind == CellKind::Sql && ui.add(tinted("✨".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Форматировать этот блок", "Format this cell")).clicked() {
-                            ops.push(Op::Format(i));
-                        }
-                        if cell.kind == CellKind::Sql {
-                            ui.separator();
-                            if has_out && ui.add(egui::Button::new("✖").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Очистить вывод (сохранённый остаётся)", "Clear the output (a kept one stays)")).clicked() {
-                                ops.push(Op::Clear(key.clone()));
-                            }
-                            let pin = ui.add_enabled(has_out && !running, tinted("📌".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Сохранить вывод блока на диск (иначе он живёт только до закрытия)", "Keep the cell's output on disk (else it lives only until closing)"));
-                            if pin.clicked() {
-                                ops.push(Op::Pin(cell.id.clone()));
-                            }
-                            if let Some(s) = &cell.saved {
-                                let r = ui.label(RichText::new(format!("📌 {}", s.when)).small().weak()).on_hover_text(t("Сохранённый вывод; правый щелчок — убрать", "Kept output; right click to drop it"));
-                                r.context_menu(|ui| {
-                                    if ui.button(t("Убрать сохранённый вывод", "Drop the kept output")).clicked() {
-                                        ops.push(Op::Unpin(i));
-                                        ui.close();
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "labels"));
+                        let r = r.on_hover_text(t("Метки блока", "The cell's labels"));
+                        egui::Popup::menu(&r).show(|ui| {
+                            for k in 0..labels.len() {
+                                let mut on = cell.labels.contains(&(k as u8));
+                                ui.horizontal(|ui| {
+                                    label_dot(ui, color_of(&labels, k), Dot::On, 12.0, egui::Sense::hover());
+                                    if ui.checkbox(&mut on, label_name(&labels, k)).changed() {
+                                        ops.push(Op::Label(i, k as u8));
                                     }
                                 });
                             }
+                        });
+                        if !cell.created.is_empty() {
+                            let when = chrono::NaiveDateTime::parse_from_str(&cell.created, "%Y-%m-%d %H:%M").map(|d| d.format("%d.%m %H:%M").to_string()).unwrap_or_else(|_| cell.created.clone());
+                            ui.label(RichText::new(when).weak().small()).on_hover_text(format!("{} {}", t("Создан", "Made"), cell.created));
                         }
-                    });
-                })
-                .response;
-                if let Some((c, k)) = shade {
-                    let r = egui::Rect::from_min_max(egui::pos2(inner.left() - 8.0, head.rect.top() - 6.0), egui::pos2(inner.right() + 8.0, head.rect.bottom() + 3.0));
-                    let round = egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
-                    let line = egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 2.0), r.max);
-                    ui.painter().set(shade_at, egui::Shape::Vec(vec![
-                        egui::Shape::rect_filled(r, round, c.gamma_multiply(if dark { 0.22 } else { 0.16 } * k)),
-                        egui::Shape::rect_filled(line, 0.0, c.gamma_multiply(0.85 * k)),
-                    ]));
-                }
-                if cell.collapsed && !filtering {
-                    // Folded: its first line, a click opens it.
-                    let first = cell.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-                    let more = cell.text.trim().lines().count().saturating_sub(1);
-                    let label = if more > 0 { format!("{first}   ⋯ {more}") } else { first.to_string() };
-                    let r = ui.add(egui::Label::new(RichText::new(label).monospace().weak()).truncate().sense(egui::Sense::click())).on_hover_text(t("Свёрнуто — щелчок развернёт", "Folded: click to open"));
-                    if r.clicked() {
-                        ops.push(Op::Fold(i));
-                    }
-                    return;
-                }
-                match cell.kind {
-                    CellKind::Sql => {
-                        let mut text = cell.text.clone();
-                        let mut rt = app.rt.remove(&key).unwrap_or_default();
-                        let issues = std::mem::take(&mut rt.issues);
-                        let server_err = rt.server_err.clone();
-                        let rows = text.lines().count().max(2) + 1;
-                        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows };
-                        let id = egui::Id::new(("cell", &tab.id, &cell.id));
-                        // The code on a rounded ground of its own (a shade
-                        // off the cell's), as wide as the output's table.
-                        let v = ui.visuals();
-                        let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
-                        let out = egui::Frame::NONE
-                            .fill(ground)
-                            .corner_radius(6)
-                            .inner_margin(egui::Margin { left: 0, right: 4, top: 2, bottom: 2 })
-                            .outer_margin(egui::Margin { left: 0, right: crate::ui::TABLE_BAR_ROOM as i8, top: 0, bottom: 0 })
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                egui::ScrollArea::horizontal().id_salt(("cell-h", &cell.id)).show(ui, |ui| editor::show(ui, id, &mut text, &mut rt.ed, &cx)).inner
-                            })
-                            .inner;
-                        rt.issues = issues;
-                        if ctx.memory(|m| m.has_focus(id)) || !out.actions.is_empty() {
-                            new_focus = Some(cell.id.clone());
-                        }
-                        actions.extend(out.actions);
-                        if out.changed {
-                            rt.server_err = None;
-                            ops_text(app, &tab.id, &cell.id, text);
-                        }
-                        app.rt.insert(key.clone(), rt);
-                        // Its output: the same results as a tab's, in a box of its own.
-                        let r = &app.rt[&key];
-                        if !r.results.is_empty() || !r.log.is_empty() || !r.output.is_empty() {
-                            let usual = if r.results.is_empty() { 110.0 } else { 300.0 };
-                            // Being dragged: the height as the drag goes.
-                            let drag_id = egui::Id::new(("cell-out-h", &cell.id));
-                            let h = ctx.data(|d| d.get_temp::<f32>(drag_id)).unwrap_or(if cell.out_h > 0.0 { cell.out_h } else { usual });
-                            // Its top edge: pulled up, the output grows upward (the
-                            // notebook scrolls along so the edge stays under the mouse),
-                            // as the results panel's edge does.
-                            let (edge, top) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
-                            let top = top.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода", "Drag: the output's height"));
-                            let c = if top.hovered() || top.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
-                            // (From where the grounds' roundings start.)
-                            ui.painter().hline(egui::Rangef::new(edge.left() + 6.0, edge.right() - 6.0 - crate::ui::TABLE_BAR_ROOM), edge.center().y, Stroke::new(if top.hovered() || top.dragged() { 2.0 } else { 1.0 }, c));
-                            if top.dragged() {
-                                let dy = top.drag_delta().y;
-                                let nh = (h - dy).clamp(80.0, 1600.0);
-                                ctx.data_mut(|d| d.insert_temp(drag_id, nh));
-                                // (Grown by so much: everything moves up by as much.)
-                                pull += nh - h;
-                            }
-                            if top.drag_stopped() {
-                                ops.push(Op::Height(i, h));
-                                ctx.data_mut(|d| d.remove::<f32>(drag_id));
-                            }
-                            ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
-                                ui.set_min_height(h);
-                                ui.set_max_height(h);
-                                ui.push_id(("cell-out", &cell.id), |ui| crate::results::panel_for(app, ui, &key));
-                            });
-                            // The grip under it: drag to make it taller or lower.
-                            let (grip, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::click_and_drag());
-                            let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(t("Тянуть — высота вывода; двойной щелчок — обычная", "Drag: the output's height; double-click: the usual"));
-                            let c = if resp.hovered() || resp.dragged() { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
-                            ui.painter().line_segment([egui::pos2(grip.center().x - 24.0, grip.center().y), egui::pos2(grip.center().x + 24.0, grip.center().y)], Stroke::new(3.0, c));
-                            if resp.dragged() {
-                                let nh = (h + resp.drag_delta().y).clamp(80.0, 1600.0);
-                                ctx.data_mut(|d| d.insert_temp(drag_id, nh));
-                            }
-                            if resp.drag_stopped() {
-                                ops.push(Op::Height(i, h));
-                                ctx.data_mut(|d| d.remove::<f32>(drag_id));
-                            }
-                            if resp.double_clicked() {
-                                ops.push(Op::Height(i, 0.0));
+                        for (k, name) in [(CellKind::Sql, "SQL"), (CellKind::Markdown, if narrow { "MD" } else { "Markdown" })] {
+                            if ui.selectable_label(cell.kind == k, name).clicked() && cell.kind != k {
+                                ops.push(Op::Kind(i, k));
                             }
                         }
-                    }
-                    CellKind::Markdown => {
-                        if md_edit.contains(&cell.id) {
-                            let mut text = cell.text.clone();
-                            let lines = text.lines().count().max(3);
-                            let md_id = egui::Id::new(("md", &cell.id));
-                            let r = ui.add(egui::TextEdit::multiline(&mut text).id(md_id).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(lines).hint_text(t("# Заголовок, **жирный**, *курсив*, `код`, - список   (правый щелчок — ещё)", "# Heading, **bold**, *italic*, `code`, - list   (right click: more)")));
-                            let mut changed = r.changed();
-                            // What's picked as of before a right click (a press
-                            // moves egui's caret): the menu works on it.
-                            let sel_key = md_id.with("sel");
-                            if !ctx.input(|i| i.pointer.secondary_pressed() || i.pointer.secondary_down()) {
-                                if let Some(cr) = egui::TextEdit::load_state(&ctx, md_id).and_then(|s| s.cursor.char_range()) {
-                                    ctx.data_mut(|d| d.insert_temp(sel_key, (cr.primary.index.0, cr.secondary.index.0)));
-                                }
-                            }
-                            r.context_menu(|ui| {
-                                let (p, q) = ctx.data(|d| d.get_temp::<(usize, usize)>(sel_key)).unwrap_or((text.chars().count(), text.chars().count()));
-                                let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
-                                let (a, b) = (byte(p.min(q)), byte(p.max(q)));
-                                for (k, group) in crate::md::MENU.iter().enumerate() {
-                                    if k > 0 {
-                                        ui.separator();
-                                    }
-                                    for op in group.iter() {
-                                        let row = ui.horizontal(|ui| {
-                                            let r = ui.button(op.label());
-                                            ui.label(RichText::new(op.hint()).monospace().weak());
-                                            r
-                                        });
-                                        if row.inner.clicked() {
-                                            let (s, x, y) = crate::md::apply(&text, a, b, *op);
-                                            let ch = |b: usize| s[..b].chars().count();
-                                            let (cx, cy) = (ch(x), ch(y));
-                                            text = s;
-                                            changed = true;
-                                            let mut st = egui::TextEdit::load_state(&ctx, md_id).unwrap_or_default();
-                                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(cx), egui::text::CCursor::new(cy))));
-                                            st.store(&ctx, md_id);
-                                            ctx.memory_mut(|m| m.request_focus(md_id));
-                                            ui.close();
-                                        }
-                                    }
-                                }
-                            });
-                            if changed {
-                                ops_text(app, &tab.id, &cell.id, text);
-                            }
-                            if r.has_focus() {
-                                new_focus = Some(cell.id.clone());
-                            }
-                            // Just switched to: the caret goes in.
-                            let want = egui::Id::new("md-focus");
-                            if ctx.data(|d| d.get_temp::<String>(want)).as_deref() == Some(cell.id.as_str()) {
-                                r.request_focus();
-                                ctx.data_mut(|d| d.remove::<String>(want));
-                            }
-                            // Done: Esc or Ctrl+Enter (or the switch).
-                            if r.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::Enter))) {
+                        if cell.kind == CellKind::Markdown {
+                            // Shown or its text being edited.
+                            ui.separator();
+                            let editing = md_now.contains(&cell.id);
+                            if ui.selectable_label(!editing, t("Просмотр", "View")).on_hover_text(t("Показать оформленным   Esc", "Show it formatted   Esc")).clicked() {
                                 md_now.remove(&cell.id);
-                                r.surrender_focus();
                             }
-                        } else {
-                            let r = ui.scope(|ui| markdown(ui, &cell.text)).response;
-                            let r = ui.interact(r.rect, egui::Id::new(("md-view", &cell.id)), egui::Sense::click()).on_hover_text(t("Двойной щелчок — редактировать", "Double-click to edit"));
-                            if r.double_clicked() || (cell.text.trim().is_empty() && r.clicked()) {
+                            if ui.selectable_label(editing, t("Правка", "Edit")).on_hover_text(t("Редактировать текст (или двойной щелчок по нему)", "Edit the text (or double-click it)")).clicked() && !editing {
                                 md_now.insert(cell.id.clone());
                                 ctx.data_mut(|d| d.insert_temp(egui::Id::new("md-focus"), cell.id.clone()));
-                                new_focus = Some(cell.id.clone());
                             }
                         }
-                    }
+                        if cell.kind == CellKind::Sql {
+                            ui.separator();
+                            if ui.add_enabled(!running, tinted(lbl("▶", t("Выполнить", "Run")), crate::ui::GREEN)).on_hover_text(t("Выполнить блок   Ctrl+Enter", "Run the cell   Ctrl+Enter")).clicked() {
+                                ops.push(Op::Run(cell.id.clone()));
+                            }
+                            if ui.add_enabled(!running, tinted(lbl("🔍", t("План", "Plan")), crate::ui::BLUE)).on_hover_text(t("План запроса блока   Ctrl+E / F7", "The cell's plan   Ctrl+E / F7")).clicked() {
+                                ops.push(Op::Explain(cell.id.clone()));
+                            }
+                            let loading = app.rt.get(&key).is_some_and(|r| r.results.iter().any(|v| v.loading.is_some()));
+                            let run_now = app.rt.get(&key).and_then(|r| r.run.as_ref());
+                            if run_now.is_some_and(crate::app::Running::hung) {
+                                // The server didn't answer the stop.
+                                if ui.add(crate::ui::force_button(lbl("⚡", t("Прервать", "Kill")))).on_hover_text(crate::ui::force_tip()).clicked() {
+                                    ops.push(Op::Force(key.clone()));
+                                }
+                            } else if running || loading {
+                                let stopping = run_now.is_some_and(|r| r.stop_asked.is_some());
+                                let text = if stopping { t("Останавливается…", "Stopping…") } else { t("Стоп", "Stop") };
+                                if ui.add(tinted(lbl("■", text), crate::ui::RED)).on_hover_text(t("Остановить блок   Shift+Esc — все блоки", "Stop the cell   Shift+Esc: every cell")).clicked() {
+                                    ops.push(Op::Stop(key.clone()));
+                                }
+                                if stopping {
+                                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                                }
+                            }
+                            if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                crate::app::stopwatch_label(ui, since, true);
+                            } else if let Some((took, cancelled)) = app.rt.get(&key).and_then(|r| r.last_run) {
+                                crate::app::last_run_label(ui, took, cancelled);
+                            }
+                            if crate::sql::notebook::parse_with(cell.text.trim().trim_end_matches(';'), dialect).is_some_and(|w| w.main.is_empty()) {
+                                ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new("🗑").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Удалить блок", "Delete the cell")).clicked() {
+                                ops.push(Op::Delete(i));
+                            }
+                            if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Ниже", "Down")).clicked() {
+                                ops.push(Op::Down(i));
+                            }
+                            if ui.add_enabled(i > 0, egui::Button::new("⏶").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Выше", "Up")).clicked() {
+                                ops.push(Op::Up(i));
+                            }
+                            egui::containers::menu::MenuButton::from_button(egui::Button::new("+").min_size(egui::vec2(28.0, 24.0))).ui(ui, |ui| {
+                                if ui.button(t("SQL-блок ниже", "SQL cell below")).clicked() {
+                                    ops.push(Op::Add(i + 1, CellKind::Sql));
+                                    ui.close();
+                                }
+                                if ui.button(t("Markdown-блок ниже", "Markdown cell below")).clicked() {
+                                    ops.push(Op::Add(i + 1, CellKind::Markdown));
+                                    ui.close();
+                                }
+                                if ui.button(t("SQL-блок выше", "SQL cell above")).clicked() {
+                                    ops.push(Op::Add(i, CellKind::Sql));
+                                    ui.close();
+                                }
+                            });
+                            // Its text to the clipboard; a SQL cell's own formatting.
+                            if ui.add(tinted("🗐".into(), crate::ui::BLUE).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Скопировать текст блока", "Copy the cell's text")).clicked() {
+                                ctx.copy_text(cell.text.clone());
+                            }
+                            if cell.kind == CellKind::Sql && ui.add(tinted("✨".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Форматировать этот блок", "Format this cell")).clicked() {
+                                ops.push(Op::Format(i));
+                            }
+                            if cell.kind == CellKind::Sql {
+                                ui.separator();
+                                if has_out && ui.add(egui::Button::new("✖").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Очистить вывод (сохранённый остаётся)", "Clear the output (a kept one stays)")).clicked() {
+                                    ops.push(Op::Clear(key.clone()));
+                                }
+                                let pin = ui.add_enabled(has_out && !running, tinted("📌".into(), crate::ui::VIOLET).min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Сохранить вывод блока на диск (иначе он живёт только до закрытия)", "Keep the cell's output on disk (else it lives only until closing)"));
+                                if pin.clicked() {
+                                    ops.push(Op::Pin(cell.id.clone()));
+                                }
+                                if let Some(s) = &cell.saved {
+                                    let r = ui.label(RichText::new(format!("📌 {}", s.when)).small().weak()).on_hover_text(t("Сохранённый вывод; правый щелчок — убрать", "Kept output; right click to drop it"));
+                                    r.context_menu(|ui| {
+                                        if ui.button(t("Убрать сохранённый вывод", "Drop the kept output")).clicked() {
+                                            ops.push(Op::Unpin(i));
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }).response;
+                    r
+                })
+                .inner;
+                if (head.rect.height() - head_h).abs() > 0.5 {
+                    ctx.data_mut(|d| d.insert_temp(head_id, head.rect.height()));
+                    ctx.request_repaint();
                 }
             });
             // The cell being dragged: lifted onto a layer of its own, moved
@@ -874,6 +913,10 @@ fn apply(app: &mut App, ctx: &egui::Context, op: Op) {
     }
     if let Op::Stop(key) = &op {
         app.cancel_key(key);
+        return;
+    }
+    if let Op::Force(key) = &op {
+        app.force_key(key);
         return;
     }
     if let Op::Pin(c) = &op {

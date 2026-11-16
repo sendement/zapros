@@ -535,3 +535,19 @@ fn locate_on_real_servers() {
         assert!(s.locate(None, "customers", false).unwrap().is_some());
     }
 }
+
+/// A session's id as the server knows it, and ending it from another.
+#[test]
+fn server_sessions_ended_from_outside() {
+    for (var, kind) in [("ZAPROS_TEST_PG", Kind::Postgres), ("ZAPROS_TEST_ORA", Kind::Oracle)] {
+        let Some((sp, pw)) = spec(var, kind) else { continue };
+        let mut a = open(&sp, &pw).unwrap();
+        let mut b = open(&sp, &pw).unwrap();
+        let id = a.server_id().expect("server id");
+        match b.kill(&id) {
+            Ok(()) => assert!(!a.alive() || a.run_limit("select 1 from dual", 1, &mut |_| {}).is_err() || kind == Kind::Postgres && a.run_limit("select 1", 1, &mut |_| {}).is_err(), "{var}: still alive"),
+            // (Oracle: ALTER SYSTEM takes a privilege the user may lack.)
+            Err(e) => assert!(kind == Kind::Oracle && e.message.contains("ORA-01031"), "{var}: {e:?}"),
+        }
+    }
+}

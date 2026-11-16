@@ -495,6 +495,19 @@ impl Session for Ora {
         Ok(qualify(out, &[me]))
     }
 
+    fn server_id(&mut self) -> Option<String> {
+        // (DBMS_DEBUG_JDWP's are open to every user; v$session often isn't.)
+        self.rows("SELECT DBMS_DEBUG_JDWP.CURRENT_SESSION_ID || ',' || DBMS_DEBUG_JDWP.CURRENT_SESSION_SERIAL FROM dual", &[]).ok()?.into_iter().next()?.into_iter().next().filter(|s| s.len() > 2)
+    }
+
+    fn kill(&mut self, id: &str) -> Res<()> {
+        if !id.chars().all(|c| c.is_ascii_digit() || c == ',') {
+            return Err(Failure::new("bad session id"));
+        }
+        self.conn.execute(&format!("ALTER SYSTEM KILL SESSION '{id}' IMMEDIATE"), &[]).map_err(fail)?;
+        Ok(())
+    }
+
     fn canceller(&self) -> Canceller {
         let c = self.conn.clone();
         Arc::new(move || {

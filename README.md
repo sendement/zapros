@@ -156,6 +156,16 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   yellow on a warning (stopped by hand, a server WARNING, an UPDATE /
   DELETE that changed no rows); the colour stays while the cell has the
   focus and fades a few seconds after it's gone.
+- **Notebook cells' headers stick** to the top of the view while the cell
+  is scrolled up under it (over the cell, its buttons working there), until
+  the cell itself is gone.
+- **A hung run ended by force**: when the server doesn't answer Stop within
+  3 seconds, Stop turns into ⚡ Kill (in the toolbar and on a notebook
+  cell; or Shift+Esc again). The session is given up on and a new one
+  opened (its uncommitted changes are lost; runs queued behind on it are
+  dropped), and the hung session is ended on the server from the other
+  one: PostgreSQL `pg_terminate_backend`, Oracle `ALTER SYSTEM KILL
+  SESSION` (when the user may), ClickHouse `KILL QUERY`.
 - **Notebook cells** carry the time they were made and colour labels
   (their colours and names set in the filter's menu, more added, any
   removed); the notebook's filter — text, labels wanted (any / all) or left

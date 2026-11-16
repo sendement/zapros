@@ -571,6 +571,16 @@ impl Session for Pg {
         Ok(qualify(group_relations(rows), &path))
     }
 
+    fn server_id(&mut self) -> Option<String> {
+        self.one("select pg_backend_pid()::text", &[]).ok()
+    }
+
+    fn kill(&mut self, id: &str) -> Res<()> {
+        let pid: i32 = id.parse().map_err(|_| Failure::new("bad pid"))?;
+        let done = self.one("select pg_terminate_backend($1::text::int)::text", &[id])?;
+        if done == "true" { Ok(()) } else { Err(Failure::new(format!("pg_terminate_backend({pid}) = false"))) }
+    }
+
     fn canceller(&self) -> Canceller {
         let token = self.client.cancel_token();
         let tls = self.tls.clone();

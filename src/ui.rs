@@ -810,8 +810,22 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         if ui.add_enabled(running.is_none(), tinted(lbl("⏩", t("Скрипт", "Script")), TEAL)).on_hover_text(tip(t("Выполнить скрипт", "Run script"), "Ctrl+Shift+Enter / F5")).clicked() {
             app.run(&ctx, true, false);
         }
-        if ui.add_enabled(running.is_some(), tinted(lbl("■", t("Стоп", "Stop")), RED)).on_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).on_disabled_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).clicked() {
-            app.cancel();
+        let run_now = app.rt.get(&tab.id).and_then(|r| r.run.as_ref());
+        if run_now.is_some_and(crate::app::Running::hung) {
+            // The server didn't answer the stop.
+            if ui.add(force_button(format!("⚡ {}", t("Прервать", "Kill")))).on_hover_text(force_tip()).clicked() {
+                let id = tab.id.clone();
+                app.force_key(&id);
+            }
+        } else {
+            let stopping = run_now.is_some_and(|r| r.stop_asked.is_some());
+            let text = if stopping { t("Останавливается…", "Stopping…") } else { t("Стоп", "Stop") };
+            if ui.add_enabled(running.is_some(), tinted(lbl("■", text), RED)).on_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).on_disabled_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).clicked() {
+                app.cancel();
+            }
+            if stopping {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
         }
         if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
             app.run(&ctx, false, true);
@@ -1178,3 +1192,16 @@ pub fn keep_arrow(ctx: &egui::Context) {
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("keep-arrow"), pass));
 }
+
+/// The button that ends a hung run by force.
+pub fn force_button(text: String) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(Color32::from_rgb(200, 40, 40))
+}
+
+pub fn force_tip() -> &'static str {
+    t(
+        "Сервер не отвечает на остановку. Прервать принудительно: сессия закрывается и открывается новая (её незафиксированные изменения теряются), а на сервере зависшая сессия завершается — если хватает прав (PostgreSQL: pg_terminate_backend, Oracle: ALTER SYSTEM KILL SESSION).   Shift+Esc ещё раз",
+        "The server doesn't answer the stop. End it by force: the session is closed and a new one opened (its uncommitted changes are lost), and the hung session is ended on the server when the rights allow (PostgreSQL: pg_terminate_backend, Oracle: ALTER SYSTEM KILL SESSION).   Shift+Esc again",
+    )
+}
+

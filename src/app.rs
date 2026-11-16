@@ -177,7 +177,19 @@ pub struct Running {
     pub run: u64,
     pub conn: String,
     pub since: Instant,
+    /// Stop asked for at (the server may not listen: then it's ended by force).
+    pub stop_asked: Option<Instant>,
 }
+
+impl Running {
+    /// Stopped a while ago and still going: ending it by force is offered.
+    pub fn hung(&self) -> bool {
+        self.stop_asked.is_some_and(|t| t.elapsed() >= FORCE_AFTER)
+    }
+}
+
+/// How long a stop gets before ending by force is offered.
+pub const FORCE_AFTER: Duration = Duration::from_secs(3);
 
 /// What a tab has that isn't saved: its results, problems, editor state.
 #[derive(Default)]
@@ -986,7 +998,7 @@ impl App {
         rt.results.clear();
         rt.shown = Pane::Messages;
         rt.server_err = None;
-        rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now() });
+        rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now(), stop_asked: None });
         rt.flag = Some(CellFlag { kind: Flag::Running, quiet: None, from: rt.log.len(), warn: false });
         let l = &self.live[conn];
         l.query.send(Req::Run { run, stmts, limit, go_on: self.settings.continue_on_error });
@@ -1023,6 +1035,18 @@ impl App {
         if self.tab().is_notebook() {
             let prefix = format!("{id}#");
             let running: Vec<String> = self.rt.iter().filter(|(k, r)| k.starts_with(&prefix) && r.run.is_some()).map(|(k, _)| k.clone()).collect();
+            // Asked again once it hangs: ended by force.
+            if running.iter().any(|k| self.rt[k].run.as_ref().is_some_and(Running::hung)) {
+                for k in running {
+                    self.force_key(&k);
+                }
+                return;
+            }
+            for k in &running {
+                if let Some(r) = self.rt.get_mut(k).and_then(|r| r.run.as_mut()) {
+                    r.stop_asked.get_or_insert_with(Instant::now);
+                }
+            }
             let conns: Vec<String> = running.iter().filter_map(|k| self.rt[k].run.as_ref().map(|r| r.conn.clone())).collect();
             for c in conns {
                 if let Some(l) = self.live.get(&c) {
@@ -1052,24 +1076,62 @@ impl App {
             }
             return;
         }
-        if let Some(r) = self.rt.get(&id).and_then(|r| r.run.as_ref()) {
+        // Asked again once it hangs: ended by force.
+        if self.rt.get(&id).and_then(|r| r.run.as_ref()).is_some_and(Running::hung) {
+            self.force_key(&id);
+            return;
+        }
+        if let Some(r) = self.rt.get_mut(&id).and_then(|r| r.run.as_mut()) {
+            r.stop_asked.get_or_insert_with(Instant::now);
             if let Some(l) = self.live.get(&r.conn) {
                 l.query.cancel();
-                // A stuck link: past a few seconds, the worker is dropped
-                // and made anew, the run given up.
-                if r.since.elapsed() > Duration::from_secs(5) && l.query.busy_since().is_some_and(|b| b.elapsed() > Duration::from_secs(5)) {
-                    let conn = r.conn.clone();
-                    let spec = l.spec.clone();
-                    let pw = l.password.clone();
-                    let rt = self.rt.get_mut(&id).unwrap();
-                    rt.run = None;
-                    rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: t("Запрос брошен: сервер не отвечает на отмену, сессия пересоздана", "Run abandoned: the server didn't answer the cancel, session recreated").into(), at: None });
-                    let ctx = self.ctx.clone();
-                    if let Some(l) = self.live.get_mut(&conn) {
-                        l.query = Worker::spawn(spec, pw, self.tx.clone(), ctx);
-                    }
-                }
             }
+        }
+    }
+
+    /// Ends by force what runs under `id`, the server not answering the
+    /// stop: the session's given up on and made anew (what else waited in
+    /// it ends too), and the server's end of it ended from the other one.
+    pub fn force_key(&mut self, id: &str) {
+        let Some(conn) = self.rt.get(id).and_then(|r| r.run.as_ref()).map(|r| r.conn.clone()) else { return };
+        let Some(l) = self.live.get_mut(&conn) else { return };
+        let server = l.query.server_id();
+        l.query.abandon();
+        l.query = Worker::spawn(l.spec.clone(), l.password.clone(), self.tx.clone(), self.ctx.clone());
+        if let Some(sid) = &server {
+            l.meta.send(Req::Kill { id: sid.clone() });
+        }
+        let lost_tx = std::mem::take(&mut l.pending);
+        // Every run on that session: this one and the ones queued behind it.
+        let keys: Vec<String> = self.rt.iter().filter(|(_, r)| r.run.as_ref().is_some_and(|r| r.conn == conn)).map(|(k, _)| k.clone()).collect();
+        let mut dropped = Vec::new();
+        for k in keys {
+            let rt = self.rt.get_mut(&k).unwrap();
+            let r = rt.run.take().unwrap();
+            self.runs.remove(&r.run);
+            dropped.push(r.run);
+            rt.last_run = Some((r.since.elapsed(), true));
+            if let Some(f) = rt.flag.as_mut() {
+                f.kind = Flag::Warn;
+                f.quiet = None;
+            }
+            for v in rt.results.iter_mut().filter(|v| v.cursor.as_ref().is_some_and(|c| c.0 == r.run)) {
+                v.cursor = None;
+                v.loading = None;
+            }
+            let text = if k == id {
+                t("Запрос прерван принудительно: сервер не ответил на остановку, сессия закрыта и открыта заново", "Run ended by force: the server didn't answer the stop, the session was closed and opened anew")
+            } else {
+                t("Запрос снят: его сессия была прервана принудительно", "Run dropped: its session was ended by force")
+            };
+            rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: text.into(), at: None });
+            if lost_tx {
+                rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: t("Незафиксированные изменения той сессии потеряны", "That session's uncommitted changes are lost").into(), at: None });
+            }
+        }
+        self.cursors.retain(|run, _| !dropped.contains(run));
+        if server.is_none() {
+            self.toast(t("Сессия брошена; на сервере запрос может ещё доработать сам", "Session given up on; on the server the query may still run its course"));
         }
     }
 
@@ -1130,6 +1192,13 @@ impl App {
                 continue;
             }
             match ev.what {
+                What::Killed(r) => {
+                    let name = l.spec.title();
+                    match r {
+                        Ok(()) => self.toast(format!("{name}: {}", t("зависшая сессия завершена на сервере", "the hung session was ended on the server"))),
+                        Err(m) => self.toast(format!("{name}: {} ({m})", t("не удалось завершить зависшую сессию на сервере — она закроется, когда запрос вернётся", "couldn't end the hung session on the server; it closes once the query returns"))),
+                    }
+                }
                 What::Connecting => {
                     if from_meta || l.state != ConnState::Ready {
                         l.state = ConnState::Connecting;

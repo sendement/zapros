@@ -2379,3 +2379,81 @@ fn notebook_cells_show_how_they_ran() {
     assert_eq!(h.state().rt[&key(3)].flag.as_ref().map(|f| f.kind), Some(Flag::Warn), "focused: stays");
     assert!((0..3).all(|i| flag(&h, i).is_none()));
 }
+
+#[test]
+fn notebook_header_sticks_while_scrolled() {
+    let long: String = (0..70).map(|i| format!("select {i} as n{i};\n")).collect();
+    let text = format!("-- %%\n{long}-- %%\nselect 1;\n");
+    let (mut h, _g) = harness("nb-sticky", &text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let top_of = |h: &Harness<'static, App>, label: &str| h.get_all_by_label(label).map(|n| n.rect().min.y as f32).fold(f32::MAX, f32::min);
+    let natural = top_of(&h, "[1]");
+    // Scrolled down a good way into the first cell: its header stays on top.
+    let over = egui::pos2(700.0, 400.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(over));
+    for _ in 0..6 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -120.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    for _ in 0..30 {
+        h.step();
+    }
+    let id = h.state().tab().id.clone();
+    let cell0 = h.state().tab().notebook.as_ref().unwrap().cells[0].id.clone();
+    let stuck = top_of(&h, "[1]");
+    assert!((stuck - natural).abs() < 30.0, "header at {stuck}, was {natural}");
+    shot(&mut h, "notebook-sticky");
+    // Its buttons still work there: Run.
+    h.get_all_by_label_contains("Выполнить").filter(|n| !format!("{n:?}").contains("Выполнить все")).min_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y)).unwrap().click();
+    settle(&mut h);
+    let key = crate::app::App::cell_key(&id, &cell0);
+    assert!(h.state().rt.get(&key).is_some_and(|r| !r.results.is_empty()), "the stuck header's Run ran the first cell");
+}
+
+#[test]
+fn hung_run_ended_by_force() {
+    let Ok(pg) = std::env::var("ZAPROS_TEST_PG") else { return };
+    let (mut h, _g) = harness("force", "select pg_sleep(60);\n", true);
+    h.state_mut().ws_mut().conn = Some("pg".into());
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "pg", None);
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let id = h.state().tab().id.clone();
+    let pid = h.state().live["pg"].query.server_id().expect("backend pid");
+    // A stop the server "didn't answer": asked long ago, still running.
+    h.state_mut().rt.get_mut(&id).unwrap().run.as_mut().unwrap().stop_asked = Some(std::time::Instant::now() - Duration::from_secs(10));
+    h.step();
+    shot(&mut h, "force-button");
+    h.get_all_by_label_contains("Прервать").next().expect("the Kill button").click();
+    for _ in 0..100 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let rt = &h.state().rt[&id];
+    assert!(rt.run.is_none());
+    assert!(rt.log.iter().any(|l| l.text.starts_with("Запрос прерван принудительно")), "{:?}", rt.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("завершена на сервере")), "{:?}", h.state().toast);
+    // The backend's gone from the server.
+    let p: Vec<&str> = pg.split(':').collect();
+    let spec = crate::db::Spec { kind: crate::db::Kind::Postgres, host: p[0].into(), port: p[1].parse().unwrap(), database: p[2].into(), user: p[3].into(), tls: crate::db::Tls::Disable, ..Default::default() };
+    let mut s = crate::db::open(&spec, p[4]).unwrap();
+    let left = s.run_limit(&format!("select count(*) from pg_stat_activity where pid = {pid}"), 10, &mut |_| {}).unwrap();
+    match left {
+        crate::db::Outcome::Rows(t) => assert_eq!(t.rows[0][0].as_deref(), Some("0")),
+        o => panic!("{o:?}"),
+    }
+    // The new session works.
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    for _ in 0..10 {
+        h.step();
+    }
+    h.state_mut().cancel();
+    settle(&mut h);
+}

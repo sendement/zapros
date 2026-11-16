@@ -381,6 +381,15 @@ pub trait Session: Send {
     fn tx_after(&mut self, _sql: &str, _ok: bool) {}
     /// Each statement committed on its own, or not.
     fn set_auto(&mut self, _on: bool) {}
+    /// The session as the server knows it, for ending it from another
+    /// one (PostgreSQL's backend pid, Oracle's "sid,serial#").
+    fn server_id(&mut self) -> Option<String> {
+        None
+    }
+    /// Ends the server's session `id` (a hung one given up on).
+    fn kill(&mut self, _id: &str) -> Res<()> {
+        Err(Failure::new("not supported"))
+    }
     /// Commits (or rolls back) the open transaction.
     fn finish(&mut self, _commit: bool) -> Res<()> {
         Err(Failure::new("transactions aren't supported"))
@@ -526,6 +535,8 @@ pub enum Req {
     Apply { key: String, stmts: Vec<String> },
     Relations { schemas: Vec<String> },
     Tx(TxOp),
+    /// The server's session `id` ended (from the other session).
+    Kill { id: String },
     Close,
 }
 
@@ -557,6 +568,8 @@ pub struct Event {
 pub enum What {
     Connecting,
     Connected { version: String },
+    /// A hung session ended on the server (or why not).
+    Killed(Result<(), String>),
     ConnectFailed(String),
     Lost(String),
     Started { run: u64, index: usize, at: usize, sql: String },
@@ -591,6 +604,10 @@ pub struct Worker {
     cancel: Arc<Mutex<Option<Canceller>>>,
     busy: Arc<Mutex<Option<Instant>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Its session as the server knows it.
+    server: Arc<Mutex<Option<String>>>,
+    /// Given up on: once free, it runs nothing more and closes.
+    gone: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Worker {
@@ -600,12 +617,26 @@ impl Worker {
         let cancel: Arc<Mutex<Option<Canceller>>> = Arc::default();
         let busy: Arc<Mutex<Option<Instant>>> = Arc::default();
         let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
-        let (c2, b2, s2) = (cancel.clone(), busy.clone(), stop.clone());
+        let server: Arc<Mutex<Option<String>>> = Arc::default();
+        let gone: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let w = Worker { tx, generation, cancel: cancel.clone(), busy: busy.clone(), stop: stop.clone(), server: server.clone(), gone: gone.clone() };
         std::thread::Builder::new()
             .name(format!("zapros-db-{}", spec.kind.name()))
-            .spawn(move || work(spec, password, rx, events, ctx, generation, c2, b2, s2))
+            .spawn(move || work(spec, password, rx, events, ctx, generation, Shared { cancel, busy, stop, server, gone }))
             .expect("thread");
-        Self { tx, generation, cancel, busy, stop }
+        w
+    }
+
+    /// Its session as the server knows it (when the database tells).
+    pub fn server_id(&self) -> Option<String> {
+        self.server.lock().unwrap().clone()
+    }
+
+    /// Given up on: what's queued is dropped, the session closed once the
+    /// statement that hangs returns (if ever).
+    pub fn abandon(&self) {
+        self.gone.store(true, Ordering::Relaxed);
+        self.cancel();
     }
 
     pub fn send(&self, r: Req) {
@@ -632,8 +663,17 @@ impl Drop for Worker {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, ctx: egui::Context, generation: u64, cancel: Arc<Mutex<Option<Canceller>>>, busy: Arc<Mutex<Option<Instant>>>, stop: Arc<std::sync::atomic::AtomicBool>) {
+/// What a worker's thread shares with its handle.
+struct Shared {
+    cancel: Arc<Mutex<Option<Canceller>>>,
+    busy: Arc<Mutex<Option<Instant>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    server: Arc<Mutex<Option<String>>>,
+    gone: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, ctx: egui::Context, generation: u64, sh: Shared) {
+    let Shared { cancel, busy, stop, server, gone } = sh;
     let conn = spec.id.clone();
     // The saved password, read here: the secret store may take a while.
     let password = if password.is_empty() && spec.save_password && spec.kind != Kind::Sqlite { crate::secrets::get(&spec.id).unwrap_or_default() } else { password };
@@ -653,6 +693,7 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             Ok(mut s) => {
                 s.set_auto(auto.get());
                 *cancel.lock().unwrap() = Some(s.canceller());
+                *server.lock().unwrap() = s.server_id();
                 tell(What::Connected { version: s.version() });
                 *session = Some(s);
                 true
@@ -668,9 +709,16 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
     let mut stash: Option<Req> = None;
     loop {
         let Some(req) = stash.take().or_else(|| rx.recv().ok()) else { break };
+        if gone.load(Ordering::Relaxed) {
+            break;
+        }
         *busy.lock().unwrap() = Some(Instant::now());
         match req {
             Req::Close => break,
+            Req::Kill { id } => {
+                let r = if ensure(&mut session) { session.as_mut().unwrap().kill(&id).map_err(|f| f.message) } else { Err("no connection".into()) };
+                tell(What::Killed(r));
+            }
             Req::Connect => {
                 ensure(&mut session);
             }
