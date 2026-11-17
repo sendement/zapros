@@ -42,8 +42,8 @@ fn byte_at_col(line: &str, col: usize) -> usize {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Ev {
-    /// A bracket, its construct's column.
-    Open(usize),
+    /// A bracket: its construct's column, and its line's indent.
+    Open(usize, usize),
     Close,
     Case(usize),
     /// BEGIN / IF / LOOP: the line's indent; DECLARE (its BEGIN goes on);
@@ -77,6 +77,10 @@ struct Open {
     /// The byte it starts at.
     at: usize,
     col: usize,
+    /// A bracket's line's indent: where its band starts when what's inside
+    /// it is written left of its construct ("create table t as (" with the
+    /// SELECT under "create").
+    home: usize,
     kind: Kind,
     level: usize,
     next: usize,
@@ -99,7 +103,7 @@ struct Stack {
 
 impl Stack {
     fn push(&mut self, col: usize, kind: Kind, level: usize, decl: bool) {
-        self.open.push(Open { at: self.pos, col, kind, level, next: level + 1, decl });
+        self.open.push(Open { at: self.pos, col, home: col, kind, level, next: level + 1, decl });
     }
 
     /// Ends the constructs from `n` on (at `pos`; noted when `rec`).
@@ -139,7 +143,12 @@ impl Stack {
     /// An event (`open`: false — only its closing part).
     fn apply(&mut self, e: Ev, open: bool) {
         match e {
-            Ev::Open(col) if open => self.push(col, Kind::Bracket, self.inner(), false),
+            Ev::Open(col, home) if open => {
+                self.push(col, Kind::Bracket, self.inner(), false);
+                if let Some(o) = self.open.last_mut() {
+                    o.home = home.min(col);
+                }
+            }
             Ev::Case(col) if open => self.push(col, Kind::Case, self.inner(), false),
             Ev::Block(col, decl, from) => {
                 self.hit(col);
@@ -187,7 +196,7 @@ impl Stack {
             Ev::Clause(_, false) => self.hit(0),
             Ev::Enter if open => {
                 let level = self.inner();
-                self.open.push(Open { at: self.pos, col: 0, kind: Kind::Fence, level, next: level, decl: false });
+                self.open.push(Open { at: self.pos, col: 0, home: 0, kind: Kind::Fence, level, next: level, decl: false });
             }
             Ev::Leave => {
                 if let Some(n) = self.open.iter().rposition(|s| s.kind == Kind::Fence) {
@@ -292,7 +301,7 @@ fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<
             Tk::Open if t.text(text) == "(" => {
                 brackets += 1;
                 let ls = g.starts[g.line_of(at)];
-                g.events.push((at, Ev::Open(opener_col(&g.code[ls..at]))));
+                g.events.push((at, Ev::Open(opener_col(&g.code[ls..at]), g.line_indent(at))));
             }
             Tk::Close if t.text(text) == ")" => {
                 brackets -= 1;
@@ -473,7 +482,14 @@ pub fn analyse(code: &str, d: Dialect) -> (Vec<Band>, Vec<Block>) {
         for ev in events[e..].iter().take_while(|ev| ev.0 == first) {
             here.apply(ev.1, false);
         }
-        let o: Vec<&Open> = here.open.iter().filter(|o| o.kind != Kind::Fence).collect();
+        // A bracket whose inside is written left of its construct: its band
+        // from its line's indent instead.
+        let o: Vec<Open> = here
+            .open
+            .iter()
+            .filter(|o| o.kind != Kind::Fence)
+            .map(|o| if o.kind == Kind::Bracket && o.col > w && o.home < w { Open { col: o.home, ..*o } } else { *o })
+            .collect();
         let at = |col: usize| if into.is_some() { byte_at(l, col) } else { byte_at_col(l, col) };
         let mut mine = Vec::new();
         for (n, c) in o.iter().enumerate() {
@@ -600,6 +616,20 @@ mod tests {
     }
 
     #[test]
+    fn bracket_written_left_of_its_word() {
+        // CREATE TABLE … AS ( with the query under "create": the bracket's
+        // band from its line's indent, the clauses' inside it.
+        let src = "create table t as (\n  select a\n       , b\n    from x\n   where a > 1\n)";
+        let c = cols(src, Dialect::Postgres);
+        assert_eq!(c[1], vec![(0, 2, 0)]);
+        assert_eq!(c[2], vec![(0, 2, 0), (2, 7, 1)]);
+        assert_eq!(c[3], vec![(0, 2, 0), (2, 4, 1)]);
+        // Written under its word (IN (): as before, nothing new.
+        let c = cols("select 1\n where x in (\n                select 1\n              )", Dialect::Postgres);
+        assert!(c[2].iter().all(|b| b.2 != 0 || b.0 > 0 || b.1 <= 1), "{c:?}");
+    }
+
+    #[test]
     fn strings_have_none() {
         let src = "select 'a\n    b' from t\n  where x = 1";
         let c = cols(src, Dialect::Postgres);
@@ -639,7 +669,8 @@ mod tests {
                 assert!(w[0].1 <= w[1].0, "{c:?}");
             }
         }
-        assert_eq!(c[3], vec![(0, 4, 0), (4, 9, 2)], "{c:?}");
+        // The bracket's band from its line's indent (under "cursor"), the clause inside.
+        assert_eq!(c[3], vec![(0, 2, 0), (2, 4, 1), (4, 9, 2)], "{c:?}");
     }
 
     #[test]

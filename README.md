@@ -73,6 +73,11 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   ALL_MVIEWS, ALL_SEQUENCES, ALL_SYNONYMS and the table's columns, keys
   and comments (a package's body shows as far as Oracle lets the user see
   it).
+- **The object tree is kept**: on disk between runs (shown at once on
+  start, looked at again once its connection is up), and in place on a
+  refresh — the old list stays till the new one's in, then what's new
+  comes into it and what's gone goes; a refresh that fails leaves it as it
+  was.
 - **Object tree** per connection: schemas / databases, tables, views,
   materialized views, functions, procedures, packages, sequences, triggers,
   types, synonyms, dictionaries, jobs (Oracle Scheduler, pg_cron); columns,
@@ -187,7 +192,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Notebook cells' headers stick** to the top of the view while the cell
   is scrolled up under it (over the cell, its buttons working there), until
   the cell itself is gone. A cell being dragged by its grip folds to its
-  header for the move.
+  header for the move. The notebook scrolls on until its last cell is at
+  the top; the wheel scrolls it while a selection's dragged in a cell,
+  whatever the cells below hold.
 - **A hung run ended by force**: when the server doesn't answer Stop within
   3 seconds, Stop turns into ⚡ Kill (in the toolbar and on a notebook
   cell; or Shift+Esc again). The session is given up on and a new one

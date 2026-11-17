@@ -265,6 +265,12 @@ pub struct App {
     pub cursors: HashMap<u64, String>,
     next_run: u64,
     pub tree: HashMap<(String, Vec<String>), Node>,
+    /// Nodes shown from before (the cache, a refresh asked for): asked for
+    /// again when drawn, what they had shown meanwhile.
+    pub tree_stale: HashSet<(String, Vec<String>)>,
+    /// Asked for again, the old list shown till the new one's in.
+    pub tree_refreshing: HashSet<(String, Vec<String>)>,
+    tree_dirty: bool,
     pub open_nodes: HashSet<(String, Vec<String>)>,
     pub tree_filter: String,
     pub files: HashMap<std::path::PathBuf, Vec<(String, bool)>>,
@@ -387,6 +393,9 @@ impl App {
             cursors: HashMap::new(),
             next_run: 1,
             tree: HashMap::new(),
+            tree_stale: HashSet::new(),
+            tree_refreshing: HashSet::new(),
+            tree_dirty: false,
             open_nodes: HashSet::new(),
             tree_filter: String::new(),
             files: HashMap::new(),
@@ -416,6 +425,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             auto_tried: HashSet::new(),
         };
+        app.load_tree();
         if let Some(p) = app.session.project.clone() {
             app.open_dirs.insert(p);
         }
@@ -474,6 +484,7 @@ impl App {
     }
 
     pub fn save_session(&mut self) {
+        self.save_tree();
         if self.sync.push(&mut self.session).is_ok() {
             self.dirty = false;
             self.last_save = Instant::now();
@@ -540,7 +551,8 @@ impl App {
         meta.send(Req::Connect);
         let id = spec.id.clone();
         let id_ = id.clone();
-        self.tree.retain(|(c, _), _| *c != id);
+        // (What the tree had stays shown, looked at again once drawn.)
+        self.mark_stale(&id, &[]);
         self.live.insert(id, Live { spec, password, query, meta, state: ConnState::Connecting, version: String::new(), rels: Arc::default(), known: Arc::default(), rels_version: 0, rels_loading: false, auto: true, pending: false });
         if let Some(l) = self.live.get_mut(&id_) {
             l.auto = l.spec.auto_commit || !l.spec.kind.transactions();
@@ -628,7 +640,9 @@ impl App {
 
     pub fn disconnect(&mut self, conn: &str) {
         self.live.remove(conn);
-        self.tree.retain(|(c, _), _| c != conn);
+        self.mark_stale(conn, &[]);
+        self.tree_refreshing.retain(|(c, _)| c != conn);
+        self.tree.retain(|(c, _), n| c != conn || matches!(n, Node::Ready(_)));
         self.open_nodes.retain(|(c, _)| c != conn);
         for rt in self.rt.values_mut() {
             if rt.run.as_ref().is_some_and(|r| r.conn == conn) {
@@ -655,8 +669,55 @@ impl App {
 
     pub fn request_children(&mut self, conn: &str, path: Vec<String>) {
         if let Some(l) = self.live.get(conn) {
-            self.tree.insert((conn.to_string(), path.clone()), Node::Loading);
+            let key = (conn.to_string(), path.clone());
+            self.tree_stale.remove(&key);
+            // A list already there stays shown till the new one comes.
+            if matches!(self.tree.get(&key), Some(Node::Ready(_))) {
+                if !self.tree_refreshing.insert(key) {
+                    return;
+                }
+            } else {
+                self.tree.insert(key, Node::Loading);
+            }
             l.meta.send(Req::Children { path });
+        }
+    }
+
+    /// The tree's nodes of `conn` under `path` (all: empty) to be looked at
+    /// again; what they show stays meanwhile.
+    pub fn mark_stale(&mut self, conn: &str, path: &[String]) {
+        let keys: Vec<(String, Vec<String>)> = self.tree.keys().filter(|(c, p)| c == conn && p.starts_with(path)).cloned().collect();
+        self.tree_stale.extend(keys);
+    }
+
+    /// The tree as last seen, from the disk: shown at once, refreshed when
+    /// drawn with its connection up.
+    fn load_tree(&mut self) {
+        let path = config::data_dir().join("tree.json");
+        let Ok(s) = std::fs::read_to_string(path) else { return };
+        let Ok(v) = serde_json::from_str::<Vec<(String, Vec<String>, Vec<crate::db::Obj>)>>(&s) else { return };
+        for (c, p, items) in v {
+            if self.spec(&c).is_some() {
+                self.tree_stale.insert((c.clone(), p.clone()));
+                self.tree.insert((c, p), Node::Ready(items));
+            }
+        }
+    }
+
+    fn save_tree(&mut self) {
+        if !self.tree_dirty {
+            return;
+        }
+        let v: Vec<(&String, &Vec<String>, &Vec<crate::db::Obj>)> = self
+            .tree
+            .iter()
+            .filter_map(|((c, p), n)| match n {
+                Node::Ready(items) if self.spec(c).is_some() => Some((c, p, items)),
+                _ => None,
+            })
+            .collect();
+        if config::save(&config::data_dir().join("tree.json"), &v).is_ok() {
+            self.tree_dirty = false;
         }
     }
 
@@ -1426,7 +1487,7 @@ impl App {
                             if self.open_nodes.contains(&(conn.clone(), p.clone())) {
                                 self.request_children(&conn, p);
                             } else {
-                                self.tree.remove(&(conn.clone(), p));
+                                self.tree_stale.insert((conn.clone(), p));
                             }
                         }
                     }
@@ -1453,11 +1514,21 @@ impl App {
                     }
                 }
                 What::Children { path, items } => {
-                    let node = match items {
-                        Ok(v) => Node::Ready(v),
-                        Err(e) => Node::Failed(e),
-                    };
-                    self.tree.insert((ev.conn.clone(), path), node);
+                    let key = (ev.conn.clone(), path);
+                    let refreshed = self.tree_refreshing.remove(&key);
+                    match items {
+                        Ok(v) => {
+                            // The new list in place of the old: what's new comes in,
+                            // what's gone goes.
+                            self.tree.insert(key, Node::Ready(v));
+                            self.tree_dirty = true;
+                        }
+                        // A refresh that failed: the old list stays.
+                        Err(e) if refreshed && matches!(self.tree.get(&key), Some(Node::Ready(_))) => self.toast(format!("{}: {e}", t("Не удалось обновить дерево", "Couldn't refresh the tree"))),
+                        Err(e) => {
+                            self.tree.insert(key, Node::Failed(e));
+                        }
+                    }
                 }
                 What::Source { path: _, open_as: _, into: Some(into), text } => {
                     let bare = self.settings.format.bare_names;
@@ -1543,7 +1614,7 @@ impl App {
                                 let (path, obj) = (d.path.clone(), d.obj);
                                 self.load_source(&conn, &path, obj, &key);
                                 // The tree's columns and the hints.
-                                self.tree.retain(|(c, p), _| !(c == &conn && p.starts_with(&path)));
+                                self.mark_stale(&conn, &path);
                                 self.refresh_relations(&conn);
                             }
                             Err(e) => d.status = Some(Err(e)),
@@ -1878,6 +1949,7 @@ impl eframe::App for App {
             }
         }
         crate::dialogs::all(self, &ctx);
+        crate::results::export_window(self, &ctx);
         if let Some((m, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(5) {
                 self.toast = None;
@@ -1907,6 +1979,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_tree();
         self.sync.leave(&mut self.session);
     }
 }

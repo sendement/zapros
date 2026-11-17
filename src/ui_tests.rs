@@ -95,7 +95,7 @@ fn settle(h: &mut Harness<'static, App>) {
     for _ in 0..1500 {
         h.step();
         let st = h.state();
-        let busy = st.rt.values().any(|r| r.run.is_some() || r.check_due.is_some()) || st.live.values().any(|l| l.state == ConnState::Connecting || l.rels_loading) || st.tree.values().any(|n| matches!(n, Node::Loading));
+        let busy = st.rt.values().any(|r| r.run.is_some() || r.check_due.is_some()) || st.live.values().any(|l| l.state == ConnState::Connecting || l.rels_loading) || st.tree.values().any(|n| matches!(n, Node::Loading)) || !st.tree_refreshing.is_empty();
         quiet = if busy { 0 } else { quiet + 1 };
         if quiet >= 10 {
             return;
@@ -2563,4 +2563,153 @@ fn table_designer_indexes() {
     let mut got = indexes(&h);
     got.sort();
     assert_eq!(got, [("orders_by_customer".to_string(), "customer_id".to_string()), ("orders_ix2".to_string(), "total DESC".to_string())]);
+}
+
+#[test]
+fn notebook_wheel_scrolls_while_selecting() {
+    let long: String = (1..=80).map(|i| format!("select {i} as n;\n")).collect();
+    let text = format!("-- %%\nselect 0;\n-- %%\n{long}-- %%\nselect 99;\n");
+    let (mut h, _g) = harness("nb-wheel-sel", &text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cell = h.state().tab().notebook.as_ref().unwrap().cells[1].id.clone();
+    // A cell below with results: its table's scroll mustn't take the wheel.
+    let last = h.state().tab().notebook.as_ref().unwrap().cells[2].id.clone();
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, Some(last));
+    settle(&mut h);
+    let key = crate::app::App::cell_key(&tab, &cell);
+    let r = h.state().rt[&key].ed.text_rect.unwrap();
+    let p = egui::pos2(r.left() + 40.0, r.top() + 12.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(p));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerMoved(p + egui::vec2(0.0, 30.0)));
+    h.step();
+    for _ in 0..6 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -200.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    for _ in 0..20 {
+        h.step();
+    }
+    let (a, b) = h.state().rt[&key].ed.cursor.unwrap();
+    let text = h.state().tab().notebook.as_ref().unwrap().cells[1].text.clone();
+    let line = |x: usize| text[..x.min(text.len())].matches('\n').count();
+    shot(&mut h, "nb-wheel-sel");
+    assert!(line(a.max(b)) > 25, "the selection reached line {}", line(a.max(b)));
+    h.input_mut().events.push(egui::Event::PointerButton { pos: p + egui::vec2(0.0, 30.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+}
+
+#[test]
+fn notebook_last_cell_scrolls_to_the_top() {
+    let text = "-- %%\nselect 1;\n-- %%\nselect 2;\n-- %%\nselect 3;\n";
+    let (mut h, _g) = harness("nb-tail", text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let top_of = |h: &Harness<'static, App>, label: &str| h.get_all_by_label(label).map(|n| n.rect().min.y as f32).fold(f32::MAX, f32::min);
+    let first = top_of(&h, "[1]");
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 400.0)));
+    for _ in 0..30 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -200.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    for _ in 0..30 {
+        h.step();
+    }
+    let last = top_of(&h, "[3]");
+    shot(&mut h, "nb-tail");
+    assert!((last - first).abs() < 40.0, "the last cell's header at {last}, the first's was at {first}");
+}
+
+#[test]
+fn tree_refreshes_in_place_and_is_kept() {
+    let (mut h, _g) = harness("tree-keep", SCRIPT, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    for p in [vec![], vec!["tables".to_string()]] {
+        h.state_mut().open_nodes.insert(("lite".into(), p));
+        settle(&mut h);
+    }
+    let key = ("lite".to_string(), vec!["tables".to_string()]);
+    let names = |h: &Harness<'static, App>| match h.state().tree.get(&key) {
+        Some(Node::Ready(v)) => v.iter().map(|o| o.name.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(names(&h), ["customers", "orders"]);
+    // A table made from outside; the folder refreshed: the old list stays
+    // shown meanwhile, then the new one's in.
+    let db = h.state().spec("lite").unwrap().database.clone();
+    rusqlite::Connection::open(&db).unwrap().execute_batch("create table zz_new (x int)").unwrap();
+    h.state_mut().mark_stale("lite", &[]);
+    h.state_mut().request_children("lite", vec!["tables".into()]);
+    assert_eq!(names(&h), ["customers", "orders"], "the old list while refreshing");
+    settle(&mut h);
+    assert_eq!(names(&h), ["customers", "orders", "zz_new"]);
+    rusqlite::Connection::open(&db).unwrap().execute_batch("drop table zz_new").unwrap();
+    h.state_mut().request_children("lite", vec!["tables".into()]);
+    settle(&mut h);
+    assert_eq!(names(&h), ["customers", "orders"]);
+    // Kept on disk: the next start shows it at once, before connecting.
+    h.state_mut().save_session();
+    let b = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(|cc| App::new(cc));
+    match b.state().tree.get(&key) {
+        Some(Node::Ready(v)) => assert_eq!(v.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["customers", "orders"]),
+        _ => panic!("no cached tree"),
+    }
+}
+
+#[test]
+fn export_format_picked() {
+    let (mut h, _g) = harness("export-fmt", SCRIPT, false);
+    focus_editor(&mut h, 30);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    h.get_all_by_label_contains("Экспорт").next().unwrap().click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().export.is_some());
+    shot(&mut h, "export-window");
+    click_at(&mut h, egui::pos2(685.0, 334.0), egui::PointerButton::Primary);
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "export-open");
+    h.get_all_by_label_contains("JSON").next().expect("JSON in the list").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    let f = h.state().export.as_ref().map(|e| e.2.format);
+    assert_eq!(f, Some(crate::export::Format::Json));
+}
+
+#[test]
+fn export_format_picked_in_a_notebook() {
+    let (mut h, _g) = harness("export-fmt-nb", "-- %%\nselect 1 as a;\n-- %%\nselect 2 as b;\n", false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, None);
+    settle(&mut h);
+    h.get_all_by_label_contains("Экспорт").next().unwrap().click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().export.is_some());
+    shot(&mut h, "export-nb-window");
+    let combo = h.get_all_by_label_contains("Формат").next().map(|n| { let r = n.rect(); egui::pos2(r.max.x as f32 + 150.0, ((r.min.y + r.max.y) / 2.0) as f32) }).unwrap();
+    click_at(&mut h, combo, egui::PointerButton::Primary);
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "export-nb-open");
+    h.get_all_by_label_contains("JSON").next().expect("JSON in the list").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().export.as_ref().map(|e| e.2.format), Some(crate::export::Format::Json));
 }

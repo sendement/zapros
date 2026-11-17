@@ -129,7 +129,7 @@ pub fn reload(app: &mut App, ctx: &egui::Context, d: &mut Designer, key: &str) {
 /// The SQL, coloured, as a label (copyable).
 fn sql_view(app: &App, ui: &mut egui::Ui, d: crate::sql::Dialect, sql: &str) {
     let dark = ui.visuals().dark_mode;
-    let cx = crate::editor::Ctx { dialect: d, settings: &app.settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false };
+    let cx = crate::editor::Ctx { dialect: d, settings: &app.settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false, outer_wheel: false };
     let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
     let job = crate::editor::layout(sql, &cx, None, app.settings.font_size * 0.92, mono_bold);
     ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend).selectable(true));
@@ -141,7 +141,7 @@ fn sql_edit(app: &App, ui: &mut egui::Ui, d: crate::sql::Dialect, text: &mut Str
     let settings = app.settings.clone();
     let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
     let mut layouter = |ui: &egui::Ui, s: &dyn egui::TextBuffer, _w: f32| {
-        let cx = crate::editor::Ctx { dialect: d, settings: &settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false };
+        let cx = crate::editor::Ctx { dialect: d, settings: &settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false, outer_wheel: false };
         let job = crate::editor::layout(s.as_str(), &cx, None, settings.font_size * 0.92, mono_bold);
         ui.fonts_mut(|f| f.layout_job(job))
     };

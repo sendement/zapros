@@ -139,6 +139,15 @@ pub struct Ctx<'a> {
     pub rows: usize,
     /// Shown, selectable, not changed (another window is typing in it).
     pub read_only: bool,
+    /// The wheel while selecting goes to the scroll area outside (a
+    /// notebook's), left for it in `OUTER_WHEEL` — scroll areas between
+    /// (a cell's results below) would take it otherwise.
+    pub outer_wheel: bool,
+}
+
+/// Where a notebook cell's editor leaves the wheel for the notebook.
+pub fn outer_wheel_id() -> egui::Id {
+    egui::Id::new("outer-wheel")
 }
 
 pub struct Out {
@@ -1381,7 +1390,14 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     if output.response.dragged() || st.block_drag {
         let d = ctx.input(|i| i.smooth_scroll_delta());
         if d != egui::Vec2::ZERO {
-            ui.scroll_with_delta(d);
+            if cx.outer_wheel {
+                ctx.data_mut(|m| m.insert_temp(outer_wheel_id(), egui::vec2(0.0, d.y)));
+                if d.x != 0.0 {
+                    ui.scroll_with_delta(egui::vec2(d.x, 0.0));
+                }
+            } else {
+                ui.scroll_with_delta(d);
+            }
         }
     }
     block_mouse_and_paint(ui, &ctx, id, text, st, &output, alt_press, under_block, char_w);

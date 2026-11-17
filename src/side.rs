@@ -169,7 +169,7 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
                     ui.close();
                 }
                 if on && ui.button(t("Обновить дерево и подсказки", "Refresh tree and hints")).clicked() {
-                    app.tree.retain(|(c, _), _| *c != spec.id);
+                    app.mark_stale(&spec.id, &[]);
                     app.request_children(&spec.id, Vec::new());
                     app.refresh_relations(&spec.id);
                     ui.close();
@@ -368,6 +368,10 @@ fn matches_filter(app: &App, o: &Obj) -> bool {
 
 fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<String>) {
     let key = (conn.to_string(), path.clone());
+    // Shown from before: looked at again (the old list stays till then).
+    if app.tree_stale.contains(&key) && app.live.contains_key(conn) {
+        app.request_children(conn, path.clone());
+    }
     let items = match app.tree.get(&key) {
         None => {
             if app.live.contains_key(conn) {
@@ -508,7 +512,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                 }
             }
             if !o.leaf && ui.button(t("Обновить", "Refresh")).clicked() {
-                app.tree.retain(|(c, pp), _| !(c == conn && pp.starts_with(&p)));
+                app.mark_stale(conn, &p);
                 app.request_children(conn, p.clone());
                 app.open_nodes.insert(nkey.clone());
                 ui.close();

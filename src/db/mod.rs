@@ -205,7 +205,7 @@ pub type Res<T> = Result<T, Failure>;
 
 /// The object tree: a node's path is the names down to it, e.g.
 /// [schema, "tables", table, "columns"].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Obj {
     pub name: String,
     pub kind: ObjKind,

@@ -374,11 +374,11 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
     if let Some(i) = stop {
         app.fetch_stop(&tab_id, i);
     }
-    export_window(app, ui.ctx());
 }
 
-/// The save-a-result window.
-fn export_window(app: &mut App, ctx: &egui::Context) {
+/// The save-a-result window (once a frame, from the app: a notebook's
+/// cells each draw a results panel).
+pub fn export_window(app: &mut App, ctx: &egui::Context) {
     use crate::export::Format;
     let Some((tab, i, mut e)) = app.export.take() else { return };
     let Some(v) = app.rt.get(&tab).and_then(|r| r.results.get(i)) else { return };

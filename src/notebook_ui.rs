@@ -408,7 +408,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             let issues = std::mem::take(&mut rt.issues);
                             let server_err = rt.server_err.clone();
                             let rows = text.lines().count().max(2) + 1;
-                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows, read_only: held };
+                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows, read_only: held, outer_wheel: true };
                             let id = egui::Id::new(("cell", &tab.id, &cell.id));
                             // The code on a rounded ground of its own (a shade
                             // off the cell's), as wide as the output's table.
@@ -839,7 +839,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 ops.push(Op::Add(usize::MAX, CellKind::Markdown));
             }
         });
-        ui.add_space(40.0);
+        // Room below: the last cell can be scrolled up to the top.
+        let tail = rects.last().map_or(0.0, |r| r.height());
+        ui.add_space((ui.clip_rect().height() - tail - 40.0).max(40.0));
+        // The wheel a cell's selection passed on (see editor::Ctx::outer_wheel):
+        // taken here, after every scroll area inside the cells.
+        if let Some(d) = ctx.data_mut(|m| m.remove_temp::<egui::Vec2>(crate::editor::outer_wheel_id())) {
+            ui.scroll_with_delta(d);
+        }
     });
     if pull != 0.0 {
         if let Some(mut st) = egui::scroll_area::State::load(ui.ctx(), nb_scroll) {
