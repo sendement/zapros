@@ -420,7 +420,9 @@ pub fn quote(name: &str, d: Dialect) -> String {
         Dialect::Postgres | Dialect::Sqlite => c == '$',
         _ => false,
     };
-    let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || also(c)) && name.starts_with(|c: char| c.is_alphabetic() || c == '_') && !keyword;
+    // (ClickHouse reads only Latin letters bare.)
+    let letter = |c: char| c.is_alphanumeric() && (d != Dialect::ClickHouse || c.is_ascii());
+    let plain = !name.is_empty() && name.chars().all(|c| letter(c) || c == '_' || also(c)) && name.starts_with(|c: char| (c.is_alphabetic() && letter(c)) || c == '_') && !keyword;
     let folds = match d {
         Dialect::Postgres => name.chars().any(|c| c.is_uppercase()),
         Dialect::Oracle => name.chars().any(|c| c.is_lowercase()),
@@ -429,7 +431,7 @@ pub fn quote(name: &str, d: Dialect) -> String {
     if plain && !folds {
         name.to_string()
     } else if d == Dialect::ClickHouse {
-        format!("`{name}`")
+        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
     }

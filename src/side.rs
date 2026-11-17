@@ -511,6 +511,19 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                     ui.close();
                 }
             }
+            // A table from a file: on a schema (a database) or its tables.
+            let target = match o.kind {
+                ObjKind::Schema | ObjKind::Database => Some((o.name.clone(), [p.clone(), vec!["tables".into()]].concat())),
+                ObjKind::Folder if o.name == "tables" => Some((if kind == Kind::Sqlite { String::new() } else { path.first().cloned().unwrap_or_default() }, p.clone())),
+                _ => None,
+            };
+            if let Some((schema, folder)) = target {
+                if ui.button(t("Создать таблицу из файла…", "New table from a file…")).on_hover_text(t("CSV, TSV, XLSX, XLS, ODS, JSON: колонки, типы, ключ и индексы — на выбор", "CSV, TSV, XLSX, XLS, ODS, JSON: columns, types, key and indexes to choose")).clicked() {
+                    let start = crate::import_ui::start_dir(app);
+                    app.import = Some(crate::import_ui::ImportDlg::new(conn, kind, &schema, folder, start));
+                    ui.close();
+                }
+            }
             if !o.leaf && ui.button(t("Обновить", "Refresh")).clicked() {
                 app.mark_stale(conn, &p);
                 app.request_children(conn, p.clone());

@@ -296,6 +296,8 @@ pub struct App {
     pub last_frame: Option<Instant>,
     /// The save-a-result window: (tab, result, what).
     pub export: Option<(String, usize, crate::export::Export)>,
+    /// "Table from a file…", while open.
+    pub import: Option<crate::import_ui::ImportDlg>,
     dirty: bool,
     last_save: Instant,
     /// The session shared with the other windows of zapros.
@@ -416,6 +418,7 @@ impl App {
             toast: None,
             last_frame: None,
             export: None,
+            import: None,
             dirty: false,
             last_save: Instant::now(),
             sync,
@@ -1583,6 +1586,8 @@ impl App {
                         d.take(def);
                     }
                 }
+                What::ImportStep { done, total, .. } => crate::import_ui::step(self, done, total),
+                What::Imported { result, .. } => crate::import_ui::finished(self, result),
                 What::Applied { key, result } => {
                     let conn = ev.conn.clone();
                     let ctx = self.ctx.clone();
@@ -1950,6 +1955,7 @@ impl eframe::App for App {
         }
         crate::dialogs::all(self, &ctx);
         crate::results::export_window(self, &ctx);
+        crate::import_ui::show(self, &ctx);
         if let Some((m, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(5) {
                 self.toast = None;

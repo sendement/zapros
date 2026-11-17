@@ -8,6 +8,8 @@ mod design;
 mod design_ui;
 mod dialogs;
 mod chart;
+mod import;
+mod import_ui;
 mod drivers;
 mod sync;
 mod editor;

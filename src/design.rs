@@ -85,7 +85,7 @@ fn index_full(kind: Kind, t: &TableDef, name: &str) -> String {
     }
 }
 
-fn create_index(kind: Kind, t: &TableDef, x: &IndexDef) -> String {
+pub fn create_index(kind: Kind, t: &TableDef, x: &IndexDef) -> String {
     let tn = table_name(kind, t);
     let name = index_name(kind, &x.name);
     let cols = x.cols.trim();
@@ -213,7 +213,7 @@ fn ch_nullable(ty: &str, on: bool) -> String {
 }
 
 /// A column as written in ADD COLUMN.
-fn col_spec(kind: Kind, c: &Column) -> String {
+pub fn col_spec(kind: Kind, c: &Column) -> String {
     let d = kind.dialect();
     let name = quote(&c.name, d);
     let def = if c.default.trim().is_empty() { String::new() } else { format!(" DEFAULT {}", c.default.trim()) };

@@ -99,6 +99,18 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   (PostgreSQL, SQLite). Added, dropped, changed (made anew) or renamed
   (ALTER INDEX … RENAME where the database can); a constraint's index (a
   primary key's, UNIQUE's) is shown, changed through the constraint.
+- **A table from a file** (a schema's or its Tables folder's menu: "New
+  table from a file…"): CSV / TSV (separator and UTF-8 / Windows-1251
+  found by themselves), XLSX / XLS / ODS (a sheet to pick), JSON (an array
+  of objects or one a line). The file picked in the window (or dropped on
+  it); its columns listed with types guessed for the database (integers,
+  numbers with a comma or spaces, true / false, dates as ISO or
+  dd.mm.yyyy, date and time, text as long as needed) — each taken or left,
+  renamed, its type picked or typed, NULL allowed; the table's name, its
+  key (ClickHouse: its ORDER BY) and indexes over fields picked in order.
+  The first rows and the SQL shown; then made and filled in batches with a
+  progress bar and Stop. Failed or stopped, the table is dropped: none of
+  it or all of it.
 - **Several windows at once** share their workspaces and tabs: what's
   changed in one (text, tabs opened or closed, workspaces) shows up in the
   others within a moment, each window staying on its own tab. A tab being

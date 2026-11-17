@@ -719,3 +719,78 @@ fn bare_names_ddl_still_runs() {
         }
     }
 }
+
+/// A table made from a file: its CREATE (key, an index), its rows in
+/// batches with every kind of value, then read back — on every database
+/// at hand.
+#[test]
+fn import_on_real_servers() {
+    use crate::import::{self, ReadOpts};
+    let dir = std::env::temp_dir().join(format!("zapros-imp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut csv = String::from("Код;Имя клиента;Сумма;Оплачен;Дата;Когда\n");
+    for i in 1..=1203 {
+        let name = if i % 7 == 0 { String::new() } else { format!("Клиент \"{i}\"'s") };
+        csv += &format!("{i};{name};{},{};{};{:02}.03.2024;2024-03-{:02} 10:{:02}:05\n", i * 3, i % 10, if i % 2 == 0 { "true" } else { "false" }, i % 28 + 1, i % 28 + 1, i % 60);
+    }
+    let file = dir.join("клиенты.csv");
+    std::fs::write(&file, csv).unwrap();
+    let data = import::read(&file, &ReadOpts::default()).unwrap();
+    assert_eq!(data.rows.len(), 1203);
+    let lite = Spec { kind: Kind::Sqlite, database: dir.join("imp.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut cases: Vec<(Spec, String)> = vec![(lite, String::new())];
+    for (v, k) in [("ZAPROS_TEST_PG", Kind::Postgres), ("ZAPROS_TEST_ORA", Kind::Oracle), ("ZAPROS_TEST_CH", Kind::ClickHouse)] {
+        if let Some(c) = spec(v, k) {
+            cases.push(c);
+        }
+    }
+    for (sp, pw) in cases {
+        let kind = sp.kind;
+        let mut s = open(&sp, &pw).unwrap();
+        let schema = match kind {
+            Kind::Postgres => "public".to_string(),
+            Kind::Oracle => sp.user.to_uppercase(),
+            Kind::ClickHouse => "default".to_string(),
+            Kind::Sqlite => String::new(),
+        };
+        let mut cols = import::columns(kind, &data);
+        let types: Vec<String> = cols.iter().map(|c| c.ty.clone()).collect();
+        cols[0].pk = true;
+        let table = if kind == Kind::Oracle { "ZZ_IMPORT" } else { "zz_import" };
+        let name_col = cols[1].name.clone();
+        let idx = vec![crate::design::IndexDef { name: if kind == Kind::Oracle { "ZZ_IMPORT_IX1".into() } else { "zz_import_ix1".into() }, cols: crate::sql::complete::quote(&name_col, kind.dialect()), ..Default::default() }];
+        let t = crate::design::TableDef { schema: schema.clone(), name: table.into(), ..Default::default() };
+        let tn = crate::design::table_name(kind, &t);
+        let _ = s.run_limit(&format!("drop table {tn}"), 0, &mut |_| {});
+        for sql in import::ddl(kind, &schema, table, &cols, &idx).iter().chain(import::inserts(kind, &schema, table, &cols, &data.rows, import::batch(kind)).iter()) {
+            s.run_limit(sql, 0, &mut |_| {}).unwrap_or_else(|e| panic!("{kind:?} {types:?}: {}\n{}", e.message, crate::app::head(sql, 600)));
+        }
+        if kind.transactions() {
+            s.finish(true).ok();
+        }
+        let q = |s: &mut Box<dyn Session>, sql: &str| rows(s.run_limit(sql, 10, &mut |_| {}).unwrap_or_else(|e| panic!("{kind:?} {sql}: {}", e.message))).rows;
+        let d = kind.dialect();
+        let c = |k: usize| crate::sql::complete::quote(&cols[k].name, d);
+        let n = q(&mut s, &format!("select count(*), count({}), sum({}) from {tn}", c(1), c(2)));
+        assert_eq!(n[0][0].as_deref(), Some("1203"), "{kind:?}");
+        assert_eq!(n[0][1].as_deref(), Some((1203 - 1203 / 7).to_string().as_str()), "{kind:?}: empty names as NULL");
+        let sum: f64 = n[0][2].as_deref().unwrap().parse().unwrap();
+        let want: f64 = (1..=1203).map(|i| (i * 3) as f64 + (i % 10) as f64 / 10.0).sum();
+        assert!((sum - want).abs() < 0.01, "{kind:?}: {sum} vs {want}");
+        let r = q(&mut s, &format!("select {}, {}, {} from {tn} where {} = 14", c(1), c(4), c(5), c(0)));
+        assert_eq!(r[0][0], None, "{kind:?}");
+        assert!(r[0][1].as_deref().unwrap().starts_with("2024-03-15") || r[0][1].as_deref().unwrap().contains("15"), "{kind:?}: {:?}", r[0]);
+        let r = q(&mut s, &format!("select {} from {tn} where {} = 13", c(1), c(0)));
+        assert_eq!(r[0][0].as_deref(), Some("Клиент \"13\"'s"), "{kind:?}");
+        // The key and the index are there.
+        let path: Vec<String> = if schema.is_empty() { vec!["tables".into(), table.into()] } else { vec![schema.clone(), "tables".into(), table.into()] };
+        let crate::design::ObjDef::Table(def) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
+        assert!(def.indexes.iter().any(|x| x.name.eq_ignore_ascii_case(&idx[0].name)), "{kind:?}: {:?}", def.indexes);
+        assert!(!def.cols[0].nullable, "{kind:?}: the key's column");
+        s.run_limit(&format!("drop table {tn}"), 0, &mut |_| {}).unwrap();
+        if kind.transactions() {
+            s.finish(true).ok();
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

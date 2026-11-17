@@ -533,6 +533,9 @@ pub enum Req {
     Search { q: String, code: bool },
     /// A designer's statements, one after another (stops at a failure).
     Apply { key: String, stmts: Vec<String> },
+    /// A table made from a file: `make` (CREATE, indexes), then `rows`
+    /// (INSERTs), progress told; failed or stopped, `undo` (DROP) runs.
+    Import { key: String, make: Vec<String>, rows: Vec<String>, undo: String },
     Relations { schemas: Vec<String> },
     Tx(TxOp),
     /// The server's session `id` ended (from the other session).
@@ -589,6 +592,10 @@ pub enum What {
     Searched { q: String, code: bool, found: Result<Vec<Found>, String> },
     /// How many ran, or the failure (with the statement).
     Applied { key: String, result: Result<usize, String> },
+    /// An import's INSERTs done so far, of all.
+    ImportStep { key: String, done: usize, total: usize },
+    /// It ended: rows' statements run, or why not (`stopped`: asked to).
+    Imported { key: String, result: Result<usize, String>, stopped: bool },
     Relations(Result<Vec<Relation>, String>),
     /// Where the transaction stands (after a run or a commit).
     Tx { auto: bool, pending: bool },
@@ -911,6 +918,54 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                     Err("no connection".to_string())
                 };
                 tell(What::Applied { key, result });
+            }
+            Req::Import { key, make, rows, undo } => {
+                stop.store(false, Ordering::Relaxed);
+                let total = rows.len();
+                let mut stopped = false;
+                let result = if ensure(&mut session) {
+                    let s = session.as_mut().unwrap();
+                    let mut err = None;
+                    let mut made = false;
+                    for (k, sql) in make.iter().chain(rows.iter()).enumerate() {
+                        if stop.load(Ordering::Relaxed) {
+                            stopped = true;
+                            break;
+                        }
+                        match s.run(sql, &mut Fetch::limit(0), &mut |_| {}) {
+                            Ok(_) => {
+                                made |= k == 0;
+                                if k >= make.len() {
+                                    tell(What::ImportStep { key: key.clone(), done: k + 1 - make.len(), total });
+                                }
+                            }
+                            Err(f) => {
+                                stopped = stop.load(Ordering::Relaxed);
+                                err = Some(format!("{}\n\n{}", f.message, crate::app::head(sql, 300)));
+                                break;
+                            }
+                        }
+                    }
+                    let failed = err.is_some() || stopped;
+                    if spec.kind.transactions() && !auto.get() {
+                        s.finish(!failed).ok();
+                    }
+                    // Not all of it: none of it.
+                    if failed && made {
+                        s.run(&undo, &mut Fetch::limit(0), &mut |_| {}).ok();
+                        if spec.kind.transactions() && !auto.get() {
+                            s.finish(true).ok();
+                        }
+                    }
+                    match err {
+                        Some(e) if !stopped => Err(e),
+                        _ if stopped => Err(String::new()),
+                        _ => Ok(total),
+                    }
+                } else {
+                    Err("no connection".to_string())
+                };
+                tell(What::Imported { key, result, stopped });
             }
             Req::Relations { schemas } => {
                 if ensure(&mut session) {

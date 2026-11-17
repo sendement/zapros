@@ -2775,3 +2775,73 @@ fn notebook_hints_see_ctes_from_cells_above() {
     assert_eq!(labels, ["id", "total"], "the WITH cell's columns");
     shot(&mut h, "nb-cte-hints");
 }
+
+#[test]
+fn table_made_from_a_file() {
+    let (mut h, _g) = harness("import", "", false);
+    // A file in the project folder (where the picker starts).
+    let mut csv = String::from("Номер;Товар;Цена;Дата продажи\n");
+    for i in 1..=250 {
+        csv += &format!("{i};Товар {i};{},{};{:02}.04.2024\n", i * 10, i % 10, i % 28 + 1);
+    }
+    let project = h.state().session.project.clone().unwrap();
+    std::fs::write(project.join("продажи.csv"), csv).unwrap();
+    // The tables folder's menu.
+    h.get_by_label("Таблицы").click_secondary();
+    h.step();
+    h.get_by_label_contains("Создать таблицу из файла").click();
+    h.step();
+    h.step();
+    assert!(h.state().import.is_some(), "the window opens");
+    h.get_by_label_contains("продажи.csv").click();
+    h.step();
+    h.state_mut().import.as_mut().unwrap().wait();
+    h.step();
+    h.step();
+    {
+        let d = h.state().import.as_ref().unwrap();
+        assert_eq!(d.table, "продажи");
+        assert_eq!(d.cols.iter().map(|c| (c.name.as_str(), c.ty.as_str())).collect::<Vec<_>>(), [("номер", "INTEGER"), ("товар", "TEXT"), ("цена", "REAL"), ("дата_продажи", "TEXT")]);
+    }
+    // The key on the first; an index on two fields, picked by their chips.
+    {
+        let d = h.state_mut().import.as_mut().unwrap();
+        d.cols[0].pk = true;
+    }
+    h.get_by_label("+ Индекс").click();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "дата_продажи").click();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "товар").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().import.as_ref().unwrap().indexes[0].cols, ["дата_продажи", "товар"]);
+    shot(&mut h, "import");
+    let ddl = h.state().import.as_ref().unwrap().ddl();
+    assert!(ddl[1].contains("(дата_продажи, товар)"), "{ddl:?}");
+    h.get_by_label_contains("Создать и загрузить").click();
+    for _ in 0..300 {
+        h.step();
+        if matches!(h.state().import.as_ref().map(|d| &d.stage), Some(crate::import_ui::Stage::Done(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    match h.state().import.as_ref().map(|d| &d.stage) {
+        Some(crate::import_ui::Stage::Done(Ok(250))) => {}
+        Some(crate::import_ui::Stage::Done(r)) => panic!("{r:?}"),
+        _ => panic!("not done"),
+    }
+    settle(&mut h);
+    shot(&mut h, "import-done");
+    // In the tree; opened: its rows.
+    assert!(h.state().tree.iter().any(|(k, n)| k.1 == ["tables"] && matches!(n, Node::Ready(items) if items.iter().any(|o| o.name == "продажи"))), "the tree shows it");
+    h.get_by_label("Открыть таблицу").click();
+    settle(&mut h);
+    assert!(h.state().import.is_none());
+    let id = h.state().tab().id.clone();
+    let rows = &h.state().rt[&id].results[0].table.rows;
+    assert_eq!(rows.len(), 200);
+    assert_eq!(rows[0], [Some("1".into()), Some("Товар 1".into()), Some("10.1".into()), Some("2024-04-02".into())], "numbers and dates as SQL has them");
+}
