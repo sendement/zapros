@@ -378,6 +378,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let shade = flag_shade(app, &key, focused, &ctx);
             // Being dragged: folded to its header for the move.
             let carried = lift.is_some_and(|(k, _)| k == i);
+            // (Its header stuck on top: the band's top, where its edge closes.)
+            let mut stuck_top: Option<f32> = None;
             let mut draw = |ui: &mut egui::Ui| egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
@@ -557,7 +559,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                 })(ui);
                 let bottom = ui.min_rect().bottom();
-                let top = if lift.is_none() { slot.top().max(ui.clip_rect().top() + 6.0).min(bottom - head_h) } else { slot.top() }.max(slot.top());
+                let top = if lift.is_none() { slot.top().max(ui.clip_rect().top() + 7.0).min(bottom - head_h) } else { slot.top() }.max(slot.top());
                 let stuck = top > slot.top() + 0.5;
                 let hrect = egui::Rect::from_min_size(egui::pos2(slot.left(), top), slot.size());
                 // (Its own id: its widgets keep theirs whatever the body
@@ -566,6 +568,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     let band = egui::Rect::from_min_max(egui::pos2(inner.left() - 8.0, top - 6.0), egui::pos2(inner.right() + 8.0, top + head_h + 3.0));
                     let mut under = Vec::new();
                     if stuck {
+                        stuck_top = Some(band.top());
                         // Over the body: opaque, a shade under it, and the body
                         // beneath out of the pointer's reach.
                         under.push(egui::Shape::rect_filled(band, egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, ui.visuals().panel_fill));
@@ -583,7 +586,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                     ui.painter().extend(under);
                     // Its header: kind, run, what it gave; moving, adding, deleting.
-                    let r = ui.horizontal(|ui| {
+                    // (Too narrow for both: the right group on a line of its own.)
+                    let right_id = egui::Id::new(("nb-head-right", &cell.id));
+                    let right_w: f32 = ctx.data(|d| d.get_temp(right_id)).unwrap_or(0.0);
+                    let r = ui.horizontal_wrapped(|ui| {
                         // A grip: dragged, the cell goes up or down.
                         // (Not while filtered: the cells hidden would be in the way.)
                         let (gr, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), if filtering { egui::Sense::hover() } else { egui::Sense::drag() });
@@ -697,7 +703,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                                 ui.label(RichText::new(if narrow { "WITH" } else { t("WITH — для блоков ниже", "WITH — for the cells below") }).small().color(crate::ui::TEAL)).on_hover_text(t("Блок из одного WITH: его CTE получат блоки ниже", "A WITH alone: the cells below get its CTEs"));
                             }
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // (What's left of the row: the wrapped layout's
+                        // available width is the whole line.)
+                        if ui.max_rect().right() - ui.cursor().left() < right_w + 8.0 {
+                            ui.end_row();
+                        }
+                        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new("🗑").min_size(egui::vec2(28.0, 24.0))).on_hover_text(t("Удалить блок", "Delete the cell")).clicked() {
                                 ops.push(Op::Delete(i));
                             }
@@ -747,7 +758,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                                     });
                                 }
                             }
+                            ui.min_rect().width()
                         });
+                        if (right.inner - right_w).abs() > 0.5 {
+                            ctx.data_mut(|d| d.insert_temp(right_id, right.inner));
+                            ctx.request_repaint();
+                        }
                     }).response;
                     r
                 })
@@ -788,7 +804,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             rects.push(framed.response.rect);
             // Its edge (drawn twice: the rounded corners as strong as the
             // sides), on its layer before that's moved.
-            let edge = framed.response.rect.shrink(0.5);
+            let mut edge = framed.response.rect.shrink(0.5);
+            if let Some(t) = stuck_top {
+                // Stuck: closed (and rounded) along the header's top.
+                edge.min.y = edge.min.y.max(t + 0.5);
+            }
             let lp = ctx.layer_painter(on);
             match lifted {
                 Some((_, y0)) => {

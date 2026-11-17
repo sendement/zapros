@@ -2713,3 +2713,45 @@ fn export_format_picked_in_a_notebook() {
     }
     assert_eq!(h.state().export.as_ref().map(|e| e.2.format), Some(crate::export::Format::Json));
 }
+
+#[test]
+fn notebook_focused_cell_keeps_its_edges() {
+    let cols: String = (0..30).map(|i| format!("{i} as column_number_{i}")).collect::<Vec<_>>().join(", ");
+    let text = format!("-- %%\nselect {cols} from orders;\n-- %%\nselect * from orders;\n-- %%\nselect 1;\n");
+    let (mut h, _g) = harness("nb-edges", &text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, Some(cells[0].clone()));
+    settle(&mut h);
+    h.state_mut().rt.entry(tab.clone()).or_default().cell_focus = Some(cells[0].clone());
+    for _ in 0..4 {
+        h.step();
+    }
+    shot(&mut h, "nb-edges");
+    h.state_mut().run_cells(&ctx, Some(cells[1].clone()));
+    settle(&mut h);
+    h.state_mut().rt.entry(tab.clone()).or_default().cell_focus = Some(cells[1].clone());
+    h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 200.0)));
+    for _ in 0..3 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -150.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.step();
+    }
+    for _ in 0..20 {
+        h.step();
+    }
+    shot(&mut h, "nb-edges-2");
+    h.set_size(egui::vec2(820.0, 800.0));
+    for _ in 0..10 {
+        h.step();
+    }
+    shot(&mut h, "nb-edges-3");
+    // Narrow: the cells stay inside the view (their right edge in sight),
+    // the header's right group and the results' bar wrapped.
+    let rightmost = h.get_all_by_label("🗑").map(|n| n.rect().max.x).fold(0.0f32, f32::max);
+    assert!(rightmost < 800.0, "a cell reaches {rightmost}");
+    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).map(|n| n.rect().max.x).fold(0.0f32, f32::max);
+    assert!(filter < 800.0, "the filter reaches {filter}");
+}

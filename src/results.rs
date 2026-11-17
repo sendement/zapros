@@ -276,7 +276,9 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
     // A result's own bar: loading, export, copy, filter.
     if let Pane::Result(i) = rt.shown {
         let v = &mut rt.results[i];
-        ui.horizontal(|ui| {
+        // (Wrapped: in a narrow cell it goes on a second line rather than
+        // pushing the cell past the view.)
+        ui.horizontal_wrapped(|ui| {
             let open = v.cursor.is_some();
             let idle = open && v.loading.is_none();
             let closed_tip = t("Курсор закрыт — чтобы получить остальные строки, выполните запрос снова", "The cursor's closed: run the statement again for the rest");
