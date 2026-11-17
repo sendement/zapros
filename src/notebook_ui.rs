@@ -569,6 +569,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     let mut under = Vec::new();
                     if stuck {
                         stuck_top = Some(band.top());
+                        // (Nothing of the body above it or in its rounded
+                        // corners: the view's ground there.)
+                        let above = egui::Rect::from_min_max(egui::pos2(band.left() - 1.0, ui.clip_rect().top()), egui::pos2(band.right() + 1.0, band.top() + RADIUS as f32));
+                        under.push(egui::Shape::rect_filled(above, 0.0, ui.visuals().panel_fill));
                         // Over the body: opaque, a shade under it, and the body
                         // beneath out of the pointer's reach.
                         under.push(egui::Shape::rect_filled(band, egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, ui.visuals().panel_fill));
