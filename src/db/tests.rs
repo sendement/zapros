@@ -323,7 +323,7 @@ fn designer_round_trip(s: &mut dyn Session, kind: Kind, path: &[&str], first_col
     let k = rows.len() - 1;
     rows[k].col.comment = "через конструктор".into();
     rows.push(crate::design::ColEdit { from: None, col: crate::design::Column { name: "zz_added".into(), ty: if kind == Kind::ClickHouse { "Nullable(String)".into() } else if kind == Kind::Oracle { "VARCHAR2(10)".into() } else { "text".into() }, nullable: true, ..Default::default() }, dropped: false });
-    for sql in table_changes(kind, &t, &rows, &t.comment) {
+    for sql in table_changes(kind, &t, &rows, &t.comment, &[]) {
         s.run(&sql, &mut Fetch::limit(0), &mut |_| {}).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
     }
     let ObjDef::Table(t2) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
@@ -333,7 +333,7 @@ fn designer_round_trip(s: &mut dyn Session, kind: Kind, path: &[&str], first_col
     let mut rows = edits_of(&t2);
     rows[k].col.comment = t.cols[k].comment.clone();
     rows.last_mut().unwrap().dropped = true;
-    for sql in table_changes(kind, &t2, &rows, &t2.comment) {
+    for sql in table_changes(kind, &t2, &rows, &t2.comment, &[]) {
         s.run(&sql, &mut Fetch::limit(0), &mut |_| {}).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
     }
     let ObjDef::Table(t3) = s.describe(&path, ObjKind::Table).unwrap() else { panic!() };
@@ -588,4 +588,97 @@ fn oracle_other_schema_code() {
     let q = src(&mut s, "sequences", "ZZ_S", ObjKind::Sequence).unwrap();
     assert!(q.contains("SEQUENCE") && q.contains("ZZ_S"), "{q}");
     eprintln!("{pkg}\n{v}\n{t}\n{q}");
+}
+
+/// The table designer's indexes: read, then renamed, remade, dropped and
+/// added by its statements, and read again — on every database at hand.
+#[test]
+fn index_designer_on_real_servers() {
+    use crate::design::{IndexDef, IndexEdit, edits_of, index_edits_of, table_changes};
+    let dir = std::env::temp_dir().join(format!("zapros-ix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lite = Spec { kind: Kind::Sqlite, database: dir.join("ix.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut cases: Vec<(Spec, String)> = vec![(lite, String::new())];
+    for (v, k) in [("ZAPROS_TEST_PG", Kind::Postgres), ("ZAPROS_TEST_ORA", Kind::Oracle), ("ZAPROS_TEST_CH", Kind::ClickHouse)] {
+        if let Some(c) = spec(v, k) {
+            cases.push(c);
+        }
+    }
+    for (sp, pw) in cases {
+        let kind = sp.kind;
+        let mut s = open(&sp, &pw).unwrap();
+        let run = |s: &mut Box<dyn Session>, sql: &str| s.run_limit(sql, 0, &mut |_| {}).map(|_| ()).map_err(|e| format!("{kind:?} {sql}: {}", e.message));
+        let (schema, table, path): (String, String, Vec<String>) = match kind {
+            Kind::Postgres => ("public".into(), "zz_ix".into(), vec!["public".into(), "tables".into(), "zz_ix".into()]),
+            Kind::Oracle => (sp.user.to_uppercase(), "ZZ_IX".into(), vec![sp.user.to_uppercase(), "tables".into(), "ZZ_IX".into()]),
+            Kind::ClickHouse => ("default".into(), "zz_ix".into(), vec!["default".into(), "tables".into(), "zz_ix".into()]),
+            Kind::Sqlite => (String::new(), "zz_ix".into(), vec!["tables".into(), "zz_ix".into()]),
+        };
+        let _ = run(&mut s, "drop table zz_ix");
+        match kind {
+            Kind::ClickHouse => {
+                run(&mut s, "create table zz_ix (id UInt64, a Int32, b String, INDEX ix_a a TYPE minmax GRANULARITY 2) engine = MergeTree order by id").unwrap();
+            }
+            _ => {
+                run(&mut s, "create table zz_ix (id integer primary key, a integer, b varchar(20))").unwrap();
+                run(&mut s, "create index zz_ix_a on zz_ix (a)").unwrap();
+            }
+        }
+        let def = match s.describe(&path, ObjKind::Table).unwrap() {
+            crate::design::ObjDef::Table(t) => t,
+            o => panic!("{o:?}"),
+        };
+        let a_name = if kind == Kind::ClickHouse { "ix_a" } else if kind == Kind::Oracle { "ZZ_IX_A" } else { "zz_ix_a" };
+        let a = def.indexes.iter().find(|x| x.name == a_name).unwrap_or_else(|| panic!("{kind:?}: {:?}", def.indexes));
+        assert!(a.cols.to_lowercase().contains('a') && !a.constraint, "{kind:?}: {a:?}");
+        // (SQLite's INTEGER PRIMARY KEY is the rowid: no index of its own.)
+        if !matches!(kind, Kind::ClickHouse | Kind::Sqlite) {
+            assert!(def.indexes.iter().any(|x| x.constraint && x.unique), "{kind:?}: the primary key's: {:?}", def.indexes);
+        }
+        // Renamed; a new one on b (descending, and partial where it can be).
+        let mut rows = index_edits_of(&def);
+        let i = rows.iter().position(|r| r.idx.name == a_name).unwrap();
+        rows[i].idx.name = if kind == Kind::Oracle { "ZZ_IX_A2".into() } else { "zz_ix_a2".into() };
+        let b = match kind {
+            Kind::ClickHouse => IndexDef { name: "ix_b".into(), cols: "b".into(), method: "bloom_filter(0.01)".into(), granularity: "1".into(), ..Default::default() },
+            Kind::Postgres | Kind::Sqlite => IndexDef { name: "zz_ix_b".into(), cols: "b DESC".into(), unique: true, filter: "b IS NOT NULL".into(), ..Default::default() },
+            Kind::Oracle => IndexDef { name: "zz_ix_b".into(), cols: "b DESC".into(), method: "NORMAL".into(), ..Default::default() },
+        };
+        rows.push(IndexEdit { from: None, idx: b, dropped: false });
+        let stmts = table_changes(kind, &def, &edits_of(&def), &def.comment, &rows);
+        for st in &stmts {
+            run(&mut s, st).unwrap();
+        }
+        let def2 = match s.describe(&path, ObjKind::Table).unwrap() {
+            crate::design::ObjDef::Table(t) => t,
+            o => panic!("{o:?}"),
+        };
+        let names: Vec<String> = def2.indexes.iter().map(|x| x.name.to_lowercase()).collect();
+        assert!(names.contains(&"zz_ix_a2".to_string()) || names.contains(&"ix_a".to_string()) == false && names.iter().any(|n| n == "zz_ix_a2"), "{kind:?}: {names:?} after {stmts:?}");
+        let b_name = if kind == Kind::ClickHouse { "ix_b" } else { "zz_ix_b" };
+        let b = def2.indexes.iter().find(|x| x.name.to_lowercase() == b_name).unwrap_or_else(|| panic!("{kind:?}: {names:?} after {stmts:?}"));
+        match kind {
+            Kind::Postgres | Kind::Sqlite => assert!(b.unique && b.cols.to_lowercase().contains("desc") && b.filter.to_lowercase().contains("not null"), "{kind:?}: {b:?}"),
+            Kind::Oracle => assert!(b.cols.to_uppercase().contains("DESC"), "{b:?}"),
+            Kind::ClickHouse => assert!(b.method.starts_with("bloom_filter"), "{b:?}"),
+            _ => {}
+        }
+        // Nothing changed: no statements; then the renamed one dropped.
+        assert!(table_changes(kind, &def2, &edits_of(&def2), &def2.comment, &index_edits_of(&def2)).is_empty(), "{kind:?}");
+        let mut rows = index_edits_of(&def2);
+        for r in rows.iter_mut().filter(|r| r.idx.name.to_lowercase() == "zz_ix_a2") {
+            r.dropped = true;
+        }
+        for st in table_changes(kind, &def2, &edits_of(&def2), &def2.comment, &rows) {
+            run(&mut s, &st).unwrap();
+        }
+        let def3 = match s.describe(&path, ObjKind::Table).unwrap() {
+            crate::design::ObjDef::Table(t) => t,
+            o => panic!("{o:?}"),
+        };
+        assert!(!def3.indexes.iter().any(|x| x.name.to_lowercase() == "zz_ix_a2"), "{kind:?}: {:?}", def3.indexes);
+        run(&mut s, "drop table zz_ix").unwrap();
+        let _ = (schema, table);
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

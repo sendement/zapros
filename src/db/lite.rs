@@ -186,8 +186,18 @@ impl Session for Lite {
             .into_iter()
             .map(|r| Column { name: r[0].clone(), ty: r[1].clone(), nullable: r[2] == "Y", default: r[3].clone(), comment: String::new(), pk: r[4] == "Y" })
             .collect();
-        let info = self.rows("SELECT name, CASE WHEN \"unique\" THEN 'UNIQUE' ELSE '' END || ' INDEX' FROM pragma_index_list(?1) ORDER BY 1", &[t])?.into_iter().map(|r| (r[0].clone(), r[1].trim().to_string())).collect();
-        Ok(ObjDef::Table(TableDef { schema: String::new(), name: t.to_string(), cols, comment: String::new(), info }))
+        // (Indexes have a section of their own.)
+        let info = Vec::new();
+        let mut indexes = Vec::new();
+        for r in self.rows("SELECT name, CASE WHEN \"unique\" THEN 'Y' ELSE 'N' END, origin FROM pragma_index_list(?1) ORDER BY origin = 'c', name", &[t])? {
+            let sql = self.rows("SELECT coalesce(sql, '') FROM sqlite_master WHERE type = 'index' AND name = ?1", &[&r[0]])?.into_iter().next().and_then(|v| v.into_iter().next()).unwrap_or_default();
+            let (cols, filter) = match index_body(&sql) {
+                Some(b) => b,
+                None => (self.rows("SELECT name || CASE WHEN \"desc\" THEN ' DESC' ELSE '' END FROM pragma_index_xinfo(?1) WHERE key ORDER BY seqno", &[&r[0]])?.into_iter().map(|v| v[0].clone()).collect::<Vec<_>>().join(", "), String::new()),
+            };
+            indexes.push(crate::design::IndexDef { name: r[0].clone(), cols, unique: r[1] == "Y", filter, constraint: r[2] != "c", ..Default::default() });
+        }
+        Ok(ObjDef::Table(TableDef { schema: String::new(), name: t.to_string(), cols, comment: String::new(), info, indexes }))
     }
 
     fn relations(&mut self, _schemas: &[String]) -> Res<Vec<Relation>> {
@@ -248,3 +258,29 @@ impl Session for Lite {
     }
 }
 
+
+/// A CREATE INDEX's columns and WHERE (None: not one).
+fn index_body(sql: &str) -> Option<(String, String)> {
+    let up = sql.to_ascii_uppercase();
+    let on = up.find(" ON ")?;
+    let open = on + sql[on..].find('(')?;
+    let mut depth = 0;
+    let mut close = None;
+    for (i, c) in sql[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let rest = sql[close + 1..].trim();
+    let filter = if rest.len() > 5 && rest[..5].eq_ignore_ascii_case("WHERE") { rest[5..].trim().trim_end_matches(';').to_string() } else { String::new() };
+    Some((sql[open + 1..close].trim().to_string(), filter))
+}

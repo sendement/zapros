@@ -365,7 +365,13 @@ impl Session for Ch {
                 info.push((k.to_string(), v.clone()));
             }
         }
-        Ok(ObjDef::Table(TableDef { schema: db.to_string(), name: t.to_string(), cols, comment: r.first().cloned().unwrap_or_default(), info }))
+        let indexes = self
+            .rows(&format!("SELECT name, expr, type_full, toString(granularity) FROM system.data_skipping_indices WHERE database = {} AND table = {} ORDER BY name", literal(db), literal(t)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| crate::design::IndexDef { name: r[0].clone(), cols: r[1].clone(), method: r[2].clone(), granularity: r[3].clone(), ..Default::default() })
+            .collect();
+        Ok(ObjDef::Table(TableDef { schema: db.to_string(), name: t.to_string(), cols, comment: r.first().cloned().unwrap_or_default(), info, indexes }))
     }
 
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>> {

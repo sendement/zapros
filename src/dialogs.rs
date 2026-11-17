@@ -91,7 +91,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
                 });
             });
             let ex = e.example();
-            let cx = crate::editor::Ctx { dialect: d, settings: &snapshot, dark, issues: &[], server_err: None, rels: &[], rows: 1 };
+            let cx = crate::editor::Ctx { dialect: d, settings: &snapshot, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false };
             let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
             let job = crate::editor::layout(&ex, &cx, None, font, mono_bold);
             egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
@@ -1075,7 +1075,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\nselect (1 + 2";
                 let issues = crate::sql::check::check(&sample, Dialect::Postgres, None);
                 let snapshot = s.clone();
-                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], rows: 30 };
+                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], rows: 30, read_only: false };
                 let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
                 let job = crate::editor::layout(&sample, &cx, None, snapshot.font_size, mono_bold);
                 egui::Frame::group(ui.style()).show(ui, |ui| {

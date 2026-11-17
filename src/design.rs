@@ -25,6 +25,134 @@ pub struct TableDef {
     pub comment: String,
     /// Other facts shown as they are (engine, keys…).
     pub info: Vec<(String, String)>,
+    pub indexes: Vec<IndexDef>,
+}
+
+/// An index of a table (ClickHouse: a data-skipping index).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IndexDef {
+    pub name: String,
+    /// What it's on, as written: "customer_id, total DESC", "lower(email)".
+    pub cols: String,
+    pub unique: bool,
+    /// PostgreSQL: btree / hash / gin / gist / brin…; Oracle: NORMAL /
+    /// BITMAP; ClickHouse: minmax / set(100) / bloom_filter(0.01)…
+    pub method: String,
+    /// A partial index's WHERE (PostgreSQL, SQLite).
+    pub filter: String,
+    /// ClickHouse's GRANULARITY.
+    pub granularity: String,
+    /// Made by a constraint (primary key, unique): changed through it.
+    pub constraint: bool,
+}
+
+/// An index as edited (as a column's is).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexEdit {
+    pub from: Option<usize>,
+    pub idx: IndexDef,
+    pub dropped: bool,
+}
+
+pub fn index_edits_of(t: &TableDef) -> Vec<IndexEdit> {
+    t.indexes.iter().enumerate().map(|(i, x)| IndexEdit { from: Some(i), idx: x.clone(), dropped: false }).collect()
+}
+
+/// Index types to pick from (the first: the usual one).
+pub fn index_methods(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Postgres => &["btree", "hash", "gin", "gist", "brin", "spgist"],
+        Kind::Oracle => &["NORMAL", "BITMAP"],
+        Kind::ClickHouse => &["minmax", "set(100)", "bloom_filter(0.01)", "ngrambf_v1(3, 256, 2, 0)", "tokenbf_v1(256, 2, 0)"],
+        Kind::Sqlite => &[],
+    }
+}
+
+/// A new name as the database keeps it unquoted (Oracle: upper case).
+fn index_name(kind: Kind, name: &str) -> String {
+    let n = name.trim();
+    let plain = n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.starts_with(|c: char| c.is_ascii_digit());
+    let n = if kind == Kind::Oracle && plain { n.to_ascii_uppercase() } else { n.to_string() };
+    quote(&n, kind.dialect())
+}
+
+/// An index's name with its schema, for DROP / ALTER INDEX.
+fn index_full(kind: Kind, t: &TableDef, name: &str) -> String {
+    let d = kind.dialect();
+    match kind {
+        Kind::Postgres | Kind::Oracle if !t.schema.is_empty() => format!("{}.{}", quote(&t.schema, d), quote(name, d)),
+        _ => quote(name, d),
+    }
+}
+
+fn create_index(kind: Kind, t: &TableDef, x: &IndexDef) -> String {
+    let tn = table_name(kind, t);
+    let name = index_name(kind, &x.name);
+    let cols = x.cols.trim();
+    let filter = if x.filter.trim().is_empty() { String::new() } else { format!(" WHERE {}", x.filter.trim()) };
+    let unique = if x.unique { "UNIQUE " } else { "" };
+    match kind {
+        Kind::Postgres => {
+            let using = if x.method.trim().is_empty() || x.method.trim().eq_ignore_ascii_case("btree") { String::new() } else { format!(" USING {}", x.method.trim()) };
+            // (The index goes to the table's schema: its name unqualified.)
+            format!("CREATE {unique}INDEX {name} ON {tn}{using} ({cols}){filter}")
+        }
+        Kind::Oracle => {
+            let bitmap = if x.method.trim().eq_ignore_ascii_case("BITMAP") { "BITMAP " } else { unique };
+            let at = if t.schema.is_empty() { name } else { format!("{}.{name}", quote(&t.schema, kind.dialect())) };
+            format!("CREATE {bitmap}INDEX {at} ON {tn} ({cols})")
+        }
+        Kind::ClickHouse => {
+            let ty = if x.method.trim().is_empty() { "minmax" } else { x.method.trim() };
+            let g = if x.granularity.trim().is_empty() { "1" } else { x.granularity.trim() };
+            format!("ALTER TABLE {tn} ADD INDEX {name} ({cols}) TYPE {ty} GRANULARITY {g}")
+        }
+        Kind::Sqlite => format!("CREATE {unique}INDEX {name} ON {tn} ({cols}){filter}"),
+    }
+}
+
+fn drop_index(kind: Kind, t: &TableDef, name: &str) -> String {
+    match kind {
+        Kind::ClickHouse => format!("ALTER TABLE {} DROP INDEX {}", table_name(kind, t), quote(name, kind.dialect())),
+        _ => format!("DROP INDEX {}", index_full(kind, t, name)),
+    }
+}
+
+/// The index statements: (before the columns' — drops, renames; after —
+/// the new and remade ones, which may use new columns).
+pub fn index_changes(kind: Kind, t: &TableDef, rows: &[IndexEdit]) -> (Vec<String>, Vec<String>) {
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    for r in rows {
+        let new_ok = !r.idx.name.trim().is_empty() && !r.idx.cols.trim().is_empty();
+        match r.from {
+            None if !r.dropped && new_ok => after.push(create_index(kind, t, &r.idx)),
+            None => {}
+            Some(i) => {
+                let o = &t.indexes[i];
+                if o.constraint {
+                    continue;
+                }
+                if r.dropped {
+                    before.push(drop_index(kind, t, &o.name));
+                    continue;
+                }
+                let x = &r.idx;
+                let same_body = x.cols.trim() == o.cols.trim() && x.unique == o.unique && x.method.trim() == o.method.trim() && x.filter.trim() == o.filter.trim() && x.granularity.trim() == o.granularity.trim();
+                let renamed = x.name.trim() != o.name.trim() && !x.name.trim().is_empty();
+                if same_body && !renamed {
+                    continue;
+                }
+                if same_body && matches!(kind, Kind::Postgres | Kind::Oracle) {
+                    before.push(format!("ALTER INDEX {} RENAME TO {}", index_full(kind, t, &o.name), index_name(kind, &x.name)));
+                } else if new_ok {
+                    // Anything else: made anew.
+                    before.push(drop_index(kind, t, &o.name));
+                    after.push(create_index(kind, t, x));
+                }
+            }
+        }
+    }
+    (before, after)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -101,10 +229,11 @@ fn col_spec(kind: Kind, c: &Column) -> String {
 
 /// The statements that make the table what was edited (in order: drops,
 /// renames, changes, adds, comments). Each without its ";".
-pub fn table_changes(kind: Kind, t: &TableDef, rows: &[ColEdit], comment: &str) -> Vec<String> {
+pub fn table_changes(kind: Kind, t: &TableDef, rows: &[ColEdit], comment: &str, idx: &[IndexEdit]) -> Vec<String> {
     let d = kind.dialect();
     let tn = table_name(kind, t);
-    let mut out = Vec::new();
+    let (idx_before, idx_after) = index_changes(kind, t, idx);
+    let mut out = idx_before;
     let mut comments = Vec::new();
     let col_comment = |c: &Column, out: &mut Vec<String>| match kind {
         Kind::Postgres | Kind::Oracle => out.push(format!("COMMENT ON COLUMN {tn}.{} IS {}", quote(&c.name, d), str_lit(kind, &c.comment))),
@@ -189,6 +318,7 @@ pub fn table_changes(kind: Kind, t: &TableDef, rows: &[ColEdit], comment: &str) 
             Kind::Sqlite => {}
         }
     }
+    out.extend(idx_after);
     out
 }
 
@@ -317,7 +447,7 @@ mod tests {
         rows[2].col.nullable = false;
         rows[2].col.default = "0".into();
         rows.push(ColEdit { from: None, col: Column { default: "now()".into(), ..col("created", "timestamp", false) }, dropped: false });
-        let pg = table_changes(Kind::Postgres, &t, &rows, "Orders");
+        let pg = table_changes(Kind::Postgres, &t, &rows, "Orders", &[]);
         assert_eq!(
             pg,
             vec![
@@ -329,7 +459,7 @@ mod tests {
                 "COMMENT ON TABLE shop.orders IS 'Orders'",
             ]
         );
-        let ora = table_changes(Kind::Oracle, &t, &rows, "");
+        let ora = table_changes(Kind::Oracle, &t, &rows, "", &[]);
         // (Oracle: names in lower case are quoted to stay so.)
         assert!(ora.contains(&"ALTER TABLE \"shop\".\"orders\" MODIFY (\"total\" DEFAULT 0 NOT NULL)".to_string()), "{ora:?}");
         assert!(ora.contains(&"ALTER TABLE \"shop\".\"orders\" ADD (\"created\" timestamp DEFAULT now() NOT NULL)".to_string()), "{ora:?}");
@@ -337,10 +467,55 @@ mod tests {
         let mut rows = edits_of(&cht);
         rows[0].dropped = true;
         rows[1].col.nullable = false;
-        let ch = table_changes(Kind::ClickHouse, &cht, &rows, "");
+        let ch = table_changes(Kind::ClickHouse, &cht, &rows, "", &[]);
         assert_eq!(ch, vec!["ALTER TABLE shop.orders DROP COLUMN id", "ALTER TABLE shop.orders MODIFY COLUMN note String"]);
         // Nothing changed: nothing to do.
-        assert!(table_changes(Kind::Postgres, &t, &edits_of(&t), "").is_empty());
+        assert!(table_changes(Kind::Postgres, &t, &edits_of(&t), "", &[]).is_empty());
+    }
+
+    #[test]
+    fn index_changes_per_database() {
+        let ix = |name: &str, cols: &str| IndexDef { name: name.into(), cols: cols.into(), ..Default::default() };
+        let mut t = table();
+        t.indexes = vec![IndexDef { constraint: true, unique: true, ..ix("orders_pkey", "id") }, ix("orders_note", "note"), ix("orders_total", "total"), ix("orders_old", "id, note")];
+        let mut rows = index_edits_of(&t);
+        rows[0].dropped = true; // a constraint's: left alone
+        rows[1].idx.name = "orders_remark".into(); // renamed
+        rows[2].idx.cols = "total DESC".into(); // changed: made anew
+        rows[2].idx.filter = "total > 0".into();
+        rows[3].dropped = true;
+        rows.push(IndexEdit { from: None, idx: IndexDef { unique: true, method: "hash".into(), ..ix("orders_created", "created") }, dropped: false });
+        let mut cols = edits_of(&t);
+        cols.push(ColEdit { from: None, col: col("created", "timestamp", true), dropped: false });
+        let pg = table_changes(Kind::Postgres, &t, &cols, "", &rows);
+        assert_eq!(
+            pg,
+            vec![
+                "ALTER INDEX shop.orders_note RENAME TO orders_remark",
+                "DROP INDEX shop.orders_total",
+                "DROP INDEX shop.orders_old",
+                "ALTER TABLE shop.orders ADD COLUMN created timestamp",
+                "CREATE INDEX orders_total ON shop.orders (total DESC) WHERE total > 0",
+                "CREATE UNIQUE INDEX orders_created ON shop.orders USING hash (created)",
+            ]
+        );
+        // Oracle: new names in upper case; a bitmap one.
+        let mut t2 = t.clone();
+        t2.schema = "SHOP".into();
+        t2.name = "ORDERS".into();
+        let rows = vec![IndexEdit { from: None, idx: IndexDef { method: "BITMAP".into(), ..ix("orders_state", "state") }, dropped: false }];
+        assert_eq!(index_changes(Kind::Oracle, &t2, &rows).1, ["CREATE BITMAP INDEX SHOP.ORDERS_STATE ON SHOP.ORDERS (state)"]);
+        // ClickHouse: a data-skipping one, renamed = made anew.
+        let mut t3 = t.clone();
+        t3.indexes = vec![IndexDef { method: "minmax".into(), granularity: "4".into(), ..ix("ix_total", "total") }];
+        let mut rows = index_edits_of(&t3);
+        rows[0].idx.name = "ix_sum".into();
+        assert_eq!(index_changes(Kind::ClickHouse, &t3, &rows), (vec!["ALTER TABLE shop.orders DROP INDEX ix_total".to_string()], vec!["ALTER TABLE shop.orders ADD INDEX ix_sum (total) TYPE minmax GRANULARITY 4".to_string()]));
+        // SQLite: partial.
+        let rows = vec![IndexEdit { from: None, idx: IndexDef { filter: "note IS NOT NULL".into(), ..ix("n", "note") }, dropped: false }];
+        assert_eq!(index_changes(Kind::Sqlite, &t, &rows).1, ["CREATE INDEX n ON orders (note) WHERE note IS NOT NULL"]);
+        // Nothing changed.
+        assert_eq!(index_changes(Kind::Postgres, &t, &index_edits_of(&t)), (vec![], vec![]));
     }
 
     #[test]

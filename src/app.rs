@@ -292,6 +292,8 @@ pub struct App {
     pub export: Option<(String, usize, crate::export::Export)>,
     dirty: bool,
     last_save: Instant,
+    /// The session shared with the other windows of zapros.
+    pub sync: crate::sync::Sync,
     pub results_max: bool,
     applied: Option<(ThemePref, u32, String)>,
     /// The fonts as last put in.
@@ -349,7 +351,7 @@ impl App {
         // (fonts set during a frame come only with the next one).
         crate::fonts::install(&cc.egui_ctx, &settings.fonts);
         let fonts_applied = Some(settings.fonts.clone());
-        let mut session: Session = config::load(&session_path());
+        let (mut session, sync) = crate::sync::Sync::open(&session_path());
         if session.workspaces.is_empty() {
             session = Session::default();
         }
@@ -407,6 +409,7 @@ impl App {
             export: None,
             dirty: false,
             last_save: Instant::now(),
+            sync,
             results_max: false,
             applied: None,
             about: false,
@@ -471,10 +474,49 @@ impl App {
     }
 
     pub fn save_session(&mut self) {
-        if config::save(&session_path(), &self.session).is_ok() {
+        if self.sync.push(&mut self.session).is_ok() {
             self.dirty = false;
             self.last_save = Instant::now();
+            self.after_merge();
         }
+    }
+
+    /// The other windows' changes, when there are any: taken in.
+    pub fn sync_in(&mut self) {
+        if self.sync.changed() && self.sync.pull(&mut self.session) {
+            self.after_merge();
+        }
+    }
+
+    /// After the others' changes came in: indexes kept in range, both-sides
+    /// edits told.
+    fn after_merge(&mut self) {
+        let s = &mut self.session;
+        s.active = s.active.min(s.workspaces.len().saturating_sub(1));
+        for ws in &mut s.workspaces {
+            ws.active = ws.active.min(ws.tabs.len().saturating_sub(1));
+            for nb in ws.tabs.iter_mut().filter_map(|t| t.notebook.as_mut()) {
+                nb.fix_ids();
+            }
+        }
+        if !self.sync.conflicts.is_empty() {
+            let names = std::mem::take(&mut self.sync.conflicts).join(", ");
+            self.toast(format!("{}: {names}", t("Вкладку правили в двух окнах сразу — версия другого окна сохранена рядом копией", "The tab was edited in two windows at once: the other window's version is kept beside it as a copy")));
+        }
+    }
+
+    /// Typed in `tab`: held by this window (the others show it read-only);
+    /// written soon for them to see.
+    pub fn hold_tab(&mut self, tab: &str) {
+        if self.sync.hold(tab) && self.sync.others > 0 {
+            self.save_session();
+        }
+        self.touch();
+    }
+
+    /// Another window is typing in the current tab.
+    pub fn tab_held_elsewhere(&self) -> bool {
+        self.sync.held_elsewhere(&self.tab().id)
     }
 
     /// Starts the connection's workers (asking for the password first when
@@ -1158,6 +1200,10 @@ impl App {
     }
 
     pub fn format(&mut self) {
+        if self.tab_held_elsewhere() {
+            self.toast(t("Эту вкладку сейчас правят в другом окне", "This tab is being edited in another window"));
+            return;
+        }
         if self.tab().is_notebook() {
             let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
             let o = self.settings.format;
@@ -1772,6 +1818,7 @@ impl eframe::App for App {
         self.last_frame = Some(Instant::now());
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        self.sync_in();
         self.take_events(&ctx);
         self.auto_connect(&ctx);
         self.checks();
@@ -1842,15 +1889,20 @@ impl eframe::App for App {
             }
         }
         crate::ui::hand_cursor(&ctx);
-        if self.dirty && self.last_save.elapsed() > Duration::from_secs(self.settings.autosave_secs.max(1)) {
+        // Other windows open: changes go out at once (they're merged there),
+        // theirs are looked for often.
+        self.sync.heartbeat();
+        let every = if self.sync.others > 0 { Duration::from_millis(400) } else { Duration::from_secs(self.settings.autosave_secs.max(1)) };
+        if self.dirty && self.last_save.elapsed() > every {
             self.save_session();
         }
         if self.dirty {
-            ctx.request_repaint_after(Duration::from_secs(self.settings.autosave_secs.max(1)));
+            ctx.request_repaint_after(every);
         }
+        ctx.request_repaint_after(if self.sync.others > 0 { Duration::from_millis(300) } else { Duration::from_secs(2) });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_session();
+        self.sync.leave(&mut self.session);
     }
 }

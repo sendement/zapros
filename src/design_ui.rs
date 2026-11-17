@@ -6,7 +6,7 @@ use egui::{Color32, RichText};
 
 use crate::app::App;
 use crate::db::{Kind, ObjKind, Req};
-use crate::design::{ColEdit, Column, JobDef, ObjDef, TableDef, edits_of, job_sql, table_changes};
+use crate::design::{ColEdit, Column, IndexDef, IndexEdit, JobDef, ObjDef, TableDef, edits_of, index_edits_of, job_sql, table_changes};
 use crate::i18n::t;
 use crate::sched::Plan;
 
@@ -14,6 +14,7 @@ pub struct TableEdit {
     pub orig: TableDef,
     pub rows: Vec<ColEdit>,
     pub comment: String,
+    pub indexes: Vec<IndexEdit>,
 }
 
 pub struct JobEdit {
@@ -53,7 +54,7 @@ impl Designer {
     pub fn take(&mut self, def: Result<ObjDef, String>) {
         self.loaded = match def {
             Err(e) => Loaded::Failed(e),
-            Ok(ObjDef::Table(tb)) => Loaded::Table(TableEdit { rows: edits_of(&tb), comment: tb.comment.clone(), orig: tb }),
+            Ok(ObjDef::Table(tb)) => Loaded::Table(TableEdit { rows: edits_of(&tb), comment: tb.comment.clone(), indexes: index_edits_of(&tb), orig: tb }),
             Ok(ObjDef::Job(j)) => Loaded::Job(JobEdit::of(self.kind, Some(j))),
         };
     }
@@ -61,7 +62,7 @@ impl Designer {
     /// The statements that make the changes (none: nothing changed).
     pub fn changes(&self) -> Vec<String> {
         match &self.loaded {
-            Loaded::Table(te) => table_changes(self.kind, &te.orig, &te.rows, &te.comment),
+            Loaded::Table(te) => table_changes(self.kind, &te.orig, &te.rows, &te.comment, &te.indexes),
             Loaded::Job(je) => split(self.kind, &job_sql(self.kind, je.orig.as_ref(), &je.cur)),
             _ => Vec::new(),
         }
@@ -128,7 +129,7 @@ pub fn reload(app: &mut App, ctx: &egui::Context, d: &mut Designer, key: &str) {
 /// The SQL, coloured, as a label (copyable).
 fn sql_view(app: &App, ui: &mut egui::Ui, d: crate::sql::Dialect, sql: &str) {
     let dark = ui.visuals().dark_mode;
-    let cx = crate::editor::Ctx { dialect: d, settings: &app.settings, dark, issues: &[], server_err: None, rels: &[], rows: 1 };
+    let cx = crate::editor::Ctx { dialect: d, settings: &app.settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false };
     let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
     let job = crate::editor::layout(sql, &cx, None, app.settings.font_size * 0.92, mono_bold);
     ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend).selectable(true));
@@ -140,7 +141,7 @@ fn sql_edit(app: &App, ui: &mut egui::Ui, d: crate::sql::Dialect, text: &mut Str
     let settings = app.settings.clone();
     let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
     let mut layouter = |ui: &egui::Ui, s: &dyn egui::TextBuffer, _w: f32| {
-        let cx = crate::editor::Ctx { dialect: d, settings: &settings, dark, issues: &[], server_err: None, rels: &[], rows: 1 };
+        let cx = crate::editor::Ctx { dialect: d, settings: &settings, dark, issues: &[], server_err: None, rels: &[], rows: 1, read_only: false };
         let job = crate::editor::layout(s.as_str(), &cx, None, settings.font_size * 0.92, mono_bold);
         ui.fonts_mut(|f| f.layout_job(job))
     };
@@ -261,6 +262,8 @@ fn table_ui(app: &App, ui: &mut egui::Ui, kind: Kind, te: &mut TableEdit) {
             te.rows.last_mut().unwrap().col.ty = format!("Nullable({})", types(kind)[0]);
         }
     }
+    ui.add_space(10.0);
+    indexes_ui(ui, kind, te);
     if !te.orig.info.is_empty() {
         ui.add_space(8.0);
         ui.label(RichText::new(t("Ключи и прочее", "Keys and more")).weak());
@@ -273,6 +276,128 @@ fn table_ui(app: &App, ui: &mut egui::Ui, kind: Kind, te: &mut TableEdit) {
         });
     }
     let _ = (app, d);
+}
+
+/// The table's indexes: changed, added, dropped (a constraint's shown only).
+fn indexes_ui(ui: &mut egui::Ui, kind: Kind, te: &mut TableEdit) {
+    let ch = kind == Kind::ClickHouse;
+    ui.label(RichText::new(if ch { t("Индексы пропуска данных", "Data-skipping indexes") } else { t("Индексы", "Indexes") }).strong());
+    ui.add_space(2.0);
+    let col_names: Vec<String> = te.rows.iter().filter(|r| !r.dropped && !r.col.name.trim().is_empty()).map(|r| r.col.name.clone()).collect();
+    let methods = crate::design::index_methods(kind);
+    let w = ui.available_width();
+    let name_w = (w * 0.2).clamp(120.0, 260.0);
+    let cols_w = (w * 0.3).clamp(160.0, 420.0);
+    let extra_w = (w * 0.2).clamp(100.0, 280.0);
+    let (filter_head, has_filter) = match kind {
+        Kind::Postgres | Kind::Sqlite => (t("Условие (WHERE)", "Condition (WHERE)"), true),
+        Kind::ClickHouse => ("GRANULARITY", true),
+        Kind::Oracle => ("", false),
+    };
+    egui::Grid::new("indexes").num_columns(7).striped(true).spacing([8.0, 4.0]).show(ui, |ui| {
+        for h in ["", t("Имя", "Name"), if ch { t("Выражение", "Expression") } else { t("Колонки / выражения", "Columns / expressions") }, if ch { "" } else { "UNIQUE" }, if methods.is_empty() { "" } else { t("Тип", "Type") }, filter_head, ""] {
+            ui.label(RichText::new(h).weak());
+        }
+        ui.end_row();
+        let mut remove = None;
+        for (i, r) in te.indexes.iter_mut().enumerate() {
+            let new = r.from.is_none();
+            let o = r.from.map(|k| te.orig.indexes[k].clone()).unwrap_or_default();
+            if o.constraint {
+                // A primary key's or a unique constraint's: through the constraint.
+                ui.label("🔑").on_hover_text(t("Индекс ограничения (первичного ключа или UNIQUE) — меняется через само ограничение", "A constraint's index (primary key or UNIQUE): changed through the constraint"));
+                ui.label(RichText::new(&o.name).monospace());
+                ui.label(RichText::new(&o.cols).monospace());
+                ui.label(if o.unique { "✔" } else { "" });
+                ui.label(RichText::new(&o.method).weak());
+                ui.label("");
+                ui.label("");
+                ui.end_row();
+                continue;
+            }
+            if r.dropped {
+                let strike = |s: &str| RichText::new(s.to_string()).strikethrough().color(crate::ui::RED);
+                ui.label("");
+                ui.label(strike(&o.name));
+                ui.label(strike(&o.cols));
+                for _ in 0..3 {
+                    ui.label("");
+                }
+                if ui.small_button("↶").on_hover_text(t("Не удалять", "Keep it")).clicked() {
+                    r.dropped = false;
+                }
+                ui.end_row();
+                continue;
+            }
+            ui.label(if new { "+" } else { "" });
+            field(ui, &mut r.idx.name, name_w, (!new).then_some(o.name.as_str()), t("имя", "name"));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                field(ui, &mut r.idx.cols, cols_w - 24.0, (!new).then_some(o.cols.as_str()), t("колонка, колонка DESC…", "column, column DESC…"));
+                ui.menu_button("▾", |ui| {
+                    ui.label(RichText::new(t("Добавить колонку", "Add a column")).weak());
+                    for c in &col_names {
+                        let q = crate::sql::complete::quote(c, kind.dialect());
+                        if ui.button(c).clicked() {
+                            r.idx.cols = if r.idx.cols.trim().is_empty() { q } else { format!("{}, {q}", r.idx.cols.trim_end()) };
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            if ch {
+                ui.label("");
+            } else {
+                let cb = ui.checkbox(&mut r.idx.unique, "");
+                if !new && r.idx.unique != o.unique {
+                    ui.painter().rect_stroke(cb.rect.expand(1.0), 4.0, egui::Stroke::new(1.0, CHANGED), egui::StrokeKind::Outside);
+                }
+            }
+            if methods.is_empty() {
+                ui.label("");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let mw = if ch { extra_w } else { 90.0 };
+                    field(ui, &mut r.idx.method, mw, (!new).then_some(o.method.as_str()), methods[0]);
+                    ui.menu_button("▾", |ui| {
+                        for m in methods {
+                            if ui.button(*m).clicked() {
+                                r.idx.method = m.to_string();
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            }
+            if !has_filter {
+                ui.label("");
+            } else if ch {
+                field(ui, &mut r.idx.granularity, 60.0, (!new).then_some(o.granularity.as_str()), "1");
+            } else {
+                field(ui, &mut r.idx.filter, extra_w, (!new).then_some(o.filter.as_str()), "");
+            }
+            if ui.small_button("🗑").on_hover_text(t("Удалить индекс", "Drop the index")).clicked() {
+                if new {
+                    remove = Some(i);
+                } else {
+                    r.dropped = true;
+                }
+            }
+            ui.end_row();
+        }
+        if let Some(i) = remove {
+            te.indexes.remove(i);
+        }
+    });
+    ui.add_space(4.0);
+    if ui.button(format!("➕ {}", t("Индекс", "Index"))).clicked() {
+        let n = te.indexes.len() + 1;
+        let base = te.orig.name.to_lowercase();
+        let name = if kind == Kind::Oracle { format!("{}_IX{n}", te.orig.name) } else { format!("{base}_ix{n}") };
+        let method = crate::design::index_methods(kind).first().map(|m| m.to_string()).unwrap_or_default();
+        te.indexes.push(IndexEdit { from: None, idx: IndexDef { name, method, granularity: if ch { "1".into() } else { String::new() }, ..Default::default() }, dropped: false });
+    }
 }
 
 /// The job's fields and its schedule.

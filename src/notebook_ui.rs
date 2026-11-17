@@ -332,6 +332,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let accent = crate::editor::rgb(app.ws().color);
     let dark = ui.visuals().dark_mode;
     let focus = app.rt.get(&tab.id).and_then(|r| r.cell_focus.clone());
+    // Being typed in another window: shown as it goes, not changed here.
+    if app.sync.held_elsewhere(&tab.id) && crate::ui::held_bar(ui) {
+        app.sync.take_over(&tab.id);
+        app.save_session();
+    }
+    let held = app.sync.held_elsewhere(&tab.id);
     // Markdown cells being edited (the rest shown), each until switched back.
     let md_edit = app.rt.get(&tab.id).map(|r| r.md_edit.clone()).unwrap_or_default();
     let mut new_focus: Option<String> = None;
@@ -400,7 +406,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             let issues = std::mem::take(&mut rt.issues);
                             let server_err = rt.server_err.clone();
                             let rows = text.lines().count().max(2) + 1;
-                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows };
+                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows, read_only: held };
                             let id = egui::Id::new(("cell", &tab.id, &cell.id));
                             // The code on a rounded ground of its own (a shade
                             // off the cell's), as wide as the output's table.
@@ -892,6 +898,9 @@ fn flag_shade(app: &mut App, key: &str, focused: bool, ctx: &egui::Context) -> O
 }
 
 fn ops_text(app: &mut App, tab: &str, cell: &str, text: String) {
+    if app.sync.held_elsewhere(tab) {
+        return;
+    }
     let wi = app.session.active;
     let ws = &mut app.session.workspaces[wi];
     let Some(tb) = ws.tabs.iter_mut().find(|t| t.id == tab) else { return };
@@ -901,7 +910,7 @@ fn ops_text(app: &mut App, tab: &str, cell: &str, text: String) {
     if tb.path.is_some() {
         tb.modified = true;
     }
-    app.touch();
+    app.hold_tab(tab);
 }
 
 fn apply(app: &mut App, ctx: &egui::Context, op: Op) {

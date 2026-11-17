@@ -80,6 +80,22 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   "insert SELECT with all columns", copy / insert names. **Ctrl+click**
   opens an object in a tab right beside the current one: a table or a job
   as a designer (Designer | Code over it), anything else as its code.
+- **Indexes in the table designer**: the table's indexes under its columns
+  — name, columns or expressions (ascending / DESC; picked from the
+  table's columns or typed), UNIQUE, type (PostgreSQL btree / hash / gin /
+  gist / brin…, Oracle NORMAL / BITMAP, ClickHouse's data-skipping minmax /
+  set / bloom_filter… with GRANULARITY), a partial index's WHERE
+  (PostgreSQL, SQLite). Added, dropped, changed (made anew) or renamed
+  (ALTER INDEX … RENAME where the database can); a constraint's index (a
+  primary key's, UNIQUE's) is shown, changed through the constraint.
+- **Several windows at once** share their workspaces and tabs: what's
+  changed in one (text, tabs opened or closed, workspaces) shows up in the
+  others within a moment, each window staying on its own tab. A tab being
+  typed in is held by its window: in the others it's read-only (its text
+  following as it's typed) under a note with "Edit here" to take it over;
+  a few seconds idle and it's free again. Edited in two windows at once
+  anyway: nothing's lost, the other window's version comes in as a copy
+  beside it.
 - **Table designer**: the columns as a grid — name, type (common ones in a
   list), NULL, default, comment; columns added, renamed, changed, dropped
   (and undropped); the table's comment. The ALTER / COMMENT statements it

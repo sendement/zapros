@@ -557,7 +557,32 @@ impl Session for Ora {
                     .into_iter()
                     .map(|r| (r[0].clone(), r[1].clone()))
                     .collect();
-                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: name.to_string(), cols, comment, info }))
+                let list = self.rows(
+                    "SELECT i.index_name, i.uniqueness, i.index_type,
+                            CASE WHEN EXISTS (SELECT 1 FROM all_constraints k WHERE k.owner = i.table_owner AND k.table_name = i.table_name AND k.index_name = i.index_name AND k.constraint_type IN ('P', 'U')) THEN 'Y' ELSE 'N' END
+                       FROM all_indexes i WHERE i.table_owner = :1 AND i.table_name = :2 AND i.index_type NOT IN ('LOB', 'IOT - TOP', 'CLUSTER')
+                      ORDER BY 4 DESC, 1",
+                    &[s, name],
+                )?;
+                let ixcols = self.rows("SELECT index_name, column_name, descend, column_position FROM all_ind_columns WHERE table_owner = :1 AND table_name = :2 ORDER BY index_name, column_position", &[s, name])?;
+                let exprs = self.rows("SELECT index_name, column_position, column_expression FROM all_ind_expressions WHERE table_owner = :1 AND table_name = :2", &[s, name])?;
+                let indexes = list
+                    .into_iter()
+                    .map(|r| {
+                        let on: Vec<String> = ixcols
+                            .iter()
+                            .filter(|c| c[0] == r[0])
+                            .map(|c| {
+                                let e = exprs.iter().find(|e| e[0] == r[0] && e[1] == c[3]).map(|e| e[2].trim().to_string());
+                                let what = e.unwrap_or_else(|| crate::sql::complete::quote(&c[1], crate::sql::Dialect::Oracle));
+                                if c[2] == "DESC" { format!("{what} DESC") } else { what }
+                            })
+                            .collect();
+                        let method = if r[2].contains("BITMAP") { "BITMAP" } else { "NORMAL" };
+                        crate::design::IndexDef { name: r[0].clone(), cols: on.join(", "), unique: r[1] == "UNIQUE", method: method.into(), constraint: r[3] == "Y", ..Default::default() }
+                    })
+                    .collect();
+                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: name.to_string(), cols, comment, info, indexes }))
             }
             _ => Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here"))),
         }

@@ -137,6 +137,8 @@ pub struct Ctx<'a> {
     pub rels: &'a [Relation],
     /// Rows it takes at least (a notebook's cell: as many as its text has).
     pub rows: usize,
+    /// Shown, selectable, not changed (another window is typing in it).
+    pub read_only: bool,
 }
 
 pub struct Out {
@@ -985,6 +987,8 @@ fn shortcuts(i: &mut egui::InputState) -> Vec<Action> {
 }
 
 pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorState, cx: &Ctx) -> Out {
+    // Read-only: whatever the keys below would do is undone at the end.
+    let kept = cx.read_only.then(|| text.clone());
     let mut out = Out { changed: false, actions: Vec::new() };
     let ctx = ui.ctx().clone();
     let focused = ctx.memory(|m| m.has_focus(id));
@@ -1333,7 +1337,9 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             // the text, the text keeping its colours).
             ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
             ui.visuals_mut().selection.stroke.color = Color32::TRANSPARENT;
-            egui::TextEdit::multiline(text)
+            let ro_text = if cx.read_only { text.clone() } else { String::new() };
+            let mut ro: &str = &ro_text;
+            egui::TextEdit::multiline(if cx.read_only { &mut ro as &mut dyn egui::TextBuffer } else { text as &mut dyn egui::TextBuffer })
         .id(id)
         .font(FontId::monospace(font))
         .code_editor()
@@ -1909,6 +1915,12 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             out.changed = true;
         }
         ctx.memory_mut(|m| m.request_focus(id));
+    }
+    if let Some(k) = kept {
+        if *text != k {
+            *text = k;
+        }
+        out.changed = false;
     }
     out
 }

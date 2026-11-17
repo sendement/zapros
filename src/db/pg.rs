@@ -482,7 +482,21 @@ impl Session for Pg {
                 let cols = cols.into_iter().map(|r| Column { name: r[0].clone(), ty: r[1].clone(), nullable: r[2] == "true", default: r[3].clone(), comment: r[4].clone(), pk: r[5] == "true" }).collect();
                 let comment = self.one("select coalesce(obj_description($1::text::regclass, 'pg_class'), '')", &[&rel])?;
                 let info = self.rows("select conname::text, pg_get_constraintdef(oid, true) from pg_constraint where conrelid = $1::text::regclass and contype <> 'n' order by contype = 'p' desc, 1", &[&rel])?.into_iter().map(|r| (r[0].clone(), r[1].clone())).collect();
-                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: t.to_string(), cols, comment, info }))
+                let indexes = self
+                    .rows(
+                        "select c.relname::text,
+                                array_to_string(array(select pg_get_indexdef(i.indexrelid, k, true) || case when i.indoption[k - 1] & 1 = 1 then ' DESC' else '' end
+                                                        from generate_series(1, i.indnkeyatts) k order by k), ', '),
+                                i.indisunique::text, am.amname::text, coalesce(pg_get_expr(i.indpred, i.indrelid, true), ''),
+                                exists(select 1 from pg_constraint x where x.conindid = i.indexrelid and x.contype in ('p', 'u', 'x'))::text
+                           from pg_index i join pg_class c on c.oid = i.indexrelid join pg_am am on am.oid = c.relam
+                          where i.indrelid = $1::text::regclass order by i.indisprimary desc, 1",
+                        &[&rel],
+                    )?
+                    .into_iter()
+                    .map(|r| crate::design::IndexDef { name: r[0].clone(), cols: r[1].clone(), unique: r[2] == "true", method: r[3].clone(), filter: r[4].clone(), constraint: r[5] == "true", ..Default::default() })
+                    .collect();
+                Ok(ObjDef::Table(TableDef { schema: s.to_string(), name: t.to_string(), cols, comment, info, indexes }))
             }
             _ => Err(Failure::new(crate::i18n::t("Конструктор для этого объекта здесь не поддерживается", "No designer for this object here"))),
         }

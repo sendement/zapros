@@ -9,6 +9,7 @@ mod design_ui;
 mod dialogs;
 mod chart;
 mod drivers;
+mod sync;
 mod editor;
 mod export;
 mod fonts;

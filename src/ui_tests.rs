@@ -2457,3 +2457,106 @@ fn hung_run_ended_by_force() {
     h.state_mut().cancel();
     settle(&mut h);
 }
+
+/// A second window of the app on the same data (the first one's harness
+/// set where that is).
+fn second_window() -> Harness<'static, App> {
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).with_step_dt(1.0 / 60.0).wgpu().build_eframe(|cc| {
+        let mut app = App::new(cc);
+        app.settings.russian = Some(true);
+        app.settings.theme = crate::config::ThemePref::Dark;
+        app
+    });
+    settle(&mut h);
+    h
+}
+
+#[test]
+fn windows_share_their_tabs() {
+    let (mut a, _g) = harness("sync-ui", "select 1;\n", false);
+    let mut b = second_window();
+    let id = a.state().tab().id.clone();
+    assert_eq!(b.state().tab().id, id);
+    // Typed in the first: the second gets the text, read-only, with a note.
+    focus_editor(&mut a, 9);
+    type_text(&mut a, " -- from A");
+    a.state_mut().save_session();
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(15));
+        b.step();
+    }
+    assert_eq!(b.state().tab().text, "select 1; -- from A\n");
+    assert!(b.state().tab_held_elsewhere());
+    assert!(b.query_by_label_contains("правят в другом окне").is_some());
+    // Typing there changes nothing.
+    focus_editor(&mut b, 0);
+    type_text(&mut b, "zz");
+    assert_eq!(b.state().tab().text, "select 1; -- from A\n");
+    shot(&mut b, "sync-held");
+    // "Edit here": the second takes over; the first turns read-only.
+    b.get_by_label("Править здесь").click();
+    b.step();
+    b.step();
+    assert!(!b.state().tab_held_elsewhere());
+    std::thread::sleep(Duration::from_millis(15));
+    a.step();
+    a.step();
+    assert!(a.state().tab_held_elsewhere());
+    focus_editor(&mut b, 0);
+    type_text(&mut b, "/* B */ ");
+    b.state_mut().save_session();
+    std::thread::sleep(Duration::from_millis(15));
+    a.step();
+    assert_eq!(a.state().tab().text, "/* B */ select 1; -- from A\n");
+    // A tab made in one shows up in the other.
+    a.state_mut().new_tab(Some("new one".into()), "select 2;".into(), None);
+    a.state_mut().save_session();
+    std::thread::sleep(Duration::from_millis(15));
+    b.step();
+    assert!(b.state().ws().tabs.iter().any(|t| t.title == "new one" && t.text == "select 2;"));
+    // Each window stays on its own tab.
+    assert_eq!(b.state().tab().id, id);
+}
+
+#[test]
+fn table_designer_indexes() {
+    let (mut h, _g) = harness("designer-ix", SCRIPT, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().ensure_live(&ctx, "lite", None);
+    for p in [vec![], vec!["tables".to_string()]] {
+        h.state_mut().open_nodes.insert(("lite".into(), p));
+        settle(&mut h);
+    }
+    ctrl_click_tree(&mut h, "orders");
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let indexes = |h: &Harness<'static, App>| match h.state().rt[&id].design.as_ref().map(|d| &d.loaded) {
+        Some(crate::design_ui::Loaded::Table(te)) => te.indexes.iter().filter(|r| !r.dropped).map(|r| (r.idx.name.clone(), r.idx.cols.clone())).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    // The file's index is there.
+    assert_eq!(indexes(&h), [("orders_customer".to_string(), "customer_id".to_string())]);
+    // One added (its columns from the menu of the table's), the other renamed.
+    h.get_by_label_contains("➕ Индекс").click();
+    h.step();
+    if let Some(crate::design_ui::Loaded::Table(te)) = h.state_mut().rt.get_mut(&id).unwrap().design.as_mut().map(|d| &mut d.loaded) {
+        let new = te.indexes.last_mut().unwrap();
+        new.idx.cols = "total DESC".into();
+        new.idx.filter = "note IS NOT NULL".into();
+        te.indexes[0].idx.name = "orders_by_customer".into();
+    }
+    settle(&mut h);
+    let script = h.state().rt[&id].design.as_ref().unwrap().script();
+    assert_eq!(script, "DROP INDEX orders_customer;\nCREATE INDEX orders_by_customer ON orders (customer_id);\nCREATE INDEX orders_ix2 ON orders (total DESC) WHERE note IS NOT NULL;\n");
+    shot(&mut h, "designer-indexes");
+    h.get_by_label_contains("Применить").click();
+    for _ in 0..50 {
+        settle(&mut h);
+        if indexes(&h).len() == 2 && !h.state().rt[&id].design.as_ref().unwrap().busy && h.state().rt[&id].design.as_ref().unwrap().script().is_empty() {
+            break;
+        }
+    }
+    let mut got = indexes(&h);
+    got.sort();
+    assert_eq!(got, [("orders_by_customer".to_string(), "customer_id".to_string()), ("orders_ix2".to_string(), "total DESC".to_string())]);
+}

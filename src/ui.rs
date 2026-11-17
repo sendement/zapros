@@ -1067,6 +1067,13 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let dialect = app.dialect_of(conn.as_deref());
         let dark = ui.visuals().dark_mode;
         let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
+        // Being typed in another window: shown as it goes, not changed here.
+        let held = app.sync.held_elsewhere(&tab_id);
+        if held && held_bar(ui) {
+            app.sync.take_over(&tab_id);
+            app.save_session();
+        }
+        let held = app.sync.held_elsewhere(&tab_id);
         let mut rt = app.rt.remove(&tab_id).unwrap_or_default();
         let wi = app.session.active;
         let ti = app.session.workspaces[wi].active;
@@ -1075,7 +1082,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let part = tab.on_body;
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
-        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows: 30 };
+        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows: 30, read_only: held };
         // The code on a rounded ground, as a notebook cell's.
         let v = ui.visuals();
         let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
@@ -1099,7 +1106,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             }
             // The server's mark no longer fits the text.
             rt.server_err = None;
-            app.touch();
+            app.hold_tab(&tab_id);
         }
         actions = out.actions;
         app.rt.insert(tab_id, rt);
@@ -1205,3 +1212,19 @@ pub fn force_tip() -> &'static str {
     )
 }
 
+
+/// The note over a tab another window is typing in; true: "Edit here".
+pub fn held_bar(ui: &mut egui::Ui) -> bool {
+    let mut take = false;
+    egui::Frame::NONE.fill(Color32::from_rgb(240, 180, 30).gamma_multiply(0.18)).stroke(Stroke::new(1.0, Color32::from_rgb(240, 180, 30).gamma_multiply(0.7))).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}", t("Эту вкладку сейчас правят в другом окне zapros — изменения появляются здесь сами", "This tab is being edited in another zapros window; its changes show up here by themselves"))).color(ui.visuals().strong_text_color()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                take = ui.button(t("Править здесь", "Edit here")).on_hover_text(t("Забрать правку себе: в том окне вкладка станет только для чтения", "Take the editing over: the tab turns read-only in that window")).clicked();
+            });
+        });
+    });
+    ui.add_space(4.0);
+    take
+}
