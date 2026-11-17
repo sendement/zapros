@@ -2755,3 +2755,23 @@ fn notebook_focused_cell_keeps_its_edges() {
     let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).map(|n| n.rect().max.x).fold(0.0f32, f32::max);
     assert!(filter < 800.0, "the filter reaches {filter}");
 }
+
+#[test]
+fn notebook_hints_see_ctes_from_cells_above() {
+    let text = "-- %%\nwith big as (select id, total from orders where total > 900)\n-- %%\nselect b.\n  from big b\n";
+    let (mut h, _g) = harness("nb-cte-hints", text, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    let key2 = crate::app::App::cell_key(&tab, &cells[1]);
+    h.state_mut().rt.entry(tab.clone()).or_default().cell_focus = Some(cells[1].clone());
+    h.state_mut().rt.entry(key2.clone()).or_default().ed.goto = Some(9);
+    h.step();
+    h.step();
+    key(&mut h, egui::Key::Space, egui::Modifiers::COMMAND);
+    h.step();
+    let labels: Vec<String> = h.state().rt[&key2].ed.popup.as_ref().map(|p| p.hints.items.iter().map(|i| i.label.clone()).collect()).unwrap_or_default();
+    assert_eq!(labels, ["id", "total"], "the WITH cell's columns");
+    shot(&mut h, "nb-cte-hints");
+}

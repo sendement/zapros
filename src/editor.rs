@@ -135,6 +135,8 @@ pub struct Ctx<'a> {
     /// Where the server said a statement failed.
     pub server_err: Option<&'a (Range<usize>, String)>,
     pub rels: &'a [Relation],
+    /// Relations from elsewhere for hints: a notebook's CTEs from cells above.
+    pub lent: &'a [Relation],
     /// Rows it takes at least (a notebook's cell: as many as its text has).
     pub rows: usize,
     /// Shown, selectable, not changed (another window is typing in it).
@@ -1859,7 +1861,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let want = forced || (out.changed && st.popup.is_some()) || (cx.settings.hints_auto && word_char && out.changed);
         if want {
             let forced = forced || st.popup.as_ref().is_some_and(|p| p.forced);
-            match complete::hints(text, c, cx.dialect, cx.rels, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
+            match complete::hints(text, c, cx.dialect, cx.rels, cx.lent, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
                 Some(h) => {
                     let typed_first = cx.settings.hints_typed_first;
                     // The same hint stays picked as the list changes (with

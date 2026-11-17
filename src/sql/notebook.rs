@@ -225,6 +225,18 @@ impl Known {
     }
 }
 
+impl Known {
+    /// Its CTEs as relations, with the columns they give (for hints).
+    pub fn relations(&self, d: Dialect, rels: &[crate::db::Relation]) -> Vec<crate::db::Relation> {
+        if self.ctes.is_empty() {
+            return Vec::new();
+        }
+        let list: Vec<&str> = self.ctes.iter().map(|c| c.text.as_str()).collect();
+        let sql = format!("WITH {}{} SELECT 1", if self.recursive { "RECURSIVE " } else { "" }, list.join(", "));
+        super::complete::derived(&sql, d, &[rels]).into_iter().filter(|(_, cte)| *cte).map(|(r, _)| r).collect()
+    }
+}
+
 /// A statement made ready to run: the CTEs from above it uses (and the
 /// ones those use) put into its WITH; a WITH alone shows its last CTE.
 pub fn glue(sql: &str, known: &Known, d: Dialect) -> String {

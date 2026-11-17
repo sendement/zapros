@@ -1082,7 +1082,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let part = tab.on_body;
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
-        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows: 30, read_only: held, outer_wheel: false };
+        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &[], rows: 30, read_only: held, outer_wheel: false };
         // The code on a rounded ground, as a notebook cell's.
         let v = ui.visuals();
         let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });

@@ -388,6 +388,34 @@ fn case_block(nodes: &[Node], at: usize, out: &mut Out) {
     out.cur += "END";
 }
 
+/// A call's argument on its own line from `col`: as is, or (too long,
+/// with a CASE in it) its CASE laid out as a block.
+fn argument(a: &[Node], col: usize, out: &mut Out) {
+    let whole = inline(a);
+    let long = too_long(col, whole.chars().count()) || whole.chars().count() > INLINE_MAX;
+    if !long || !a.iter().any(|n| is_kw(Some(n), "CASE")) {
+        out.cur += &whole;
+        return;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        let space = i > 0 && space_between(&a[i - 1], &a[i]);
+        if is_kw(Some(&a[i]), "CASE") {
+            let j = case_end(a, i);
+            let at = out.word("CASE", space);
+            case_block(&a[i..=j], at, out);
+            i = j + 1;
+            continue;
+        }
+        let piece = match &a[i] {
+            Node::T(t) => t.s.clone(),
+            Node::Group(g) => format!("({})", inline(g)),
+        };
+        out.word(&piece, space);
+        i += 1;
+    }
+}
+
 fn has_subquery(g: &[Node]) -> bool {
     g.iter().any(|n| matches!(n, Node::Group(x) if is_subquery(x) || has_subquery(x)))
 }
@@ -612,7 +640,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
             }
             // A call too long: its arguments one to a line, a level in; its
             // ")" back under the line's start.
-            Node::Group(g) if too_long(out.col(), inline(g).chars().count() + 2) && g.iter().any(|x| matches!(x, Node::T(t) if t.k == K::Comma)) => {
+            Node::Group(g) if too_long(out.col(), inline(g).chars().count() + 2) && g.iter().any(|x| matches!(x, Node::T(t) if t.k == K::Comma) || is_kw(Some(x), "CASE")) => {
                 let lead = out.cur.len() - out.cur.trim_start().len();
                 let back = if is_list(&clause) { item } else { lead };
                 let col = back + ind();
@@ -633,7 +661,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
                 let n_args = args.len();
                 for (k, a) in args.iter().enumerate() {
                     out.start(col);
-                    out.cur += &inline(a);
+                    argument(a, col, out);
                     if k + 1 < n_args {
                         out.cur.push(',');
                     }
@@ -1185,3 +1213,26 @@ mod split_tests {
     }
 }
 
+
+#[cfg(test)]
+mod case_in_call_tests {
+    use super::*;
+
+    #[test]
+    fn calls_with_a_case_split() {
+        let q = "select id, sum(case when status = 'paid' then total_amount_of_the_order else 0 end) as paid_total_amount, coalesce(case when customer_first_name is null then customer_last_name else customer_first_name end, 'unknown customer name', other_value) as name from orders";
+        let f = format(q, Dialect::Postgres, Options::default());
+        println!("{f}");
+        assert!(f.contains("SUM(
+"), "{f}");
+        assert!(f.contains("COALESCE(
+"), "{f}");
+        assert!(f.lines().any(|l| l.trim() == "END") || f.lines().any(|l| l.trim().starts_with("END")), "{f}");
+        assert!(f.lines().all(|l| l.chars().count() <= 84), "{f}");
+        // The same once more: it stays.
+        assert_eq!(format(&f, Dialect::Postgres, Options::default()), f);
+        // Short: on one line as before.
+        let g = format("select sum(case when a then 1 else 0 end) as n from t", Dialect::Postgres, Options::default());
+        assert!(g.contains("SUM(CASE WHEN a THEN 1 ELSE 0 END) AS n"), "{g}");
+    }
+}

@@ -358,7 +358,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let drop_at: Option<(usize, f32)> = if lift.is_some() { ctx.data(|d| d.get_temp(drop_id)) } else { None };
     let mut rects: Vec<egui::Rect> = Vec::new();
     egui::ScrollArea::vertical().id_salt(("notebook", &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
+        // CTEs of WITH cells above, for the hints of the one being typed in.
+        let mut known = crate::sql::notebook::Known::default();
         for (i, cell) in nb.cells.iter().enumerate() {
+            let lent = if cell.kind == CellKind::Sql && focus.as_deref() == Some(cell.id.as_str()) { known.relations(dialect, &rels) } else { Vec::new() };
+            if cell.kind == CellKind::Sql && cell.text.trim_start().get(..4).is_some_and(|w| w.eq_ignore_ascii_case("with")) {
+                known.learn(cell.text.trim().trim_end_matches(';'), dialect);
+            }
             // Filtered: the cells that don't fit hidden, those that do open.
             if filtering && !fits(cell) {
                 continue;
@@ -410,7 +416,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             let issues = std::mem::take(&mut rt.issues);
                             let server_err = rt.server_err.clone();
                             let rows = text.lines().count().max(2) + 1;
-                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, rows, read_only: held, outer_wheel: true };
+                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &lent, rows, read_only: held, outer_wheel: true };
                             let id = egui::Id::new(("cell", &tab.id, &cell.id));
                             // The code on a rounded ground of its own (a shade
                             // off the cell's), as wide as the output's table.
