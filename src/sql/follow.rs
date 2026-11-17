@@ -20,6 +20,8 @@ pub enum Target {
 struct Named {
     alias: String,
     table: String,
+    /// The part of the statement it's named in (see `scopes`).
+    scope: usize,
     /// The table's name (with its schema) in the text.
     at: Range<usize>,
 }
@@ -93,9 +95,47 @@ fn tables(src: &str, toks: &[Tok]) -> Vec<Named> {
             a += 1;
         }
         let alias = toks.get(a).filter(|t| t.kind == Tk::Word || t.kind == Tk::Quoted).and_then(|t| ident(src, t)).unwrap_or_else(|| table.clone());
-        out.push(Named { alias, table, at: toks[j].start..toks[end].end });
+        out.push(Named { alias, table, at: toks[j].start..toks[end].end, scope: 0 });
+    }
+    let (of, _) = scopes(src, toks);
+    for n in &mut out {
+        if let Some(k) = toks.iter().position(|t| t.start == n.at.start) {
+            n.scope = of[k];
+        }
     }
     out
+}
+
+/// The statement's parts a name is seen in: each bracket, and each side of
+/// a UNION / INTERSECT / EXCEPT / MINUS in it, a part of its own. Per
+/// token its part, and per part the one around it.
+fn scopes(src: &str, toks: &[Tok]) -> (Vec<usize>, Vec<usize>) {
+    let mut parent = vec![0usize];
+    let mut stack = vec![0usize];
+    let mut of = Vec::with_capacity(toks.len());
+    for t in toks {
+        match t.kind {
+            Tk::Open => {
+                let p = *stack.last().unwrap();
+                parent.push(p);
+                stack.push(parent.len() - 1);
+            }
+            Tk::Close if stack.len() > 1 => {
+                of.push(*stack.last().unwrap());
+                stack.pop();
+                continue;
+            }
+            Tk::Keyword if matches!(t.text(src).to_ascii_uppercase().as_str(), "UNION" | "INTERSECT" | "EXCEPT" | "MINUS") => {
+                // The next side: a part beside this one (same one around).
+                let cur = stack.pop().unwrap();
+                parent.push(parent[cur]);
+                stack.push(parent.len() - 1);
+            }
+            _ => {}
+        }
+        of.push(*stack.last().unwrap());
+    }
+    (of, parent)
 }
 
 /// A statement's tables and what they're called there: (alias, table) —
@@ -203,7 +243,22 @@ pub fn follow(src: &str, at: usize, d: Dialect, has_col: &dyn Fn(&str, &str) -> 
     let ctes = ctes(src, &toks);
     let me = t.start..t.end;
     let here = |r: &Range<usize>| Some((me.clone(), Target::Here(r.clone())));
-    let by_alias = |a: &str| named.iter().find(|n| eq(&n.alias, a));
+    // An alias as seen from the clicked name: its own part of the statement
+    // first, then the ones around it (a UNION's other side is another query).
+    let (scope_of, parent) = scopes(src, &toks);
+    let by_alias = |a: &str| {
+        let mut sc = scope_of[k];
+        loop {
+            if let Some(n) = named.iter().find(|n| n.scope == sc && eq(&n.alias, a)) {
+                return Some(n);
+            }
+            if sc == 0 {
+                break;
+            }
+            sc = parent[sc];
+        }
+        named.iter().find(|n| eq(&n.alias, a))
+    };
     let cte = |a: &str| ctes.iter().find(|(n, _)| eq(n, a));
     // A table of the statement: a CTE's definition, or its name there.
     let table_at = |n: &Named| cte(&n.table).map_or(n.at.clone(), |(_, r)| r.clone());
@@ -273,6 +328,22 @@ mod tests {
     fn range(src: &str, s: &str) -> Range<usize> {
         let a = src.find(s).unwrap();
         a..a + s.len()
+    }
+
+    #[test]
+    fn aliases_in_their_own_union_side() {
+        let q = "select o.id from orders o where o.total > 1\nunion all\nselect o.id from archive o where exists (select 1 from items i where i.order_id = o.id)\nunion all\nselect o.id from (select 1 id) o";
+        let at = |word: &str, nth: usize| q.match_indices(word).nth(nth).unwrap().0;
+        let here = |a: usize| match follow(q, a, Dialect::Postgres, &|_, _| false).map(|x| x.1) {
+            Some(Target::Here(r)) => q[r].to_string(),
+            o => panic!("{o:?}"),
+        };
+        // The first side's o.: orders; the second's: archive (also from the
+        // subquery inside it); the third's subquery alias isn't a table.
+        assert_eq!(here(at("o.id", 0)), "orders");
+        assert_eq!(here(at("o.id", 1)), "archive");
+        assert_eq!(here(at("o.id", 2)), "archive");
+        assert_eq!(here(at("i.order_id", 0)), "items");
     }
 
     #[test]

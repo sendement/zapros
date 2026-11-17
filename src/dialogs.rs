@@ -1051,6 +1051,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 })
                 .response
                 .on_hover_text(t("if(…), coalesce(…) — по аргументу на строку; sum(…) OVER (…) — PARTITION BY, ORDER BY, ROWS каждое с новой строки. Даже если строка целиком помещается", "if(…), coalesce(…): an argument per line; sum(…) OVER (…): PARTITION BY, ORDER BY, ROWS each on its line. Even when the whole line fits"));
+                ui.checkbox(&mut s.format.bare_names, t("Кавычки у имён — только где нужны", "Quote names only where needed")).on_hover_text(t("\"SHOP\".\"ORDERS\" → SHOP.ORDERS, `id` → id; в кавычках остаются имена с пробелами, в другом регистре и совпадающие с ключевыми словами. При форматировании и в коде объектов, открытых из базы", "\"SHOP\".\"ORDERS\" → SHOP.ORDERS, `id` → id; names with spaces, in another case or matching keywords keep theirs. When formatting and in the code of objects opened from the database"));
                 ui.checkbox(&mut s.format.embedded, t("Форматировать SQL внутри строк (динамический SQL)", "Format SQL inside strings (dynamic SQL)"));
                 ui.add_enabled_ui(s.format.embedded, |ui| {
                     ui.checkbox(&mut s.format.split_strings, t("Разбивать строку с запросом на несколько строк", "Split a string holding a statement over several lines"))

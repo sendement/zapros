@@ -80,6 +80,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   "insert SELECT with all columns", copy / insert names. **Ctrl+click**
   opens an object in a tab right beside the current one: a table or a job
   as a designer (Designer | Code over it), anything else as its code.
+- **Names quoted only where needed** (Settings → code style, on by
+  default): an object's code from the database and formatted text lose
+  the quotes they don't need — Oracle's `"SHOP"."ORDERS"` → `SHOP.ORDERS`,
+  ClickHouse's `` `id` `` → `id`; `_`, `$` (and Oracle's `#`) stay bare;
+  names with spaces, in another case or that are reserved words (`DATE`,
+  `USER`…) keep theirs.
 - **Indexes in the table designer**: the table's indexes under its columns
   — name, columns or expressions (ascending / DESC; picked from the
   table's columns or typed), UNIQUE, type (PostgreSQL btree / hash / gin /
@@ -180,7 +186,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   focus and fades a few seconds after it's gone.
 - **Notebook cells' headers stick** to the top of the view while the cell
   is scrolled up under it (over the cell, its buttons working there), until
-  the cell itself is gone.
+  the cell itself is gone. A cell being dragged by its grip folds to its
+  header for the move.
 - **A hung run ended by force**: when the server doesn't answer Stop within
   3 seconds, Stop turns into ⚡ Kill (in the toolbar and on a notebook
   cell; or Shift+Esc again). The session is given up on and a new one

@@ -154,11 +154,44 @@ fn find<'a>(rels: &'a [Relation], r: &Ref) -> Option<&'a Relation> {
     rels.iter().find(|x| x.name.eq_ignore_ascii_case(&r.table) && r.schema.as_ref().is_none_or(|s| s.eq_ignore_ascii_case(&x.schema)))
 }
 
+/// Words a database won't take as a bare name (types and others beyond
+/// the SQL keywords the highlighter knows).
+fn reserved(name: &str, d: Dialect) -> bool {
+    const ORA: &[&str] = &[
+        "ACCESS", "ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC", "AUDIT", "BETWEEN", "BY", "CHAR", "CHECK", "CLUSTER", "COLUMN", "COMMENT", "COMPRESS", "CONNECT", "CREATE", "CURRENT", "DATE", "DECIMAL", "DEFAULT", "DELETE", "DESC", "DISTINCT",
+        "DROP", "ELSE", "EXCLUSIVE", "EXISTS", "FILE", "FLOAT", "FOR", "FROM", "GRANT", "GROUP", "HAVING", "IDENTIFIED", "IMMEDIATE", "IN", "INCREMENT", "INDEX", "INITIAL", "INSERT", "INTEGER", "INTERSECT", "INTO", "IS", "LEVEL", "LIKE", "LOCK",
+        "LONG", "MAXEXTENTS", "MINUS", "MLSLABEL", "MODE", "MODIFY", "NOAUDIT", "NOCOMPRESS", "NOT", "NOWAIT", "NULL", "NUMBER", "OF", "OFFLINE", "ON", "ONLINE", "OPTION", "OR", "ORDER", "PCTFREE", "PRIOR", "PUBLIC", "RAW", "RENAME", "RESOURCE",
+        "REVOKE", "ROW", "ROWID", "ROWNUM", "ROWS", "SELECT", "SESSION", "SET", "SHARE", "SIZE", "SMALLINT", "START", "SUCCESSFUL", "SYNONYM", "SYSDATE", "TABLE", "THEN", "TO", "TRIGGER", "UID", "UNION", "UNIQUE", "UPDATE", "USER", "VALIDATE",
+        "VALUES", "VARCHAR", "VARCHAR2", "VIEW", "WHENEVER", "WHERE", "WITH",
+    ];
+    const PG: &[&str] = &[
+        "ALL", "ANALYSE", "ANALYZE", "AND", "ANY", "ARRAY", "AS", "ASC", "ASYMMETRIC", "AUTHORIZATION", "BINARY", "BOTH", "CASE", "CAST", "CHECK", "COLLATE", "COLLATION", "COLUMN", "CONCURRENTLY", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_CATALOG",
+        "CURRENT_DATE", "CURRENT_ROLE", "CURRENT_SCHEMA", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DEFAULT", "DEFERRABLE", "DESC", "DISTINCT", "DO", "ELSE", "END", "EXCEPT", "FALSE", "FETCH", "FOR", "FOREIGN", "FREEZE", "FROM", "FULL",
+        "GRANT", "GROUP", "HAVING", "ILIKE", "IN", "INITIALLY", "INNER", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "LATERAL", "LEADING", "LEFT", "LIKE", "LIMIT", "LOCALTIME", "LOCALTIMESTAMP", "NATURAL", "NOT", "NOTNULL", "NULL", "OFFSET", "ON",
+        "ONLY", "OR", "ORDER", "OUTER", "OVERLAPS", "PLACING", "PRIMARY", "REFERENCES", "RETURNING", "RIGHT", "SELECT", "SESSION_USER", "SIMILAR", "SOME", "SYMMETRIC", "SYSTEM_USER", "TABLE", "TABLESAMPLE", "THEN", "TO", "TRAILING", "TRUE", "UNION",
+        "UNIQUE", "USER", "USING", "VARIADIC", "VERBOSE", "WHEN", "WHERE", "WINDOW", "WITH",
+    ];
+    let up = name.to_ascii_uppercase();
+    match d {
+        Dialect::Oracle => ORA.contains(&up.as_str()),
+        Dialect::Postgres => PG.contains(&up.as_str()),
+        Dialect::Sqlite | Dialect::Generic => PG.contains(&up.as_str()) || ORA.contains(&up.as_str()),
+        Dialect::ClickHouse => false,
+    }
+}
+
 /// A name as it must be written (quoted when it'd fold or clash).
 pub fn quote(name: &str, d: Dialect) -> String {
     // (ClickHouse's own database `default` reads fine bare.)
-    let keyword = super::is_keyword(name, d) && !(d == Dialect::ClickHouse && name == "default");
-    let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()) && !keyword;
+    let keyword = (super::is_keyword(name, d) || reserved(name, d)) && !(d == Dialect::ClickHouse && name == "default");
+    // `$` (and Oracle's `#`) go bare after the first letter where the
+    // database takes them so.
+    let also = |c: char| match d {
+        Dialect::Oracle => c == '$' || c == '#',
+        Dialect::Postgres | Dialect::Sqlite => c == '$',
+        _ => false,
+    };
+    let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || also(c)) && name.starts_with(|c: char| c.is_alphabetic() || c == '_') && !keyword;
     let folds = match d {
         Dialect::Postgres => name.chars().any(|c| c.is_uppercase()),
         Dialect::Oracle => name.chars().any(|c| c.is_lowercase()),
@@ -171,6 +204,30 @@ pub fn quote(name: &str, d: Dialect) -> String {
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
+}
+
+/// Quotes taken off the names that don't need them ("SHOP"."ORDERS" →
+/// SHOP.ORDERS, `id` → id); ones with spaces, other case or keywords keep
+/// theirs.
+pub fn bare_names(src: &str, d: Dialect) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut at = 0;
+    for t in super::lex::lex(src, d) {
+        if t.kind != super::lex::Tk::Quoted {
+            continue;
+        }
+        let text = t.text(src);
+        let inner = super::unquote(text);
+        // (ClickHouse's `default` stays quoted: as a column it'd read as DEFAULT.)
+        if inner.is_empty() || quote(inner, d) != inner || (d == Dialect::ClickHouse && inner.eq_ignore_ascii_case("default")) {
+            continue;
+        }
+        out.push_str(&src[at..t.start]);
+        out.push_str(inner);
+        at = t.end;
+    }
+    out.push_str(&src[at..]);
+    out
 }
 
 /// Columns that look like a join between two tables: b.x_id = a.id, or
@@ -382,4 +439,19 @@ mod tests {
         assert!(ins(src, src.len()).contains(&"orders".to_string()), "{:?}", ins(src, src.len()));
     }
 
+}
+
+#[cfg(test)]
+mod bare_tests {
+    use super::*;
+
+    #[test]
+    fn needless_quotes_off() {
+        let ora = "CREATE TABLE \"SHOP\".\"ORDERS\" (\"ID\" NUMBER, \"lower\" VARCHAR2(5), \"TWO WORDS\" DATE, \"DATE\" DATE, \"V$X#1\" INT, \"_A\" INT)";
+        assert_eq!(bare_names(ora, Dialect::Oracle), "CREATE TABLE SHOP.ORDERS (ID NUMBER, \"lower\" VARCHAR2(5), \"TWO WORDS\" DATE, \"DATE\" DATE, V$X#1 INT, \"_A\" INT)".replace("\"_A\"", "_A"));
+        assert_eq!(bare_names("CREATE TABLE default.t (`id` UInt64, `my col` String, `default` Int8)", Dialect::ClickHouse), "CREATE TABLE default.t (id UInt64, `my col` String, `default` Int8)");
+        assert_eq!(bare_names("select \"order_id\", \"Total\", 'a \"b\"' from \"x$y\"", Dialect::Postgres), "select order_id, \"Total\", 'a \"b\"' from x$y");
+        assert_eq!(quote("x$", Dialect::ClickHouse), "`x$`");
+        assert_eq!(quote("$x", Dialect::Postgres), "\"$x\"");
+    }
 }

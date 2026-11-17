@@ -682,3 +682,40 @@ fn index_designer_on_real_servers() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// An object's DDL with its needless quotes taken off still runs.
+#[test]
+fn bare_names_ddl_still_runs() {
+    use crate::sql::complete::bare_names;
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
+        let mut s = open(&sp, &pw).unwrap();
+        for t in ["ZZ_BARE", "ZZ_BARE2"] {
+            let _ = s.run_limit(&format!("drop table {t}"), 0, &mut |_| {});
+        }
+        s.run_limit("create table zz_bare (id number primary key, \"lower\" varchar2(5), \"DATE\" date, \"TWO WORDS\" int, v$x number, \"LEVEL\" int)", 0, &mut |_| {}).unwrap();
+        let me = sp.user.to_uppercase();
+        let ddl = s.source(&[me.clone(), "tables".into(), "ZZ_BARE".into()], ObjKind::Table).unwrap();
+        let bare = bare_names(&ddl, crate::sql::Dialect::Oracle);
+        assert!(bare.contains(&format!("{me}.ZZ_BARE")) && bare.contains("\"lower\"") && bare.contains("\"DATE\"") && bare.contains("\"LEVEL\"") && bare.contains("V$X"), "{bare}");
+        let again = bare.replace("ZZ_BARE", "ZZ_BARE2");
+        let first = crate::sql::split(&again, crate::sql::Dialect::Oracle, false).into_iter().next().unwrap();
+        s.run_limit(again[first].trim().trim_end_matches(';'), 0, &mut |_| {}).unwrap_or_else(|e| panic!("{}\n{again}", e.message));
+        for t in ["ZZ_BARE", "ZZ_BARE2"] {
+            s.run_limit(&format!("drop table {t}"), 0, &mut |_| {}).unwrap();
+        }
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) {
+        let mut s = open(&sp, &pw).unwrap();
+        for t in ["zz_bare", "zz_bare2"] {
+            let _ = s.run_limit(&format!("drop table if exists {t}"), 0, &mut |_| {});
+        }
+        s.run_limit("create table zz_bare (id UInt64, `my col` String, `default` Int8, total Float64) engine = MergeTree order by id", 0, &mut |_| {}).unwrap();
+        let ddl = s.source(&["default".into(), "tables".into(), "zz_bare".into()], ObjKind::Table).unwrap();
+        let bare = bare_names(&ddl, crate::sql::Dialect::ClickHouse);
+        assert!(bare.contains("`my col`") && bare.contains("`default`") && !bare.contains("`total`"), "{bare}");
+        s.run_limit(bare.replace("zz_bare", "zz_bare2").trim().trim_end_matches(';'), 0, &mut |_| {}).unwrap_or_else(|e| panic!("{}\n{bare}", e.message));
+        for t in ["zz_bare", "zz_bare2"] {
+            s.run_limit(&format!("drop table {t}"), 0, &mut |_| {}).unwrap();
+        }
+    }
+}

@@ -376,6 +376,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let stroke = if focused { Stroke::new(1.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
             // How its last run went, on its header.
             let shade = flag_shade(app, &key, focused, &ctx);
+            // Being dragged: folded to its header for the move.
+            let carried = lift.is_some_and(|(k, _)| k == i);
             let mut draw = |ui: &mut egui::Ui| egui::Frame::NONE.corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).fill(ui.visuals().panel_fill).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let running = app.rt.get(&key).is_some_and(|r| r.run.is_some());
@@ -388,7 +390,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 let head_h: f32 = ctx.data(|d| d.get_temp(head_id)).unwrap_or(26.0);
                 let slot = ui.allocate_exact_size(egui::vec2(ui.available_width(), head_h), egui::Sense::hover()).0;
                 (|ui: &mut egui::Ui| {
-                    if cell.collapsed && !filtering {
+                    if (cell.collapsed || carried) && !filtering {
                         // Folded: its first line, a click opens it.
                         let first = cell.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
                         let more = cell.text.trim().lines().count().saturating_sub(1);
@@ -558,20 +560,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 let top = if lift.is_none() { slot.top().max(ui.clip_rect().top() + 6.0).min(bottom - head_h) } else { slot.top() }.max(slot.top());
                 let stuck = top > slot.top() + 0.5;
                 let hrect = egui::Rect::from_min_size(egui::pos2(slot.left(), top), slot.size());
-                let head = ui.scope_builder(egui::UiBuilder::new().max_rect(hrect), |ui| {
+                // (Its own id: its widgets keep theirs whatever the body
+                // drew before it — a grip mid-drag must.)
+                let head = ui.scope_builder(egui::UiBuilder::new().id(egui::Id::new(("nb-head", &tab.id, &cell.id))).max_rect(hrect), |ui| {
                     let band = egui::Rect::from_min_max(egui::pos2(inner.left() - 8.0, top - 6.0), egui::pos2(inner.right() + 8.0, top + head_h + 3.0));
                     let mut under = Vec::new();
                     if stuck {
                         // Over the body: opaque, a shade under it, and the body
                         // beneath out of the pointer's reach.
-                        under.push(egui::Shape::rect_filled(band, 0.0, ui.visuals().panel_fill));
-                        let shadow = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom()), egui::pos2(band.right(), band.bottom() + 5.0));
-                        under.push(egui::Shape::rect_filled(shadow, 0.0, Color32::from_black_alpha(if dark { 90 } else { 30 })));
+                        under.push(egui::Shape::rect_filled(band, egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, ui.visuals().panel_fill));
+                        let shadow = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom()), egui::pos2(band.right(), band.bottom() + 3.0));
+                        under.push(egui::Shape::rect_filled(shadow, 0.0, Color32::from_black_alpha(if dark { 60 } else { 22 })));
                         ui.interact(band, egui::Id::new(("nb-head-cover", &cell.id)), egui::Sense::click());
                     }
                     if let Some((c, k)) = shade {
-                        let round = if stuck { egui::CornerRadius::ZERO } else { egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 } };
-                        let line = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom() - 2.0), band.max);
+                        let round = egui::CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
+                        // (A hairline under it: a pixel.)
+                        let px = 1.0 / ui.ctx().pixels_per_point();
+                        let line = egui::Rect::from_min_max(egui::pos2(band.left(), band.bottom() - px), band.max);
                         under.push(egui::Shape::rect_filled(band, round, c.gamma_multiply(if dark { 0.22 } else { 0.16 } * k)));
                         under.push(egui::Shape::rect_filled(line, 0.0, c.gamma_multiply(0.85 * k)));
                     }

@@ -755,17 +755,27 @@ pub struct Options {
     /// A call (if(…), coalesce(…)) or a window (OVER (…)) longer than this
     /// is split, however long its line (0: only by the line's width).
     pub split: u16,
+    /// Names quoted only where they must be (a space, another case, a
+    /// keyword): "SHOP"."ORDERS" → SHOP.ORDERS, `id` → id.
+    pub bare_names: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60 }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60, bare_names: true }
     }
 }
 
 /// Lays out a script statement by statement; PL/SQL units and bodies in
 /// $$ are left as written. Comments between statements stay.
 pub fn format(src: &str, d: Dialect, o: Options) -> String {
+    let unquoted;
+    let src = if o.bare_names {
+        unquoted = super::complete::bare_names(src, d);
+        unquoted.as_str()
+    } else {
+        src
+    };
     STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize, split: o.split as usize }));
     let ranges = super::split(src, d, false);
     let mut s = String::new();

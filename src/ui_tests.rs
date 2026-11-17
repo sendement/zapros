@@ -1750,6 +1750,9 @@ fn notebook_cells_dragged_formatted_copied_timed() {
         h.step();
     }
     shot(&mut h, "nb-dragging");
+    // Carried: folded to its header and first line meanwhile.
+    assert!(h.query_by_label("select 1 as a").is_some(), "the dragged cell folded");
+    assert!(h.query_by_label("select 2 as b").is_none(), "the others not");
     h.input_mut().events.push(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.step();
     h.step();
@@ -2409,6 +2412,7 @@ fn notebook_header_sticks_while_scrolled() {
     settle(&mut h);
     let key = crate::app::App::cell_key(&id, &cell0);
     assert!(h.state().rt.get(&key).is_some_and(|r| !r.results.is_empty()), "the stuck header's Run ran the first cell");
+    shot(&mut h, "notebook-sticky-flag");
 }
 
 #[test]

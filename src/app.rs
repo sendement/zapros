@@ -1460,7 +1460,10 @@ impl App {
                     self.tree.insert((ev.conn.clone(), path), node);
                 }
                 What::Source { path: _, open_as: _, into: Some(into), text } => {
+                    let bare = self.settings.format.bare_names;
+                    let d = self.dialect_of(Some(&ev.conn));
                     let s = match text {
+                        Ok(s) if bare => crate::sql::complete::bare_names(&s, d),
                         Ok(s) => s,
                         Err(e) => format!("-- {}\n", e.replace('\n', "\n-- ")),
                     };
@@ -1553,6 +1556,7 @@ impl App {
                 What::Source { path: _, open_as, into: None, text } => match text {
                     Ok(s) => {
                         let conn = ev.conn.clone();
+                        let s = if self.settings.format.bare_names { crate::sql::complete::bare_names(&s, self.dialect_of(Some(&conn))) } else { s };
                         self.new_tab(Some(open_as), s, Some(conn));
                         // A package: specification and body apart.
                         self.tab_mut().split_package();
