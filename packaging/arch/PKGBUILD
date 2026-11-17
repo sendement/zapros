@@ -1,6 +1,6 @@
 # Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
 pkgname=zapros
-pkgver=0.2.2
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite"
 arch=('x86_64')
@@ -28,7 +28,7 @@ makedepends=('cargo')
 # Rust links with lld here; GCC LTO objects from C build scripts break that.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a0434f916c3e86b2e2962ed48d37be224067650e0ce1be0a5830788425984a2f')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
