@@ -697,7 +697,7 @@ pub fn group_relations(rows: Vec<Vec<String>>) -> Vec<Relation> {
     let mut out: Vec<Relation> = Vec::new();
     for r in rows {
         if out.last().is_none_or(|l| l.schema != r[0] || l.name != r[1]) {
-            out.push(Relation { schema: r[0].clone(), name: r[1].clone(), cols: Vec::new(), qualify: false });
+            out.push(Relation { schema: r[0].clone(), name: r[1].clone(), cols: Vec::new(), qualify: false, written: false });
         }
         out.last_mut().unwrap().cols.push((r[2].clone(), r.get(3).cloned().unwrap_or_default()));
     }

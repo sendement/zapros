@@ -293,6 +293,9 @@ pub struct Relation {
     /// Off the search path (another schema / database): written with its
     /// schema when a hint puts it in.
     pub qualify: bool,
+    /// Made by the statement itself (a CTE, a subquery): its columns' names
+    /// as written there (quotes and all), put in as they are.
+    pub written: bool,
 }
 
 /// A function or procedure, with its parameters (for hints in its call).

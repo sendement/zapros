@@ -164,6 +164,21 @@ pub fn scope(src: &str, d: Dialect) -> Vec<Ref> {
     out
 }
 
+/// A name as written in the statement (a word, or quoted with its quotes).
+fn written(src: &str, t: &Tok) -> Option<String> {
+    matches!(t.kind, Tk::Word | Tk::Keyword | Tk::Quoted).then(|| t.text(src).to_string())
+}
+
+/// A relation's column as it goes into the text.
+pub fn col_text(rel: &Relation, c: &str, d: Dialect) -> String {
+    if rel.written { c.to_string() } else { quote(c, d) }
+}
+
+/// A column's name as shown (quotes off).
+pub fn col_label(c: &str) -> String {
+    if c.starts_with(['"', '`', '[']) && c.len() >= 2 { super::unquote(c).to_string() } else { c.to_string() }
+}
+
 /// The bracket closing the one at `open`.
 fn close_of(toks: &[Tok], open: usize) -> Option<usize> {
     let mut depth = 0;
@@ -211,7 +226,7 @@ pub fn derived(src: &str, d: Dialect, bases: &[&[Relation]]) -> Vec<(Relation, b
                 let mut names = Vec::new();
                 if toks.get(k).is_some_and(|t| t.kind == Tk::Open) {
                     let Some(c) = close_of(&toks, k) else { break };
-                    names = toks[k + 1..c].iter().filter_map(|t| ident_text(src, t)).collect();
+                    names = toks[k + 1..c].iter().filter_map(|t| written(src, t)).collect();
                     k = c + 1;
                 }
                 if !word(k, "AS") {
@@ -263,7 +278,7 @@ pub fn derived(src: &str, d: Dialect, bases: &[&[Relation]]) -> Vec<(Relation, b
                 let mut names = Vec::new();
                 if toks.get(k).is_some_and(|t| t.kind == Tk::Open) {
                     if let Some(e) = close_of(&toks, k) {
-                        names = toks[k + 1..e].iter().filter_map(|t| ident_text(src, t)).collect();
+                        names = toks[k + 1..e].iter().filter_map(|t| written(src, t)).collect();
                         k = e;
                     }
                 }
@@ -287,7 +302,7 @@ pub fn derived(src: &str, d: Dialect, bases: &[&[Relation]]) -> Vec<(Relation, b
         }
         // (Recursive CTEs: their columns as of the first branch only.)
         out.retain(|(r, _)| !r.name.eq_ignore_ascii_case(&name));
-        out.push((Relation { schema: String::new(), name, cols, qualify: false }, cte));
+        out.push((Relation { schema: String::new(), name, cols, qualify: false, written: true }, cte));
     }
     out
 }
@@ -348,7 +363,7 @@ fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) ->
         refs.iter()
             .filter(|r| alias.is_none_or(|a| r.alias.eq_ignore_ascii_case(a)))
             .filter_map(look)
-            .find_map(|rel| rel.cols.iter().find(|(c, _)| c.eq_ignore_ascii_case(col)).map(|(_, ty)| ty.clone()))
+            .find_map(|rel| rel.cols.iter().find(|(c, _)| col_label(c).eq_ignore_ascii_case(col)).map(|(_, ty)| ty.clone()))
             .unwrap_or_default()
     };
     let mut out = Vec::new();
@@ -359,12 +374,12 @@ fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) ->
             let alias = (it.len() == 3 && it[1].kind == Tk::Dot).then(|| ident_text(body, &it[0])).flatten();
             for r in refs.iter().filter(|r| alias.as_deref().is_none_or(|a| r.alias.eq_ignore_ascii_case(a))) {
                 if let Some(rel) = look(r) {
-                    out.extend(rel.cols.iter().cloned());
+                    out.extend(rel.cols.iter().map(|(c, ty)| (col_text(rel, c, d), ty.clone())));
                 }
             }
             continue;
         }
-        let Some(name) = ident_text(body, last) else { continue };
+        let Some(name) = written(body, last) else { continue };
         let plain = it.len() == 1;
         let dotted = prev.is_some_and(|p| p.kind == Tk::Dot);
         let as_ = prev.is_some_and(|p| up(p) == "AS");
@@ -614,7 +629,7 @@ pub fn star_at(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Rela
     for r in refs.iter().filter(|r| alias.as_deref().is_none_or(|a| r.alias.eq_ignore_ascii_case(a))) {
         if let Some(rel) = look(r) {
             tables += 1;
-            cols.extend(rel.cols.iter().map(|(c, ty)| (c.clone(), ty.clone(), r.alias.clone())));
+            cols.extend(rel.cols.iter().map(|(c, ty)| (col_text(rel, c, d), ty.clone(), r.alias.clone())));
         }
     }
     if cols.is_empty() {
@@ -622,6 +637,97 @@ pub fn star_at(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Rela
     }
     let range = if alias.is_some() { toks[k - 2].start..toks[k].end } else { toks[k].start..toks[k].end };
     Some((range, cols, alias.is_some() || tables > 1))
+}
+
+/// What's most likely typed next at `at` (shown dimmed after the cursor,
+/// Tab takes it): the rest of it after what's typed of it. In GROUP BY the
+/// SELECT's own expressions not grouped by yet, in ORDER BY its next alias,
+/// in HAVING its aggregate, after ON a join's condition, in a call its next
+/// parameter, in INSERT INTO t ( its columns.
+pub fn ghost(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine]) -> Option<String> {
+    let at = at.min(src.len());
+    if !src.is_char_boundary(at) {
+        return None;
+    }
+    // Only at a line's end (or before a closing bracket).
+    let rest = src[at..].split('\n').next().unwrap_or("");
+    if !(rest.trim().is_empty() || rest.trim_start().starts_with(')')) {
+        return None;
+    }
+    let toks = lex::lex(src, d);
+    if toks.iter().any(|t| t.start < at && (at < t.end || t.open && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
+        return None;
+    }
+    // (What's typed of it: dotted names too, "u.na".)
+    let start = src[..at].char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || matches!(*c, '_' | '$' | '.' | '"')).last().map_or(at, |(i, _)| i);
+    let prefix = &src[start..at];
+    let stmt = super::statement_at(src, at, d, true).unwrap_or(0..src.len());
+    let head = &src[stmt.start..start];
+    let before: Vec<Tok> = lex::lex(head, d).into_iter().filter(|t| !t.trivia()).collect();
+    let last = before.last()?;
+    let prev = last.text(head).to_ascii_uppercase();
+    let norm = |s: &str| s.split_whitespace().collect::<String>().to_lowercase();
+    let mut guess: Option<String> = None;
+    // A call's next parameter.
+    if let Some((q, name, given)) = call_here(head, &before) {
+        guess = routines_named(routines, q.as_deref(), &name).into_iter().flat_map(|r| r.args.iter()).find(|a| !a.name.is_empty() && !given.iter().any(|g| g.eq_ignore_ascii_case(&a.name))).map(|a| format!("{} => ", quote(&a.name, d)));
+        // INSERT INTO t (: its columns.
+        if guess.is_none() && last.kind == Tk::Open && before.len() >= 3 {
+            let k = before.len() - 1;
+            let into = before[..k].iter().rposition(|t| t.text(head).eq_ignore_ascii_case("INTO"));
+            if let Some(i) = into.filter(|&i| i + 1 < k && i + 4 >= k) {
+                let parts: Vec<String> = before[i + 1..k].iter().filter_map(|t| ident_text(head, t)).collect();
+                let r = match parts.as_slice() {
+                    [t] => Some(Ref { alias: t.clone(), schema: None, table: t.clone() }),
+                    [s, t] => Some(Ref { alias: t.clone(), schema: Some(s.clone()), table: t.clone() }),
+                    _ => None,
+                };
+                if let Some(rel) = r.and_then(|r| find(rels, &r)) {
+                    guess = Some(rel.cols.iter().map(|(c, _)| col_text(rel, c, d)).collect::<Vec<_>>().join(", "));
+                }
+            }
+        }
+    }
+    if guess.is_none() {
+        let (clause, select) = clause_here(head, &before);
+        let sel = select.map(|k| select_items(head, &before[k + 1..])).unwrap_or_default();
+        // What the clause has so far.
+        let so_far = |kw: &str| -> Vec<String> {
+            let up = head.to_ascii_uppercase();
+            up.rfind(kw).map(|i| head[i + kw.len()..].split(',').map(norm).filter(|x| !x.is_empty()).collect()).unwrap_or_default()
+        };
+        let fresh = matches!(prev.as_str(), "BY" | "HAVING" | ",") && clause != "SELECT";
+        match clause.as_str() {
+            "GROUP BY" if fresh => {
+                let had = so_far("GROUP BY");
+                let left: Vec<&str> = sel.iter().filter(|(e, _, agg)| !agg && !had.contains(&norm(e))).map(|(e, _, _)| e.as_str()).collect();
+                if !left.is_empty() {
+                    guess = Some(left.join(", "));
+                }
+            }
+            "ORDER BY" if fresh => {
+                let had = so_far("ORDER BY");
+                guess = sel.iter().map(|(e, a, _)| a.clone().unwrap_or_else(|| e.clone())).find(|x| !had.contains(&norm(x)));
+            }
+            "HAVING" if prev == "HAVING" => guess = sel.iter().find(|(_, _, agg)| *agg).map(|(e, _, _)| format!("{e} ")),
+            _ => {}
+        }
+        // After ON: the join's condition.
+        if guess.is_none() && prev == "ON" {
+            let stmt_text = &src[stmt.start..stmt.end.max(at)];
+            let refs = scope(stmt_text, d);
+            let made: Vec<Relation> = derived(stmt_text, d, &[lent, rels]).into_iter().map(|(r, _)| r).collect();
+            let look = |r: &Ref| find(&made, r).or_else(|| find(lent, r)).or_else(|| find(rels, r));
+            // (Only the tables joined so far.)
+            let n = scope(head, d).len();
+            guess = join_guesses(look, &refs[..n.min(refs.len())], d).into_iter().next().map(|i| i.insert);
+        }
+    }
+    let g = guess?;
+    if g.len() <= prefix.len() || !g.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(prefix)) {
+        return None;
+    }
+    Some(g[prefix.len()..].to_string())
 }
 
 fn find<'a>(rels: &'a [Relation], r: &Ref) -> Option<&'a Relation> {
@@ -722,7 +828,7 @@ fn join_guesses<'a>(look: impl Fn(&Ref) -> Option<&'a Relation>, refs: &[Ref], d
                     || (al == "id" && (bl == format!("{}_id", sing(&a.name)) || bl == format!("{}id", sing(&a.name))))
                     || (bl == "id" && (al == format!("{}_id", sing(&b.name)) || al == format!("{}id", sing(&b.name))));
                 if hit {
-                    let text = format!("{}.{} = {}.{}", quote(&last.alias, d), quote(bc, d), quote(&o.alias, d), quote(ac, d));
+                    let text = format!("{}.{} = {}.{}", quote(&last.alias, d), col_text(b, bc, d), quote(&o.alias, d), col_text(a, ac, d));
                     out.push(Item { label: text.clone(), insert: text, kind: Kind::Join, detail: format!("{} ⋈ {}", b.name, a.name) });
                 }
             }
@@ -810,12 +916,12 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
             _ => {}
         }
     }
-    let col = |name: &str, ty: &str, owner: &str| Item { label: name.to_string(), insert: quote(name, d), kind: Kind::Column, detail: format!("{ty} · {owner}") };
+    let col = |rel: &Relation, name: &str, ty: &str, owner: &str| Item { label: col_label(name), insert: col_text(rel, name, d), kind: Kind::Column, detail: format!("{ty} · {owner}") };
     if let Some(q) = &qualifier {
         // alias. or table. → columns; schema. → its tables.
         if let Some(r) = refs.iter().find(|r| r.alias.eq_ignore_ascii_case(q)).cloned().or_else(|| Some(Ref { alias: q.clone(), schema: None, table: q.clone() })) {
             if let Some(rel) = look(&r) {
-                items.extend(rel.cols.iter().map(|(c, ty)| col(c, ty, &rel.name)));
+                items.extend(rel.cols.iter().map(|(c, ty)| col(rel, c, ty, &rel.name)));
             }
         }
         items.extend(rels.iter().filter(|r| r.schema.eq_ignore_ascii_case(q)).map(|r| Item { label: r.name.clone(), insert: quote(&r.name, d), kind: Kind::Table, detail: r.schema.clone() }));
@@ -831,7 +937,7 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
         }
         for r in &refs {
             if let Some(rel) = look(r) {
-                items.extend(rel.cols.iter().map(|(c, ty)| col(c, ty, &r.alias)));
+                items.extend(rel.cols.iter().map(|(c, ty)| col(rel, c, ty, &r.alias)));
             }
         }
         items.extend(SNIPPETS.iter().map(|(k, body, label)| Item { label: k.to_string(), insert: cased_snippet(body, case), kind: Kind::Snippet, detail: label.to_string() }));
@@ -857,6 +963,10 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
             } else {
                 return None;
             };
+            // What the place itself suggests goes first: its own that start
+            // with what's typed, then its own that hold it, then the rest.
+            let context = matches!(it.kind, Kind::Param | Kind::Expr | Kind::Join);
+            let rank = if context { s } else { s + 2 };
             // Snippets only by their exact start; keywords need a letter typed.
             if (it.kind == Kind::Snippet && s != 0 || matches!(it.kind, Kind::Keyword | Kind::Function | Kind::Snippet) && p.is_empty()) && qualifier.is_none() && !(forced && it.kind != Kind::Snippet) {
                 return None;
@@ -865,7 +975,7 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
             if l == p && it.kind == Kind::Keyword {
                 return None;
             }
-            Some((s, it))
+            Some((rank, it))
         })
         .collect();
     // Columns, the SELECT's own and parameters keep their order; the rest
@@ -895,8 +1005,8 @@ mod tests {
 
     fn rels() -> Vec<Relation> {
         vec![
-            Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())], qualify: false },
-            Relation { schema: "public".into(), name: "orders".into(), cols: vec![("id".into(), "int".into()), ("user_id".into(), "int".into()), ("total".into(), "numeric".into())], qualify: false },
+            Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())], qualify: false, written: false },
+            Relation { schema: "public".into(), name: "orders".into(), cols: vec![("id".into(), "int".into()), ("user_id".into(), "int".into()), ("total".into(), "numeric".into())], qualify: false, written: false },
         ]
     }
 
@@ -933,6 +1043,42 @@ mod tests {
         let src = "select a from (select b, max(c) m from t group by ) x";
         let h = items_at(src, "group by ", &[], true);
         assert_eq!(h.iter().filter(|i| i.kind == Kind::Expr).map(|i| i.label.as_str()).collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn ghosts_of_what_comes_next() {
+        let g = |src: &str| ghost(src, src.len(), Dialect::Postgres, &rels(), &[], &[]);
+        let src = "select u.name, o.user_id, count(*) as n from users u join orders o on o.user_id = u.id group by ";
+        assert_eq!(g(src).as_deref(), Some("u.name, o.user_id"));
+        // Typed some of it: the rest.
+        assert_eq!(g(&format!("{src}u.na")).as_deref(), Some("me, o.user_id"));
+        // One grouped already: the other.
+        assert_eq!(g(&format!("{src}u.name, ")).as_deref(), Some("o.user_id"));
+        // Something else typed: nothing.
+        assert_eq!(g(&format!("{src}x")), None);
+        assert_eq!(g("select u.name, count(*) as n from users u group by u.name having ").as_deref(), Some("count(*) "));
+        assert_eq!(g("select u.name, count(*) as n from users u group by u.name order by ").as_deref(), Some("u.name"));
+        assert_eq!(g("select * from users u join orders o on ").as_deref(), Some("o.user_id = u.id"));
+        assert_eq!(g("insert into orders (").as_deref(), Some("id, user_id, total"));
+        // Mid-line: nothing.
+        assert_eq!(ghost("select a from t group by  -- x", 25, Dialect::Postgres, &rels(), &[], &[]), None);
+        let r = vec![Routine { schema: "public".into(), package: String::new(), name: "f".into(), args: vec![crate::db::Arg { name: "p_a".into(), ..Default::default() }, crate::db::Arg { name: "p_b".into(), ..Default::default() }] }];
+        assert_eq!(ghost("select f(p_a => 1, ", 19, Dialect::Postgres, &rels(), &[], &r).as_deref(), Some("p_b => "));
+    }
+
+    #[test]
+    fn a_subquerys_columns_as_written() {
+        // Oracle keeps customer_id as CUSTOMER_ID: written so, it needs no quotes.
+        let ora = vec![Relation { schema: "SHOP".into(), name: "ORDERS".into(), cols: vec![("CUSTOMER_ID".into(), "NUMBER".into()), ("TOTAL".into(), "NUMBER".into())], qualify: false, written: false }];
+        let src = "select s.customer_id, s.\"Sum\" from (select customer_id, sum(total) \"Sum\" from orders group by customer_id) s group by s.";
+        let at = src.len();
+        let h = hints(src, at, Dialect::Oracle, &ora, &[], &[], Case::Upper, true, false).unwrap();
+        let cols: Vec<(&str, &str)> = h.items.iter().filter(|i| i.kind == Kind::Column).map(|i| (i.label.as_str(), i.insert.as_str())).collect();
+        assert_eq!(cols, [("customer_id", "customer_id"), ("Sum", "\"Sum\"")]);
+        // A * over a real table: its own names, quoted where they must be.
+        let src = "select x.* from (select * from orders) x";
+        let (_, c, _) = star_at(src, src.find('*').unwrap(), Dialect::Oracle, &ora, &[]).unwrap();
+        assert_eq!(c.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["CUSTOMER_ID", "TOTAL"]);
     }
 
     #[test]
@@ -1033,7 +1179,7 @@ mod tests {
     #[test]
     fn tables_off_the_search_path_keep_their_schema() {
         let mut r = rels();
-        r.push(Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true });
+        r.push(Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true, written: false });
         let src = "select * from inv";
         let h = hints(src, src.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].insert, "sales.invoices");
@@ -1052,7 +1198,7 @@ mod tests {
 
     #[test]
     fn schemas_quoted_when_asked() {
-        let r = vec![Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true }];
+        let r = vec![Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true, written: false }];
         let src = "select * from inv";
         let plain = hints(src, src.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, false).unwrap();
         assert!(plain.items.iter().any(|i| i.insert == "sales.invoices"));
@@ -1068,7 +1214,7 @@ mod tests {
 
     #[test]
     fn clickhouse_default_database() {
-        let r = vec![Relation { schema: "default".into(), name: "orders".into(), cols: vec![("id".into(), "UInt64".into()), ("total".into(), "Float64".into())], qualify: true }];
+        let r = vec![Relation { schema: "default".into(), name: "orders".into(), cols: vec![("id".into(), "UInt64".into()), ("total".into(), "Float64".into())], qualify: true, written: false }];
         let ins = |src: &str, at: usize| hints(src, at, Dialect::ClickHouse, &r, &[], &[], Case::Upper, false, false).map(|h| h.items.iter().map(|i| i.insert.clone()).collect::<Vec<_>>()).unwrap_or_default();
         // Put in bare: `default` is a fine name there.
         let src = "select * from ord";

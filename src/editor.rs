@@ -72,6 +72,8 @@ impl Popup {
 #[derive(Default)]
 pub struct EditorState {
     pub popup: Option<Popup>,
+    /// What's likely typed next (shown dimmed at this place; Tab takes it).
+    pub ghost: Option<(usize, String)>,
     job: Option<(u64, LayoutJob)>,
     /// The text's brackets, CASEs and blocks, as of `job`.
     blocks: Vec<crate::sql::bands::Block>,
@@ -1163,6 +1165,17 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             if crate::keys::take(i, &cx.settings.keys, crate::keys::Cmd::Hints) {
                 forced = true;
             }
+            // The dimmed guess after the cursor: Tab puts it in.
+            if st.popup.is_none() && a == b {
+                if let Some((_, g)) = st.ghost.clone().filter(|(at, _)| *at == a) {
+                    if i.consume_key(Modifiers::NONE, Key::Tab) {
+                        let c = edit(text, a..a, &g);
+                        new_sel = Some((c, c));
+                        out.changed = true;
+                        st.ghost = None;
+                    }
+                }
+            }
             if crate::keys::take(i, &cx.settings.keys, crate::keys::Cmd::Comment) {
                 let (s, e) = toggle_comment(text, a, b);
                 new_sel = Some((e, s));
@@ -1902,6 +1915,22 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 None => st.popup = None,
             }
         }
+    }
+    // The likeliest next words, worked out when the text or the cursor moves.
+    match cursor_b.filter(|_| has_focus && cx.settings.hints && cx.settings.ghost_hints && !cx.read_only) {
+        Some(c) => {
+            let one = output.cursor_range.is_some_and(|r| r.primary == r.secondary);
+            let moved = st.cursor.is_none_or(|(p, _)| p != c);
+            if out.changed || moved || st.ghost.as_ref().is_some_and(|(g, _)| *g != c) {
+                st.ghost = if one { complete::ghost(text, c, cx.dialect, cx.rels, cx.lent, cx.routines).map(|g| (c, g)) } else { None };
+            }
+        }
+        None => st.ghost = None,
+    }
+    if let (Some((_, g)), None, Some(cr)) = (st.ghost.as_ref(), st.popup.as_ref(), output.cursor_range) {
+        let at = output.galley.pos_from_cursor(cr.primary).translate(output.galley_pos.to_vec2());
+        let c = ui.visuals().weak_text_color().gamma_multiply(0.85);
+        ui.painter().with_clip_rect(output.text_clip_rect).text(at.left_top(), egui::Align2::LEFT_TOP, g, FontId::monospace(cx.settings.font_size), c);
     }
     st.cursor = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
     let mut picked: Option<usize> = None;

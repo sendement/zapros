@@ -2959,3 +2959,28 @@ fn shortcuts_changed_in_the_settings() {
     settle(&mut h);
     assert_eq!(h.state().rt[&id].results.len(), 2, "F9 ran both");
 }
+
+#[test]
+fn ghost_of_the_likely_next_words() {
+    let text = "select o.customer_id, count(*) as n\n  from orders o\n group by ";
+    let (mut h, _g) = harness("ghost", text, false);
+    settle(&mut h);
+    focus_editor(&mut h, text.len());
+    h.step();
+    h.step();
+    let id = h.state().tab().id.clone();
+    assert_eq!(h.state().rt[&id].ed.ghost.as_ref().map(|g| g.1.as_str()), Some("o.customer_id"));
+    shot(&mut h, "ghost");
+    key(&mut h, egui::Key::Tab, egui::Modifiers::NONE);
+    h.step();
+    assert_eq!(h.state().tab().text, format!("{text}o.customer_id"));
+    // Then ORDER BY: its alias next.
+    type_text(&mut h, "\n order by ");
+    h.step();
+    h.step();
+    assert_eq!(h.state().rt[&id].ed.ghost.as_ref().map(|g| g.1.as_str()), Some("o.customer_id"));
+    // Something else typed: gone.
+    type_text(&mut h, "zz");
+    h.step();
+    assert!(h.state().rt[&id].ed.ghost.is_none());
+}

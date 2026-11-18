@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     fn rels() -> Vec<super::super::Relation> {
-        let rel = |name: &str, cols: &[&str]| super::super::Relation { schema: "main".into(), name: name.into(), cols: cols.iter().map(|c| (c.to_string(), "int".into())).collect(), qualify: false };
+        let rel = |name: &str, cols: &[&str]| super::super::Relation { schema: "main".into(), name: name.into(), cols: cols.iter().map(|c| (c.to_string(), "int".into())).collect(), qualify: false, written: false };
         vec![rel("orders", &["id", "customer_id", "total", "note"]), rel("customers", &["id", "name", "email", "active"]), rel("payments", &["id", "amount", "paid_at"])]
     }
 

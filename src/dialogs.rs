@@ -136,8 +136,9 @@ pub struct StarWin {
 impl StarWin {
     /// The columns picked as written: `t.name` when they need their table's.
     pub fn names(&self) -> Vec<String> {
+        // (The columns come as they're written; the tables' names quoted here.)
         let q = |s: &str| crate::sql::complete::quote(s, self.d);
-        self.cols.iter().zip(&self.on).filter(|(_, on)| **on).map(|((c, _, t), _)| if self.qualify { format!("{}.{}", q(t), q(c)) } else { q(c) }).collect()
+        self.cols.iter().zip(&self.on).filter(|(_, on)| **on).map(|((c, _, t), _)| if self.qualify { format!("{}.{c}", q(t)) } else { c.clone() }).collect()
     }
 }
 
@@ -1322,6 +1323,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     case_pick(ui, &mut s.hint_case, "hint-case");
                 });
                 ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hints_typed_first, t("Первая строка подсказок — набранное слово: Enter просто переносит строку (подсказка — стрелкой ↓ и Enter / Tab)", "The hints' first row is the word as typed: Enter just starts a new line (a hint: ↓, then Enter / Tab)")));
+                ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.ghost_hints, t("Подсказывать продолжение блёклым текстом после курсора (Tab — принять): GROUP BY из SELECT, условие ON, параметры функции…", "Show the likely continuation dimmed after the cursor (Tab takes it): GROUP BY from SELECT, the ON condition, a function's parameters…")));
                 ui.add_enabled(s.hints, egui::Checkbox::new(&mut s.hint_quote_schemas, t("Схемы в кавычках (\"sales\".orders; в ClickHouse — `sales`.orders)", "Schemas in quotes (\"sales\".orders; in ClickHouse `sales`.orders)")));
             }
             3 => {

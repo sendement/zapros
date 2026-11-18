@@ -271,7 +271,14 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   `COUNT(*)`, `SUM(…)`… first. In a call of a function or procedure (after
   `(` or `,`) its parameters by name, `p_id => `, with their types, IN /
   OUT and defaults (PostgreSQL functions and procedures, Oracle's with
-  packages').
+  packages'). What the place suggests goes first in the list. A subquery's
+  or CTE's columns go in as they're written there (no quotes added).
+- **The likely next words, dimmed** after the cursor until you type
+  something else; Tab takes them: after `GROUP BY` the SELECT's
+  expressions not grouped yet, after `ORDER BY` its next alias, after
+  `HAVING` its aggregate, after `ON` the join's condition, in a call its
+  next parameter (`p_id => `), in `INSERT INTO t (` the table's columns.
+  A setting turns it off.
 - **Ctrl+click on a SELECT's `*`**: the columns it stands for (with their
   tables when there are several), to copy comma-separated or one a line,
   or to put in its place — all or those ticked.

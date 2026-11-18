@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn unknown_tables_and_columns() {
-        let k = Known::new(&[Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())], qualify: false }]);
+        let k = Known::new(&[Relation { schema: "public".into(), name: "users".into(), cols: vec![("id".into(), "int".into()), ("name".into(), "text".into())], qualify: false, written: false }]);
         let src = "with x as (select 1) select u.id, u.nmae from users u join orders o on o.uid = u.id, x";
         let e: Vec<String> = check(src, Dialect::Postgres, Some(&k)).into_iter().map(|i| src[i.range].to_string()).collect();
         assert_eq!(e, vec!["nmae", "orders"]);
