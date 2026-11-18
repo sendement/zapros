@@ -275,6 +275,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Ctrl+click on a SELECT's `*`**: the columns it stands for (with their
   tables when there are several), to copy comma-separated or one a line,
   or to put in its place — all or those ticked.
+- **Shortcuts of your own** (Settings → Shortcuts): each command's keys
+  listed — click one and press a new one, "+" adds another, right click
+  removes, ↺ brings back the usual ones; a key two commands share is shown
+  in red with whose it is. Menus and tooltips show the keys as set.
+- **Settings** in sections at the side, the section's settings beside
+  them; the window stays in the middle.
 - **Parameters**: a statement with `:name` or `&name` (`&&name`) asks for
   their values before it runs. `:name` is a value: a number goes in as is,
   anything else in quotes, nothing is NULL (or picked: text, number, as

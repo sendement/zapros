@@ -298,6 +298,8 @@ pub struct App {
     pub last_frame: Option<Instant>,
     /// The save-a-result window: (tab, result, what).
     pub export: Option<(String, usize, crate::export::Export)>,
+    /// A key being set in the settings: shortcuts do nothing meanwhile.
+    pub key_capture: bool,
     /// Runs waiting for their parameters' values (the first one asked).
     pub param_ask: Vec<crate::dialogs::ParamAsk>,
     /// Parameters' values as last given (by ":name" / "&name", lower case).
@@ -429,6 +431,7 @@ impl App {
             import: None,
             star: None,
             param_ask: Vec::new(),
+            key_capture: false,
             param_values: HashMap::new(),
             dirty: false,
             last_save: Instant::now(),
@@ -1806,8 +1809,13 @@ impl App {
     }
 
     fn global_keys(&mut self, ctx: &egui::Context) {
-        use egui::{Key, Modifiers};
-        let (structure, spec, body) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O), i.consume_key(Modifiers::ALT, Key::Num1), i.consume_key(Modifiers::ALT, Key::Num2)));
+        use crate::keys::{Cmd, take};
+        // (Setting a key: it goes to the settings, not to what it does.)
+        if self.key_capture {
+            return;
+        }
+        let k = self.settings.keys.clone();
+        let (structure, spec, body) = ctx.input_mut(|i| (take(i, &k, Cmd::Outline), take(i, &k, Cmd::ShowSpec), take(i, &k, Cmd::ShowBody)));
         if structure {
             // Shown: to its search; shown and searched: hidden.
             if self.session.outline && ctx.memory(|m| m.has_focus(egui::Id::new("outline-filter"))) {
@@ -1821,21 +1829,13 @@ impl App {
         if spec || body {
             self.show_part(body);
         }
-        // (Exactly Ctrl+F: with Shift it's Format.)
-        let find = ctx.input_mut(|i| {
-            let at = i.events.iter().position(|e| matches!(e, egui::Event::Key { key: Key::F, pressed: true, modifiers: m, .. } if m.command && !m.shift && !m.alt));
-            at.map(|k| i.events.remove(k)).is_some()
-        });
+        // (Exactly its keys: Ctrl+F isn't Ctrl+Shift+F, Format.)
+        let find = ctx.input_mut(|i| take(i, &k, Cmd::Find));
         if find {
             crate::search::open(self);
         }
         let (new, close, next, prev) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::COMMAND, Key::N),
-                i.consume_key(Modifiers::COMMAND, Key::W),
-                i.consume_key(Modifiers::COMMAND, Key::Tab) || i.consume_key(Modifiers::COMMAND, Key::PageDown),
-                i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) || i.consume_key(Modifiers::COMMAND, Key::PageUp),
-            )
+            (take(i, &k, Cmd::NewTab), take(i, &k, Cmd::CloseTab), take(i, &k, Cmd::NextTab), take(i, &k, Cmd::PrevTab))
         });
         if new {
             self.new_tab(None, String::new(), None);

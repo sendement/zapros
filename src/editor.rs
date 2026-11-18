@@ -995,32 +995,22 @@ fn shift_lines(text: &mut String, a: usize, b: usize, tab: usize, out: bool) -> 
 }
 
 /// Shortcuts that work when the editor has focus.
-fn shortcuts(i: &mut egui::InputState) -> Vec<Action> {
+fn shortcuts(i: &mut egui::InputState, keys: &crate::keys::Keymap) -> Vec<Action> {
+    use crate::keys::{Cmd, take};
     let mut v = Vec::new();
-    let cmd = Modifiers::COMMAND;
-    if i.consume_key(cmd | Modifiers::ALT, Key::Enter) {
-        v.push(Action::Commit);
-    }
-    if i.consume_key(cmd | Modifiers::ALT, Key::Backspace) {
-        v.push(Action::Rollback);
-    }
-    if i.consume_key(cmd | Modifiers::SHIFT, Key::Enter) || i.consume_key(Modifiers::NONE, Key::F5) {
-        v.push(Action::RunScript);
-    }
-    if i.consume_key(cmd, Key::Enter) {
-        v.push(Action::RunStatement);
-    }
-    if i.consume_key(cmd | Modifiers::SHIFT, Key::F) || i.consume_key(Modifiers::ALT | Modifiers::SHIFT, Key::F) {
-        v.push(Action::Format);
-    }
-    if i.consume_key(cmd, Key::E) || i.consume_key(Modifiers::NONE, Key::F7) {
-        v.push(Action::Explain);
-    }
-    if i.consume_key(Modifiers::SHIFT, Key::Escape) {
-        v.push(Action::Cancel);
-    }
-    if i.consume_key(cmd, Key::S) {
-        v.push(Action::Save);
+    for (c, a) in [
+        (Cmd::Commit, Action::Commit),
+        (Cmd::Rollback, Action::Rollback),
+        (Cmd::RunScript, Action::RunScript),
+        (Cmd::RunStatement, Action::RunStatement),
+        (Cmd::Format, Action::Format),
+        (Cmd::Explain, Action::Explain),
+        (Cmd::Cancel, Action::Cancel),
+        (Cmd::Save, Action::Save),
+    ] {
+        if take(i, keys, c) {
+            v.push(a);
+        }
     }
     v
 }
@@ -1139,7 +1129,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let (a, b) = (p.min(s), p.max(s));
         let mut new_sel: Option<(usize, usize)> = None;
         ui.input_mut(|i| {
-            out.actions = shortcuts(i);
+            out.actions = shortcuts(i, &cx.settings.keys);
             if let Some(pop) = st.popup.as_mut() {
                 let n = pop.rows();
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
@@ -1170,15 +1160,15 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                     st.popup = None;
                 }
             }
-            if i.consume_key(Modifiers::COMMAND, Key::Space) {
+            if crate::keys::take(i, &cx.settings.keys, crate::keys::Cmd::Hints) {
                 forced = true;
             }
-            if i.consume_key(Modifiers::COMMAND, Key::Slash) {
+            if crate::keys::take(i, &cx.settings.keys, crate::keys::Cmd::Comment) {
                 let (s, e) = toggle_comment(text, a, b);
                 new_sel = Some((e, s));
                 out.changed = true;
             }
-            if i.consume_key(Modifiers::COMMAND, Key::D) {
+            if crate::keys::take(i, &cx.settings.keys, crate::keys::Cmd::Duplicate) {
                 let (s, e) = lines_of(text, a, b);
                 let block = text[s..e].to_string();
                 text.insert_str(e, &format!("\n{block}"));

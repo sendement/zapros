@@ -10,6 +10,7 @@ mod dialogs;
 mod chart;
 mod import;
 mod import_ui;
+mod keys;
 mod drivers;
 mod sync;
 mod editor;

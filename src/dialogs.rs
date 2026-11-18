@@ -1110,6 +1110,102 @@ fn drivers_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings) {
     )).weak().small());
 }
 
+/// The shortcuts: each command's keys, changed by pressing new ones.
+fn keys_ui(ui: &mut egui::Ui, s: &mut crate::config::Settings, capture: &mut Option<(crate::keys::Cmd, Option<usize>)>) {
+    use crate::keys::{self, Cmd};
+    // A key being set: the next one pressed (Esc alone: never mind).
+    if let Some((cmd, slot)) = *capture {
+        let got = ui.input(keys::pressed);
+        if let Some(ch) = got {
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { pressed: true, .. })));
+            if !(ch.key == "Escape" && !ch.ctrl && !ch.alt && !ch.shift) {
+                let mut list = keys::chords(&s.keys, cmd);
+                match slot {
+                    Some(k) if k < list.len() => list[k] = ch,
+                    _ => list.push(ch),
+                }
+                list.dedup();
+                s.keys.insert(cmd, list);
+            }
+            *capture = None;
+        }
+    }
+    ui.label(RichText::new(t("Щёлкните сочетание и нажмите новое; «+» — ещё одно для той же команды; Esc — отмена.", "Click a shortcut and press a new one; \"+\" adds another for the same command; Esc cancels.")).small().weak());
+    ui.add_space(4.0);
+    let mut group = "";
+    let mut drop: Option<(Cmd, usize)> = None;
+    let mut reset: Option<Cmd> = None;
+    egui::Grid::new("keys-grid").num_columns(3).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
+        for cmd in Cmd::ALL {
+            if cmd.group() != group {
+                group = cmd.group();
+                ui.label(RichText::new(group).strong());
+                ui.end_row();
+            }
+            ui.label(cmd.name());
+            ui.horizontal(|ui| {
+                let list = keys::chords(&s.keys, cmd);
+                for (k, ch) in list.iter().enumerate() {
+                    let waiting = *capture == Some((cmd, Some(k)));
+                    let clash = keys::taken_by(&s.keys, ch, cmd);
+                    let text = if waiting { t("нажмите…", "press…").to_string() } else { ch.label() };
+                    let mut b = RichText::new(text).monospace();
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    if clash.is_some() {
+                        b = b.color(crate::ui::RED);
+                    }
+                    let r = ui.add(egui::Button::new(b).selected(waiting));
+                    let r = match clash {
+                        Some(o) => r.on_hover_text(format!("{} «{}»", t("Это же сочетание у", "The same keys as"), o.name())),
+                        None => r.on_hover_text(t("Щёлкните и нажмите новое; правый щелчок — убрать", "Click and press a new one; right click removes it")),
+                    };
+                    if r.clicked() {
+                        *capture = Some((cmd, Some(k)));
+                        r.request_focus();
+                    }
+                    if r.secondary_clicked() {
+                        drop = Some((cmd, k));
+                    }
+                }
+                let waiting = *capture == Some((cmd, None));
+                let r = ui.add(egui::Button::new(if waiting { t("нажмите…", "press…") } else { "+" }).selected(waiting)).on_hover_text(t("Добавить сочетание", "Add a shortcut"));
+                if r.clicked() {
+                    *capture = Some((cmd, None));
+                    r.request_focus();
+                }
+                if list.is_empty() {
+                    ui.label(RichText::new(t("нет", "none")).weak());
+                }
+            });
+            if s.keys.contains_key(&cmd) {
+                if ui.small_button("↺").on_hover_text(format!("{}: {}", t("Как было", "As it was"), cmd.defaults().iter().map(|c| c.label()).collect::<Vec<_>>().join(" / "))).clicked() {
+                    reset = Some(cmd);
+                }
+            } else {
+                ui.label("");
+            }
+            ui.end_row();
+        }
+    });
+    if let Some((cmd, k)) = drop {
+        let mut list = keys::chords(&s.keys, cmd);
+        if k < list.len() {
+            list.remove(k);
+        }
+        s.keys.insert(cmd, list);
+    }
+    if let Some(cmd) = reset {
+        s.keys.remove(&cmd);
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.add_enabled(!s.keys.is_empty(), egui::Button::new(t("Вернуть все как было", "Reset all"))).clicked() {
+            s.keys.clear();
+        }
+        ui.label(RichText::new(t("Tab / Shift+Tab — отступ, Ctrl+C / V / X / A / Z — как везде", "Tab / Shift+Tab: indent; Ctrl+C / V / X / A / Z: as everywhere")).small().weak());
+    });
+}
+
 fn settings(app: &mut App, ctx: &egui::Context) {
     if !app.settings_open {
         return;
@@ -1119,20 +1215,52 @@ fn settings(app: &mut App, ctx: &egui::Context) {
     let id = egui::Id::new("settings-page");
     let mut page: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
     // One size whatever the page (a page's content scrolls inside it).
-    let size = egui::vec2(720.0, 560.0).min(ctx.content_rect().size() - egui::vec2(40.0, 60.0));
-    egui::Window::new(t("Настройки", "Settings")).id(egui::Id::new("settings-window")).open(&mut open).fixed_size(size).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            for (i, n) in [t("Общие", "General"), t("Редактор", "Editor"), t("Анализ и подсказки", "Checks and hints"), t("Стиль кода", "Code style"), t("Подсветка", "Colours"), t("Оформление", "Look"), t("Драйверы", "Drivers")].iter().enumerate() {
-                if ui.selectable_label(page == i, *n).clicked() {
+    let size = egui::vec2(900.0, 600.0).min(ctx.content_rect().size() - egui::vec2(40.0, 60.0));
+    let pages = [
+        t("Общие", "General"),
+        t("Редактор", "Editor"),
+        t("Анализ и подсказки", "Checks and hints"),
+        t("Стиль кода", "Code style"),
+        t("Подсветка", "Colours"),
+        t("Оформление", "Look"),
+        t("Драйверы", "Drivers"),
+        t("Горячие клавиши", "Shortcuts"),
+    ];
+    let mut capture: Option<(crate::keys::Cmd, Option<usize>)> = ctx.data(|d| d.get_temp(egui::Id::new("key-capture"))).flatten();
+    // (In the middle, where it stays.)
+    egui::Window::new(t("Настройки", "Settings"))
+        .id(egui::Id::new("settings-window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size(size)
+        .show(ctx, |ui| {
+    ui.horizontal_top(|ui| {
+        // The sections, at the side.
+        ui.allocate_ui_with_layout(egui::vec2(180.0, ui.available_height()), egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+            ui.set_width(180.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
+            for (i, n) in pages.iter().enumerate() {
+                let r = ui.add(egui::Button::selectable(page == i, RichText::new(*n).size(14.5)).frame_when_inactive(page == i));
+                if r.clicked() && page != i {
                     page = i;
+                    capture = None;
                 }
             }
         });
         ui.separator();
+        ui.vertical(|ui| {
+        ui.label(RichText::new(pages[page.min(pages.len() - 1)]).heading());
+        ui.add_space(2.0);
+        ui.separator();
         let s = &mut app.settings;
-        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match page {
+        egui::ScrollArea::both().id_salt(("settings-page", page)).auto_shrink([false, false]).show(ui, |ui| match page {
             5 => look(ui, s),
             6 => drivers_ui(ui, s),
+            7 => keys_ui(ui, s, &mut capture),
             0 => {
                 ui.horizontal(|ui| {
                     ui.label(t("Язык", "Language"));
@@ -1277,7 +1405,14 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 });
             }
         });
+        });
     });
+        });
+    if !open {
+        capture = None;
+    }
+    app.key_capture = capture.is_some();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("key-capture"), capture));
     ctx.data_mut(|d| d.insert_temp(id, page));
     if app.settings != before {
         app.save_settings();
@@ -1464,29 +1599,23 @@ fn small(app: &mut App, ctx: &egui::Context) {
             ui.label(t("SQL IDE для PostgreSQL, ClickHouse, Oracle и SQLite", "SQL IDE for PostgreSQL, ClickHouse, Oracle and SQLite"));
             ui.separator();
             egui::Grid::new("keys").num_columns(2).show(ui, |ui| {
-                for (k, v) in [
-                    ("Ctrl+Enter", t("выполнить запрос под курсором / выделение", "run the statement at the cursor / selection")),
-                    ("Ctrl+Shift+Enter, F5", t("выполнить весь скрипт", "run the whole script")),
-                    ("Ctrl+E, F7", t("план запроса", "explain plan")),
-                    ("Shift+Esc", t("остановить запрос", "stop the query")),
-                    ("Ctrl+Alt+Enter", t("зафиксировать транзакцию (без автокоммита)", "commit (auto-commit off)")),
-                    ("Ctrl+Alt+Backspace", t("откатить транзакцию", "roll back")),
-                    ("Ctrl+Shift+O", t("панель структуры и поиск по ней", "structure panel and its search")),
-                    ("Alt+1 / Alt+2", t("спецификация / тело пакета", "package specification / body")),
-                    ("Ctrl+Shift+F", t("форматировать", "format")),
-                    ("Ctrl+Space", t("подсказки", "hints")),
-                    ("Ctrl+/", t("закомментировать строки", "comment lines")),
-                    ("Ctrl+D", t("дублировать строку", "duplicate line")),
-                    ("Tab / Shift+Tab", t("отступ строк", "indent lines")),
-                    ("Ctrl+T / Ctrl+W", t("новая / закрыть вкладку", "new / close tab")),
-                    ("Ctrl+Tab", t("следующая вкладка", "next tab")),
-                    ("Ctrl+S", t("сохранить в файл", "save to file")),
-                ] {
+                for c in crate::keys::Cmd::ALL {
+                    let k = crate::keys::label(&app.settings.keys, c);
+                    if k.is_empty() {
+                        continue;
+                    }
                     ui.label(RichText::new(k).monospace());
-                    ui.label(v);
+                    ui.label(c.name());
                     ui.end_row();
                 }
+                ui.label(RichText::new("Tab / Shift+Tab").monospace());
+                ui.label(t("отступ строк", "indent lines"));
+                ui.end_row();
             });
+            if ui.link(t("Изменить сочетания…", "Change the shortcuts…")).clicked() {
+                app.settings_open = true;
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-page"), 7usize));
+            }
             ui.separator();
             ui.label(RichText::new(format!("{}: {}", t("Иконки", "Icons"), crate::icons::credits())).small().weak());
         });

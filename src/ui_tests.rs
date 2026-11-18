@@ -2916,3 +2916,46 @@ fn oracle_connection_nls_lang_field() {
     h.step();
     assert!(h.query_by_label_contains("ЯЗЫК_ТЕРРИТОРИЯ.КОДИРОВКА").is_some());
 }
+
+#[test]
+fn shortcuts_changed_in_the_settings() {
+    let (mut h, _g) = harness("keys", "select 1 as a;\nselect 2 as b;", false);
+    h.state_mut().settings_open = true;
+    h.step();
+    h.step();
+    shot(&mut h, "settings");
+    // The window is in the middle.
+    let r = h.get_all_by_label("Общие").map(|n| n.rect()).min_by(|a, b| a.min.x.total_cmp(&b.min.x)).unwrap();
+    assert!(r.min.x > 150.0, "{r:?}");
+    h.get_all_by_label("Горячие клавиши").min_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x)).unwrap().click();
+    h.step();
+    h.step();
+    shot(&mut h, "settings-keys");
+    // F5 of "Run the script" → F9.
+    h.get_by_label("F5").click();
+    h.step();
+    assert!(h.state().key_capture);
+    key(&mut h, egui::Key::F9, egui::Modifiers::NONE);
+    h.step();
+    assert!(!h.state().key_capture);
+    assert_eq!(crate::keys::label(&h.state().settings.keys, crate::keys::Cmd::RunScript), "Ctrl+Shift+Enter / F9");
+    // A key another command has: shown in red, said whose.
+    h.get_all_by_label("+").min_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y)).unwrap().click();
+    h.step();
+    key(&mut h, egui::Key::E, egui::Modifiers::COMMAND);
+    h.step();
+    assert_eq!(crate::keys::taken_by(&h.state().settings.keys, &crate::keys::Chord::new(egui::Modifiers::COMMAND, egui::Key::E), crate::keys::Cmd::Explain), Some(crate::keys::Cmd::RunStatement), "the first row's + took Ctrl+E");
+    shot(&mut h, "settings-keys-clash");
+    h.state_mut().settings.keys.remove(&crate::keys::Cmd::RunStatement);
+    h.state_mut().settings_open = false;
+    h.step();
+    // F9 runs the script now; F5 doesn't.
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::F5, egui::Modifiers::NONE);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    assert!(h.state().rt[&id].results.is_empty(), "F5 does nothing now");
+    key(&mut h, egui::Key::F9, egui::Modifiers::NONE);
+    settle(&mut h);
+    assert_eq!(h.state().rt[&id].results.len(), 2, "F9 ran both");
+}

@@ -167,6 +167,8 @@ pub struct Settings {
     /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
     pub embedded_sql: bool,
     pub format: FmtOptions,
+    /// Keys set instead of the usual ones (by command).
+    pub keys: crate::keys::Keymap,
     pub dark: Palette,
     pub light: Palette,
     /// Confirm UPDATE / DELETE without WHERE before running.
@@ -222,6 +224,7 @@ impl Default for Settings {
         Self {
             russian: None,
             theme: ThemePref::System,
+            keys: Default::default(),
             ui_scale: 1.0,
             font_size: 14.0,
             tab_width: 4,

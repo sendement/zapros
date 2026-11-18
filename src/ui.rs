@@ -216,7 +216,7 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
     if ui.button(t("Открыть папку проекта…", "Open project folder…")).clicked() {
         app.project_input = Some(app.session.project.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned()));
     }
-    if ui.button(format!("{}   Ctrl+S", t("Сохранить", "Save"))).clicked() {
+    if ui.button(format!("{}   {}", t("Сохранить", "Save"), crate::keys::label(&app.settings.keys, crate::keys::Cmd::Save))).clicked() {
         let (wi, ti) = (app.session.active, app.ws().active);
         app.save_tab(wi, ti);
     }
@@ -260,6 +260,9 @@ fn conn_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 }
 
 fn query_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    use crate::keys::Cmd;
+    let km = app.settings.keys.clone();
+    let k = |c: Cmd| crate::keys::label(&km, c);
     let mut act = |ui: &mut egui::Ui, label: &str, keys: &str, a: Action| {
         if ui.button(format!("{label}   {keys}")).clicked() {
             match a {
@@ -274,15 +277,15 @@ fn query_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         }
     };
-    act(ui, t("Выполнить запрос", "Run statement"), "Ctrl+Enter", Action::RunStatement);
-    act(ui, t("Выполнить скрипт", "Run script"), "Ctrl+Shift+Enter / F5", Action::RunScript);
-    act(ui, t("План запроса", "Explain plan"), "Ctrl+E / F7", Action::Explain);
-    act(ui, t("Остановить", "Stop"), "Shift+Esc", Action::Cancel);
+    act(ui, t("Выполнить запрос", "Run statement"), &k(Cmd::RunStatement), Action::RunStatement);
+    act(ui, t("Выполнить скрипт", "Run script"), &k(Cmd::RunScript), Action::RunScript);
+    act(ui, t("План запроса", "Explain plan"), &k(Cmd::Explain), Action::Explain);
+    act(ui, t("Остановить", "Stop"), &k(Cmd::Cancel), Action::Cancel);
     ui.separator();
-    act(ui, t("Зафиксировать транзакцию", "Commit"), "Ctrl+Alt+Enter", Action::Commit);
-    act(ui, t("Откатить транзакцию", "Roll back"), "Ctrl+Alt+Backspace", Action::Rollback);
+    act(ui, t("Зафиксировать транзакцию", "Commit"), &k(Cmd::Commit), Action::Commit);
+    act(ui, t("Откатить транзакцию", "Roll back"), &k(Cmd::Rollback), Action::Rollback);
     ui.separator();
-    act(ui, t("Форматировать", "Format"), "Ctrl+Shift+F", Action::Format);
+    act(ui, t("Форматировать", "Format"), &k(Cmd::Format), Action::Format);
     ui.separator();
     ui.checkbox(&mut app.results_max, t("Результаты во всю высоту", "Results full height"));
 }
@@ -804,10 +807,10 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         // (A notebook runs, stops and explains each cell from the cell.)
         let nb = app.tab().is_notebook();
         if !nb {
-        if ui.add_enabled(running.is_none(), tinted(lbl("▶", t("Выполнить", "Run")), GREEN)).on_hover_text(tip(t("Выполнить запрос", "Run statement"), "Ctrl+Enter")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("▶", t("Выполнить", "Run")), GREEN)).on_hover_text(tip(t("Выполнить запрос", "Run statement"), &crate::keys::label(&app.settings.keys, crate::keys::Cmd::RunStatement))).clicked() {
             app.run(&ctx, false, false);
         }
-        if ui.add_enabled(running.is_none(), tinted(lbl("⏩", t("Скрипт", "Script")), TEAL)).on_hover_text(tip(t("Выполнить скрипт", "Run script"), "Ctrl+Shift+Enter / F5")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("⏩", t("Скрипт", "Script")), TEAL)).on_hover_text(tip(t("Выполнить скрипт", "Run script"), &crate::keys::label(&app.settings.keys, crate::keys::Cmd::RunScript))).clicked() {
             app.run(&ctx, true, false);
         }
         let run_now = app.rt.get(&tab.id).and_then(|r| r.run.as_ref());
@@ -820,19 +823,19 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         } else {
             let stopping = run_now.is_some_and(|r| r.stop_asked.is_some());
             let text = if stopping { t("Останавливается…", "Stopping…") } else { t("Стоп", "Stop") };
-            if ui.add_enabled(running.is_some(), tinted(lbl("■", text), RED)).on_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).on_disabled_hover_text(tip(t("Остановить", "Stop"), "Shift+Esc")).clicked() {
+            if ui.add_enabled(running.is_some(), tinted(lbl("■", text), RED)).on_hover_text(tip(t("Остановить", "Stop"), &crate::keys::label(&app.settings.keys, crate::keys::Cmd::Cancel))).on_disabled_hover_text(tip(t("Остановить", "Stop"), &crate::keys::label(&app.settings.keys, crate::keys::Cmd::Cancel))).clicked() {
                 app.cancel();
             }
             if stopping {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
-        if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), "Ctrl+E / F7")).clicked() {
+        if ui.add_enabled(running.is_none(), tinted(lbl("🔍", t("План", "Plan")), BLUE)).on_hover_text(tip(t("План запроса", "Explain plan"), &crate::keys::label(&app.settings.keys, crate::keys::Cmd::Explain))).clicked() {
             app.run(&ctx, false, true);
         }
         }
         let fmt_tip = if nb { t("Форматировать все SQL-блоки (Markdown не трогается)", "Format every SQL cell (Markdown stays)") } else { t("Форматировать", "Format") };
-        if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(fmt_tip, "Ctrl+Shift+F")).clicked() {
+        if ui.add(tinted(lbl("✨", t("Формат", "Format")), VIOLET)).on_hover_text(tip(fmt_tip, &crate::keys::label(&app.settings.keys, crate::keys::Cmd::Format))).clicked() {
             if nb { app.format_all_cells() } else { app.format() }
         }
         let copy_tip = if nb { t("Скопировать весь блокнот как SQL", "Copy the whole notebook as SQL") } else { t("Скопировать скрипт (или выделенное)", "Copy the script (or what's picked)") };
