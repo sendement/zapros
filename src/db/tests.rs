@@ -862,3 +862,26 @@ fn oracle_keeps_cyrillic() {
     s.run_limit("drop table \"Заказы_тест\"", 0, &mut |_| {}).unwrap();
     s.run_limit("drop package zz_кирилл", 0, &mut |_| {}).unwrap();
 }
+
+/// A connection's own NLS_LANG: its language and territory set for the
+/// session, the text still whole; a wrong one said plainly.
+#[test]
+fn oracle_nls_lang_of_a_connection() {
+    assert_eq!(super::Nls::parse("AMERICAN_AMERICA.AL32UTF8"), Some(super::Nls { language: "AMERICAN".into(), territory: "AMERICA".into(), charset: "AL32UTF8".into() }));
+    assert_eq!(super::Nls::parse("english_united kingdom.we8mswin1252").map(|n| (n.territory.clone(), n.utf8())), Some(("UNITED KINGDOM".into(), false)));
+    assert_eq!(super::Nls::parse(".AL32UTF8").map(|n| n.session().len()), Some(0));
+    assert!(super::Nls::parse("").is_none() && super::Nls::parse("RU'; drop").is_none());
+    let Some((mut sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) else { return };
+    let param = |s: &mut Box<dyn Session>, p: &str| rows(s.run_limit(&format!("select value from nls_session_parameters where parameter = '{p}'"), 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
+    for (nls, lang, terr, dec) in [("AMERICAN_AMERICA.AL32UTF8", "AMERICAN", "AMERICA", ".,"), ("RUSSIAN_RUSSIA.CL8MSWIN1251", "RUSSIAN", "RUSSIA", ", "), ("GERMAN_GERMANY", "GERMAN", "GERMANY", ",.")] {
+        sp.nls_lang = nls.into();
+        let mut s = open(&sp, &pw).unwrap_or_else(|e| panic!("{nls}: {}", e.message));
+        assert_eq!((param(&mut s, "NLS_LANGUAGE"), param(&mut s, "NLS_TERRITORY")), (lang.to_string(), terr.to_string()), "{nls}");
+        assert_eq!(param(&mut s, "NLS_NUMERIC_CHARACTERS").replace('\u{a0}', " "), dec, "{nls}");
+        let r = rows(s.run_limit("select 'Ёжик — №1' from dual", 1, &mut |_| {}).unwrap()).rows;
+        assert_eq!(r[0][0].as_deref(), Some("Ёжик — №1"), "{nls}");
+    }
+    sp.nls_lang = "KLINGON_QONOS.AL32UTF8".into();
+    let e = open(&sp, &pw).err().expect("a language Oracle doesn't know");
+    assert!(e.message.starts_with("NLS_LANG «KLINGON_QONOS.AL32UTF8»") && e.message.contains("ORA-"), "{}", e.message);
+}

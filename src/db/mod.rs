@@ -86,6 +86,8 @@ pub struct Spec {
     pub color: Option<[u8; 3]>,
     /// Each statement committed on its own; off: commit / rollback by hand.
     pub auto_commit: bool,
+    /// Oracle: NLS_LANG as LANGUAGE_TERRITORY.CHARSET ("" — the default).
+    pub nls_lang: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -113,6 +115,7 @@ impl Default for Spec {
             read_only: false,
             color: None,
             auto_commit: false,
+            nls_lang: String::new(),
         }
     }
 }
@@ -1018,3 +1021,51 @@ pub fn fmt_float(f: f64) -> String {
 }
 #[cfg(test)]
 mod tests;
+
+/// NLS_LANG taken apart: LANGUAGE_TERRITORY.CHARSET, each part optional.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Nls {
+    pub language: String,
+    pub territory: String,
+    pub charset: String,
+}
+
+impl Nls {
+    /// None: empty (the default) or not of that shape.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().trim_matches('"').trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (lt, charset) = match s.split_once('.') {
+            Some((a, b)) => (a, b.trim()),
+            None => (s, ""),
+        };
+        let (language, territory) = match lt.split_once('_') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (lt.trim(), ""),
+        };
+        let ok = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-');
+        if !(ok(language) && ok(territory) && charset.chars().all(|c| c.is_ascii_alphanumeric())) || (language.is_empty() && territory.is_empty() && charset.is_empty()) {
+            return None;
+        }
+        Some(Nls { language: language.to_uppercase(), territory: territory.to_uppercase(), charset: charset.to_uppercase() })
+    }
+
+    /// What the session's set with.
+    pub fn session(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.language.is_empty() {
+            out.push(format!("ALTER SESSION SET NLS_LANGUAGE = '{}'", self.language));
+        }
+        if !self.territory.is_empty() {
+            out.push(format!("ALTER SESSION SET NLS_TERRITORY = '{}'", self.territory));
+        }
+        out
+    }
+
+    /// The charset's UTF-8 (or not said).
+    pub fn utf8(&self) -> bool {
+        self.charset.is_empty() || matches!(self.charset.as_str(), "AL32UTF8" | "UTF8")
+    }
+}

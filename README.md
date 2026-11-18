@@ -419,7 +419,10 @@ install, no `LD_LIBRARY_PATH` to set (zapros restarts itself with the chosen
 folder on it — older clients find their own libraries only that way). The
 client always talks UTF-8 to the server, whatever `NLS_LANG` says: Cyrillic
 and other letters in code, comments, strings, names and error messages go
-in and come back as they are (no `NLS_LANG` to set). Build without Oracle:
+in and come back as they are (no `NLS_LANG` to set). A connection may still
+have an NLS_LANG of its own (`AMERICAN_AMERICA.AL32UTF8`, a few to pick
+from): its language and territory are set for the session (messages, date
+formats, the decimal separator); empty: the server's. Build without Oracle:
 `--no-default-features`.
 
 Settings and connections: `~/.config/zapros`; session: `~/.local/share/zapros`.

@@ -371,6 +371,43 @@ fn conn_edit(app: &mut App, ctx: &egui::Context) {
                 ui.label(t("Таймаут, с", "Timeout, s"));
                 num(ui, &mut s.connect_timeout, 1..=600);
                 ui.end_row();
+                if s.kind == Kind::Oracle {
+                    ui.label("NLS_LANG");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut s.nls_lang).desired_width(FIELD_W - 30.0).font(egui::TextStyle::Monospace).hint_text(t("по умолчанию", "default")));
+                        egui::containers::menu::MenuButton::new("▾").ui(ui, |ui| {
+                            if ui.button(t("По умолчанию", "Default")).clicked() {
+                                s.nls_lang.clear();
+                                ui.close();
+                            }
+                            for v in ["AMERICAN_AMERICA.AL32UTF8", "RUSSIAN_RUSSIA.AL32UTF8", "RUSSIAN_RUSSIA.CL8MSWIN1251", "AMERICAN_AMERICA.WE8MSWIN1252", "ENGLISH_UNITED KINGDOM.AL32UTF8"] {
+                                if ui.button(RichText::new(v).monospace()).clicked() {
+                                    s.nls_lang = v.into();
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    ui.end_row();
+                    let note = if s.nls_lang.trim().is_empty() {
+                        Some((false, t("Язык сообщений и форматы — как на сервере; обмен в UTF-8", "Messages and formats as the server's; talks UTF-8").to_string()))
+                    } else {
+                        match crate::db::Nls::parse(&s.nls_lang) {
+                            None => Some((true, t("Нужно в виде ЯЗЫК_ТЕРРИТОРИЯ.КОДИРОВКА, например AMERICAN_AMERICA.AL32UTF8", "As LANGUAGE_TERRITORY.CHARSET, e.g. AMERICAN_AMERICA.AL32UTF8").to_string())),
+                            Some(n) if !n.utf8() => Some((false, format!("{} {}: {}", t("Язык и территория — для сессии. Обмен всё равно в UTF-8, сервер сам переводит в", "Language and territory: for the session. It still talks UTF-8, the server converts to"), n.charset, t("текст не портится", "nothing's garbled")))),
+                            Some(_) => Some((false, t("Язык и территория — для сессии (сообщения, даты, числа); обмен в UTF-8", "Language and territory: for the session (messages, dates, numbers); talks UTF-8").to_string())),
+                        }
+                    };
+                    if let Some((bad, text)) = note {
+                        ui.label("");
+                        let r = RichText::new(text).small();
+                        ui.scope(|ui| {
+                            ui.set_max_width(FIELD_W);
+                            ui.add(egui::Label::new(if bad { r.color(crate::ui::RED) } else { r.weak() }).wrap());
+                        });
+                        ui.end_row();
+                    }
+                }
             }
             ui.label(t("Строк за раз", "Rows per batch"));
             ui.horizontal(|ui| {

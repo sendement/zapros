@@ -2901,3 +2901,18 @@ fn star_opened_into_columns() {
     assert_eq!(h.state().tab().text, "select id, customer_id, total from orders o");
     assert!(h.state().star.is_none());
 }
+
+#[test]
+fn oracle_connection_nls_lang_field() {
+    let (mut h, _g) = harness("nls", "", false);
+    let spec = crate::db::Spec { kind: Kind::Oracle, name: "Склад".into(), host: "db.local".into(), port: 1521, database: "ORCLPDB1".into(), user: "shop".into(), nls_lang: "RUSSIAN_RUSSIA.CL8MSWIN1251".into(), ..Default::default() };
+    h.state_mut().conn_edit = Some(crate::dialogs::ConnEdit::new(Some(spec)));
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("сервер сам переводит в CL8MSWIN1251").is_some(), "the note on its charset");
+    shot(&mut h, "conn-nls");
+    h.state_mut().conn_edit.as_mut().unwrap().spec.nls_lang = "nonsense.;".into();
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("ЯЗЫК_ТЕРРИТОРИЯ.КОДИРОВКА").is_some());
+}

@@ -160,6 +160,17 @@ impl Ora {
             f
         })?;
         conn.set_autocommit(false);
+        // NLS_LANG of its own: its language and territory for the session.
+        // (Its charset aside: the client talks UTF-8, the server converts.)
+        if let Some(n) = Nls::parse(&spec.nls_lang) {
+            for sql in n.session() {
+                conn.execute(&sql, &[]).map_err(|e| {
+                    let mut f = fail(e);
+                    f.message = format!("NLS_LANG «{}»: {}", spec.nls_lang.trim(), f.message);
+                    f
+                })?;
+            }
+        }
         conn.execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[]).ok();
         if spec.read_only {
             conn.execute("SET TRANSACTION READ ONLY", &[]).ok();
@@ -702,3 +713,4 @@ fn qualify_unit(text: &str, ty: &str, schema: &str) -> String {
     }
     format!("{}\"{}\".{}", &rest[..name_at], schema.replace('"', "\"\""), tail)
 }
+
