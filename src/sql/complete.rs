@@ -7,10 +7,14 @@ use std::ops::Range;
 
 use super::lex::{self, Tk, Tok};
 use super::{Case, Dialect};
-use crate::db::Relation;
+use crate::db::{Relation, Routine};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
+    /// A routine's parameter by name (`p_id => `).
+    Param,
+    /// From the query's own SELECT (GROUP BY, ORDER BY), an aggregate (HAVING).
+    Expr,
     Join,
     Column,
     Table,
@@ -23,6 +27,8 @@ pub enum Kind {
 impl Kind {
     pub fn icon(self) -> &'static str {
         match self {
+            Kind::Param => "≔",
+            Kind::Expr => "≡",
             Kind::Join => "⋈",
             Kind::Column => "▸",
             Kind::Table => "▦",
@@ -379,6 +385,245 @@ fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) ->
     out
 }
 
+/// Aggregate functions (HAVING's, and what GROUP BY leaves out).
+const AGGS: &[&str] = &["COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STRING_AGG", "LISTAGG", "GROUP_CONCAT", "STDDEV", "VARIANCE", "BOOL_AND", "BOOL_OR", "EVERY", "JSON_AGG", "JSONB_AGG", "XMLAGG", "MEDIAN", "UNIQ", "UNIQEXACT", "ANY", "ANYLAST", "ARGMIN", "ARGMAX", "GROUPARRAY", "GROUPUNIQARRAY", "QUANTILE", "COUNTIF", "SUMIF", "AVGIF"];
+
+/// The clause the cursor's in at its query's level (after `before`, the
+/// statement's tokens up to it): "GROUP BY", "HAVING", "ORDER BY"…; and
+/// where that level's SELECT is (an index into `before`).
+fn clause_here(src: &str, before: &[Tok]) -> (String, Option<usize>) {
+    let mut depth = 0;
+    let mut clause = String::new();
+    let mut select = None;
+    for k in (0..before.len()).rev() {
+        let t = &before[k];
+        match t.kind {
+            Tk::Close => depth += 1,
+            Tk::Open if depth == 0 => break,
+            Tk::Open => depth -= 1,
+            Tk::Keyword | Tk::Word if depth == 0 => {
+                let u = t.text(src).to_ascii_uppercase();
+                if clause.is_empty() {
+                    if u == "BY" && k > 0 {
+                        let p = before[k - 1].text(src).to_ascii_uppercase();
+                        if matches!(p.as_str(), "GROUP" | "ORDER" | "PARTITION") {
+                            clause = format!("{p} BY");
+                        }
+                    } else if matches!(u.as_str(), "SELECT" | "FROM" | "WHERE" | "HAVING" | "ON" | "SET" | "VALUES" | "LIMIT" | "JOIN" | "USING" | "QUALIFY" | "PREWHERE" | "WINDOW") {
+                        clause = u.clone();
+                    }
+                }
+                if u == "SELECT" {
+                    select = Some(k);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    (clause, select)
+}
+
+/// A SELECT list's items (from the token after SELECT): (expression,
+/// alias, an aggregate in it). `*` and `t.*` left out.
+fn select_items(src: &str, toks: &[Tok]) -> Vec<(String, Option<String>, bool)> {
+    let up = |t: &Tok| t.text(src).to_ascii_uppercase();
+    let mut k = 0;
+    while toks.get(k).is_some_and(|t| matches!(up(t).as_str(), "DISTINCT" | "ALL")) {
+        k += 1;
+    }
+    let mut items: Vec<&[Tok]> = Vec::new();
+    let (mut from, mut depth) = (k, 0);
+    let mut end = toks.len();
+    for (j, t) in toks.iter().enumerate().skip(k) {
+        match t.kind {
+            Tk::Open => depth += 1,
+            Tk::Close if depth == 0 => {
+                end = j;
+                break;
+            }
+            Tk::Close => depth -= 1,
+            Tk::Comma if depth == 0 => {
+                items.push(&toks[from..j]);
+                from = j + 1;
+            }
+            Tk::Keyword if depth == 0 && matches!(up(t).as_str(), "FROM" | "INTO" | "WHERE" | "GROUP" | "ORDER" | "HAVING" | "LIMIT" | "UNION") => {
+                end = j;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if from < end {
+        items.push(&toks[from..end]);
+    }
+    let mut out = Vec::new();
+    for it in items {
+        let Some(last) = it.last() else { continue };
+        if last.text(src) == "*" {
+            continue;
+        }
+        let prev = it.len().checked_sub(2).map(|k| &it[k]);
+        let as_ = prev.is_some_and(|p| up(p) == "AS");
+        let bare = it.len() > 1 && matches!(last.kind, Tk::Word | Tk::Quoted) && prev.is_some_and(|p| matches!(p.kind, Tk::Close | Tk::Word | Tk::Quoted | Tk::Number | Tk::Str)) && !prev.is_some_and(|p| p.kind == Tk::Dot);
+        let (expr, alias) = if as_ && it.len() > 2 {
+            (&it[..it.len() - 2], ident_text(src, last))
+        } else if bare {
+            (&it[..it.len() - 1], ident_text(src, last))
+        } else {
+            (it, None)
+        };
+        let (Some(a), Some(b)) = (expr.first(), expr.last()) else { continue };
+        let text = src[a.start..b.end].split_whitespace().collect::<Vec<_>>().join(" ");
+        let agg = expr.windows(2).any(|w| w[1].kind == Tk::Open && matches!(w[0].kind, Tk::Word | Tk::Keyword) && AGGS.contains(&up(&w[0]).as_str()));
+        out.push((text, alias, agg));
+    }
+    out
+}
+
+/// In a routine's call at an argument's start: (its qualifier — package
+/// or schema —, its name, the parameters already named).
+fn call_here(src: &str, before: &[Tok]) -> Option<(Option<String>, String, Vec<String>)> {
+    let last = before.last()?;
+    if !matches!(last.kind, Tk::Open | Tk::Comma) {
+        return None;
+    }
+    let mut depth = 0;
+    let mut open = None;
+    for k in (0..before.len()).rev() {
+        match before[k].kind {
+            Tk::Close => depth += 1,
+            Tk::Open if depth == 0 => {
+                open = Some(k);
+                break;
+            }
+            Tk::Open => depth -= 1,
+            _ => {}
+        }
+    }
+    let o = open?;
+    let name_t = before.get(o.checked_sub(1)?)?;
+    if !matches!(name_t.kind, Tk::Word | Tk::Quoted | Tk::Keyword) {
+        return None;
+    }
+    let name = ident_text(src, name_t)?;
+    let qual = (o >= 3 && before[o - 2].kind == Tk::Dot).then(|| ident_text(src, &before[o - 3])).flatten();
+    let mut given = Vec::new();
+    let mut depth = 0;
+    for k in o + 1..before.len() {
+        match before[k].kind {
+            Tk::Open => depth += 1,
+            Tk::Close => depth -= 1,
+            Tk::Word | Tk::Quoted | Tk::Keyword if depth == 0 && before.get(k + 1).is_some_and(|t| t.text(src).starts_with("=>")) => {
+                given.extend(ident_text(src, &before[k]));
+            }
+            _ => {}
+        }
+    }
+    Some((qual, name, given))
+}
+
+/// The routines a call may be: by name, in the package or schema named.
+pub fn routines_named<'a>(routines: &'a [Routine], qual: Option<&str>, name: &str) -> Vec<&'a Routine> {
+    routines
+        .iter()
+        .filter(|r| r.name.eq_ignore_ascii_case(name))
+        .filter(|r| match qual {
+            Some(q) => r.package.eq_ignore_ascii_case(q) || (r.package.is_empty() && r.schema.eq_ignore_ascii_case(q)),
+            None => r.package.is_empty(),
+        })
+        .collect()
+}
+
+/// Ctrl+click on a `*` of a SELECT list: what it stands for — the range to
+/// replace (with `t.` when there), the columns (name, type, whose) and
+/// whether they need their table's name (more than one table).
+pub fn star_at(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation]) -> Option<(Range<usize>, Vec<(String, String, String)>, bool)> {
+    let toks: Vec<Tok> = lex::lex(src, d).into_iter().filter(|t| !t.trivia()).collect();
+    let k = toks.iter().position(|t| t.start <= at && at < t.end.max(t.start + 1) && t.text(src) == "*")?;
+    let prev = k.checked_sub(1).map(|j| &toks[j]);
+    let up = |t: &Tok| t.text(src).to_ascii_uppercase();
+    let alias = if prev.is_some_and(|p| p.kind == Tk::Dot) && k >= 2 { ident_text(src, &toks[k - 2]) } else { None };
+    let item_start = prev.is_none_or(|p| p.kind == Tk::Comma || matches!(up(p).as_str(), "SELECT" | "DISTINCT" | "ALL"));
+    if alias.is_none() && !item_start {
+        return None;
+    }
+    let stmt = super::statement_at(src, at, d, true).unwrap_or(0..src.len());
+    let stmt_text = &src[stmt.clone()];
+    // Its query's level: inside the innermost bracket around it.
+    let rel_at = at - stmt.start;
+    let st: Vec<Tok> = lex::lex(stmt_text, d).into_iter().filter(|t| !t.trivia()).collect();
+    let mut opens = Vec::new();
+    let mut level = 0..stmt_text.len();
+    for t in &st {
+        if t.start >= rel_at {
+            break;
+        }
+        match t.kind {
+            Tk::Open => opens.push(t.end),
+            Tk::Close => {
+                opens.pop();
+            }
+            _ => {}
+        }
+    }
+    if let Some(&o) = opens.last() {
+        level.start = o;
+        let mut depth = 0;
+        for t in st.iter().filter(|t| t.start >= o) {
+            match t.kind {
+                Tk::Open => depth += 1,
+                Tk::Close if depth == 0 => {
+                    level.end = t.start;
+                    break;
+                }
+                Tk::Close => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    // (Brackets inside it blanked: their tables aren't its.)
+    let mut body: Vec<u8> = stmt_text[level.clone()].as_bytes().to_vec();
+    let mut depth = 0;
+    for t in lex::lex(&stmt_text[level.clone()], d) {
+        match t.kind {
+            Tk::Open => {
+                depth += 1;
+                continue;
+            }
+            Tk::Close => {
+                depth -= 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth > 0 {
+            for b in &mut body[t.start..t.end] {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+        }
+    }
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let refs = scope(&body, d);
+    let made: Vec<Relation> = derived(stmt_text, d, &[lent, rels]).into_iter().map(|(r, _)| r).collect();
+    let look = |r: &Ref| find(&made, r).or_else(|| find(lent, r)).or_else(|| find(rels, r));
+    let mut cols = Vec::new();
+    let mut tables = 0;
+    for r in refs.iter().filter(|r| alias.as_deref().is_none_or(|a| r.alias.eq_ignore_ascii_case(a))) {
+        if let Some(rel) = look(r) {
+            tables += 1;
+            cols.extend(rel.cols.iter().map(|(c, ty)| (c.clone(), ty.clone(), r.alias.clone())));
+        }
+    }
+    if cols.is_empty() {
+        return None;
+    }
+    let range = if alias.is_some() { toks[k - 2].start..toks[k].end } else { toks[k].start..toks[k].end };
+    Some((range, cols, alias.is_some() || tables > 1))
+}
+
 fn find<'a>(rels: &'a [Relation], r: &Ref) -> Option<&'a Relation> {
     rels.iter().find(|x| x.name.eq_ignore_ascii_case(&r.table) && r.schema.as_ref().is_none_or(|s| s.eq_ignore_ascii_case(&x.schema)))
 }
@@ -488,7 +733,7 @@ fn join_guesses<'a>(look: impl Fn(&Ref) -> Option<&'a Relation>, refs: &[Ref], d
 
 /// Hints at `at` (None inside strings and comments, or with nothing to say).
 /// (`lent`: relations from elsewhere, a notebook's CTEs from cells above.)
-pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
+pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
     let at = at.min(src.len());
     let toks = lex::lex(src, d);
     if toks.iter().any(|t| t.start < at && (at < t.end || t.open && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
@@ -500,10 +745,39 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
         let s = before.char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '"' || *c == '`').last().map_or(before.len(), |(i, _)| i);
         before[s..].trim_matches(|c| c == '"' || c == '`').to_string()
     });
-    if prefix.is_empty() && qualifier.is_none() && !forced {
+    let stmt = super::statement_at(src, at, d, true).unwrap_or(0..src.len());
+    // A routine's call at an argument's start: its parameters by name.
+    let call = if qualifier.is_none() {
+        let b: Vec<Tok> = lex::lex(&src[stmt.start..start], d).into_iter().filter(|t| !t.trivia()).collect();
+        call_here(&src[stmt.start..start], &b)
+    } else {
+        None
+    };
+    let mut params: Vec<Item> = Vec::new();
+    if let Some((q, name, given)) = &call {
+        for r in routines_named(routines, q.as_deref(), name) {
+            for a in &r.args {
+                if a.name.is_empty() || given.iter().any(|g| g.eq_ignore_ascii_case(&a.name)) || params.iter().any(|p| p.label.eq_ignore_ascii_case(&a.name)) {
+                    continue;
+                }
+                let mut detail = a.ty.clone();
+                if !a.mode.is_empty() && a.mode != "IN" {
+                    detail = format!("{} {detail}", a.mode);
+                }
+                if a.default {
+                    detail += crate::i18n::t(" · есть по умолчанию", " · has a default");
+                }
+                params.push(Item { label: a.name.clone(), insert: format!("{} => $0", quote(&a.name, d)), kind: Kind::Param, detail });
+            }
+        }
+    }
+    if prefix.is_empty() && qualifier.is_none() && !forced && params.is_empty() {
         return None;
     }
-    let stmt = super::statement_at(src, at, d, true).unwrap_or(0..src.len());
+    // (Just opened: only its parameters.)
+    if prefix.is_empty() && !forced && !params.is_empty() {
+        return Some(Hints { range: start..at, items: params });
+    }
     let stmt_text = &src[stmt.start..stmt.end.max(at)];
     let refs = scope(stmt_text, d);
     // Its own CTEs and subqueries, then what's lent, then the database's.
@@ -513,7 +787,29 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
     let ctes = || made.iter().filter(|(_, c)| *c).map(|(r, _)| r).chain(lent).map(|r| Item { label: r.name.clone(), insert: quote(&r.name, d), kind: Kind::Table, detail: format!("WITH · {}", r.cols.len()) });
     let before: Vec<Tok> = lex::lex(&src[stmt.start..start], d).into_iter().filter(|t| !t.trivia()).collect();
     let prev = before.last().map(|t| t.text(&src[stmt.start..start]).to_ascii_uppercase()).unwrap_or_default();
-    let mut items: Vec<Item> = Vec::new();
+    let mut items: Vec<Item> = params;
+    // GROUP BY, ORDER BY: the query's own SELECT first; HAVING: aggregates.
+    let (clause, select) = clause_here(&src[stmt.start..start], &before);
+    if qualifier.is_none() {
+        let sel = select.map(|k| select_items(&src[stmt.start..start], &before[k + 1..])).unwrap_or_default();
+        let from_select = crate::i18n::t("из SELECT", "from SELECT");
+        match clause.as_str() {
+            "GROUP BY" => items.extend(sel.iter().filter(|(_, _, agg)| !agg).map(|(e, _, _)| Item { label: e.clone(), insert: e.clone(), kind: Kind::Expr, detail: from_select.into() })),
+            "ORDER BY" => items.extend(sel.iter().map(|(e, a, _)| {
+                let x = a.as_ref().map_or_else(|| e.clone(), |a| quote(a, d));
+                Item { label: x.clone(), insert: x, kind: Kind::Expr, detail: if a.is_some() { format!("{from_select}: {e}") } else { from_select.into() } }
+            })),
+            "HAVING" => {
+                let agg = crate::i18n::t("агрегат", "aggregate");
+                items.extend(sel.iter().filter(|(_, _, agg)| *agg).map(|(e, _, _)| Item { label: e.clone(), insert: e.clone(), kind: Kind::Expr, detail: from_select.into() }));
+                for f in ["COUNT(*)", "COUNT(DISTINCT $0)", "SUM($0)", "AVG($0)", "MIN($0)", "MAX($0)"] {
+                    let f = if d == Dialect::ClickHouse { f.to_lowercase().replace("distinct", "DISTINCT") } else { case.apply(f) };
+                    items.push(Item { label: f.replace("$0", "…"), insert: f, kind: Kind::Expr, detail: agg.into() });
+                }
+            }
+            _ => {}
+        }
+    }
     let col = |name: &str, ty: &str, owner: &str| Item { label: name.to_string(), insert: quote(name, d), kind: Kind::Column, detail: format!("{ty} · {owner}") };
     if let Some(q) = &qualifier {
         // alias. or table. → columns; schema. → its tables.
@@ -572,10 +868,11 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
             Some((s, it))
         })
         .collect();
-    // Columns keep their table's order; the rest go shortest first.
+    // Columns, the SELECT's own and parameters keep their order; the rest
+    // go shortest first.
     scored.sort_by(|a, b| {
         let o = a.0.cmp(&b.0).then(a.1.kind.cmp(&b.1.kind));
-        if a.1.kind == Kind::Column { o } else { o.then(a.1.label.len().cmp(&b.1.label.len())).then(a.1.label.cmp(&b.1.label)) }
+        if matches!(a.1.kind, Kind::Column | Kind::Expr | Kind::Param) { o } else { o.then(a.1.label.len().cmp(&b.1.label.len())).then(a.1.label.cmp(&b.1.label)) }
     });
     scored.dedup_by(|a, b| a.1.label == b.1.label && a.1.kind == b.1.kind && a.1.detail == b.1.detail);
     let items: Vec<Item> = scored.into_iter().map(|(_, i)| i).take(60).collect();
@@ -605,7 +902,78 @@ mod tests {
 
     fn labels_at(src: &str, at: &str, lent: &[Relation]) -> Vec<(String, String)> {
         let at = src.find(at).unwrap() + at.len();
-        hints(src, at, Dialect::Postgres, &rels(), lent, Case::Upper, true, false).map(|h| h.items.into_iter().filter(|i| i.kind == Kind::Column || i.kind == Kind::Table).map(|i| (i.label, i.detail)).collect()).unwrap_or_default()
+        hints(src, at, Dialect::Postgres, &rels(), lent, &[], Case::Upper, true, false).map(|h| h.items.into_iter().filter(|i| i.kind == Kind::Column || i.kind == Kind::Table).map(|i| (i.label, i.detail)).collect()).unwrap_or_default()
+    }
+
+    fn items_at(src: &str, at: &str, routines: &[Routine], forced: bool) -> Vec<Item> {
+        let at = src.find(at).unwrap() + at.len();
+        hints(src, at, Dialect::Postgres, &rels(), &[], routines, Case::Upper, forced, false).map(|h| h.items).unwrap_or_default()
+    }
+
+    #[test]
+    fn clauses_hint_their_own() {
+        let src = "select u.name, count(*) as n, sum(o.total) total from users u join orders o on o.user_id = u.id group by  order by ";
+        // GROUP BY: what the SELECT has, its aggregates left out.
+        let h = items_at(src, "group by ", &[], true);
+        let exprs: Vec<&str> = h.iter().filter(|i| i.kind == Kind::Expr).map(|i| i.label.as_str()).collect();
+        assert_eq!(exprs, ["u.name"], "{h:?}");
+        assert_eq!(h[0].label, "u.name");
+        // ORDER BY: aliases where given.
+        let h = items_at(src, "order by ", &[], true);
+        let exprs: Vec<&str> = h.iter().filter(|i| i.kind == Kind::Expr).map(|i| i.insert.as_str()).collect();
+        assert_eq!(exprs, ["u.name", "n", "total"], "{h:?}");
+        // HAVING: the aggregates first, then the usual ones; typed: by it.
+        let src = "select u.name, count(*) as n from users u group by u.name having s";
+        let h = items_at(src, "having s", &[], false);
+        assert_eq!(h[0].label, "SUM(…)", "{h:?}");
+        let src = "select u.name, count(*) as n from users u group by u.name having ";
+        let h = items_at(src, "having ", &[], true);
+        assert_eq!(h.iter().take(2).map(|i| i.label.as_str()).collect::<Vec<_>>(), ["count(*)", "COUNT(*)"], "{h:?}");
+        // A subquery's own SELECT, not the outer one's.
+        let src = "select a from (select b, max(c) m from t group by ) x";
+        let h = items_at(src, "group by ", &[], true);
+        assert_eq!(h.iter().filter(|i| i.kind == Kind::Expr).map(|i| i.label.as_str()).collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn calls_hint_their_parameters() {
+        let r = vec![
+            Routine { schema: "public".into(), package: String::new(), name: "add_order".into(), args: vec![crate::db::Arg { name: "p_user".into(), ty: "integer".into(), mode: "IN".into(), default: false }, crate::db::Arg { name: "p_total".into(), ty: "numeric".into(), mode: "IN".into(), default: true }] },
+            Routine { schema: "SHOP".into(), package: "PKG".into(), name: "ADD_ORDER".into(), args: vec![crate::db::Arg { name: "P_X".into(), ty: "NUMBER".into(), mode: "IN OUT".into(), default: false }] },
+        ];
+        // Just opened: its parameters only, each to be named.
+        let h = items_at("select add_order(", "add_order(", &r, false);
+        assert_eq!(h.iter().map(|i| i.insert.as_str()).collect::<Vec<_>>(), ["p_user => $0", "p_total => $0"]);
+        assert!(h[1].detail.contains("numeric"), "{h:?}");
+        // Named already: not again.
+        let h = items_at("select add_order(p_user => 1, ", "1, ", &r, false);
+        assert_eq!(h.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["p_total"]);
+        // A package's: by its name.
+        let h = items_at("begin pkg.add_order( end;", "add_order(", &r, false);
+        assert_eq!(h.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["P_X"]);
+        assert!(h[0].detail.starts_with("IN OUT"));
+        // Not a call of one known: nothing pops up.
+        assert!(items_at("select count(", "count(", &r, false).is_empty());
+    }
+
+    #[test]
+    fn star_stands_for_columns() {
+        let src = "select * from users u join orders o on o.user_id = u.id";
+        let (r, cols, q) = star_at(src, 7, Dialect::Postgres, &rels(), &[]).unwrap();
+        assert_eq!(r, 7..8);
+        assert_eq!(cols.iter().map(|c| format!("{}.{}", c.2, c.0)).collect::<Vec<_>>(), ["u.id", "u.name", "o.id", "o.user_id", "o.total"]);
+        assert!(q);
+        let src = "select o.*, 1 from orders o";
+        let (r, cols, _) = star_at(src, 9, Dialect::Postgres, &rels(), &[]).unwrap();
+        assert_eq!(&src[r], "o.*");
+        assert_eq!(cols.len(), 3);
+        // A subquery's own tables; count(*) isn't a list's.
+        let src = "select x.* from (select * from users) x";
+        let at = src.rfind('*').unwrap();
+        let (_, cols, q) = star_at(src, at, Dialect::Postgres, &rels(), &[]).unwrap();
+        assert_eq!((cols.len(), q), (2, false));
+        assert!(star_at("select count(*) from users", 13, Dialect::Postgres, &rels(), &[]).is_none());
+        assert!(star_at("select 2 * 3 from users", 9, Dialect::Postgres, &rels(), &[]).is_none());
     }
 
     #[test]
@@ -642,12 +1010,12 @@ mod tests {
     #[test]
     fn alias_columns() {
         let src = "select u. from users u";
-        let h = hints(src, 9, Dialect::Postgres, &rels(), &[], Case::Upper, false, false).unwrap();
+        let h = hints(src, 9, Dialect::Postgres, &rels(), &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["id", "name"]);
-        let h = hints("select o. from orders o", 9, Dialect::Postgres, &rels(), &[], Case::Upper, false, false).unwrap();
+        let h = hints("select o. from orders o", 9, Dialect::Postgres, &rels(), &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["id", "user_id", "total"]);
         let src = "select o.to from orders as o";
-        let h = hints(src, 11, Dialect::Postgres, &rels(), &[], Case::Upper, false, false).unwrap();
+        let h = hints(src, 11, Dialect::Postgres, &rels(), &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "total");
         assert_eq!(h.range, 9..11);
     }
@@ -655,10 +1023,10 @@ mod tests {
     #[test]
     fn tables_after_from_and_joins() {
         let src = "select * from us";
-        let h = hints(src, src.len(), Dialect::Postgres, &rels(), &[], Case::Upper, false, false).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &rels(), &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "users");
         let src = "select * from users u join orders o on ";
-        let h = hints(src, src.len(), Dialect::Postgres, &rels(), &[], Case::Upper, true, false).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &rels(), &[], &[], Case::Upper, true, false).unwrap();
         assert_eq!(h.items[0].insert, "o.user_id = u.id");
     }
 
@@ -667,33 +1035,33 @@ mod tests {
         let mut r = rels();
         r.push(Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true });
         let src = "select * from inv";
-        let h = hints(src, src.len(), Dialect::Postgres, &r, &[], Case::Upper, false, false).unwrap();
+        let h = hints(src, src.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].insert, "sales.invoices");
         // Its columns by alias all the same.
-        let h = hints("select i. from sales.invoices i", 9, Dialect::Postgres, &r, &[], Case::Upper, false, false).unwrap();
+        let h = hints("select i. from sales.invoices i", 9, Dialect::Postgres, &r, &[], &[], Case::Upper, false, false).unwrap();
         assert_eq!(h.items[0].label, "id");
     }
 
     #[test]
     fn keywords_by_case_and_none_in_strings() {
-        let h = hints("sel", 3, Dialect::Postgres, &[], &[], Case::Lower, false, false).unwrap();
+        let h = hints("sel", 3, Dialect::Postgres, &[], &[], &[], Case::Lower, false, false).unwrap();
         assert!(h.items.iter().any(|i| i.insert == "select"));
         assert_eq!(h.items[0].kind, Kind::Snippet);
-        assert!(hints("select 'fro", 11, Dialect::Postgres, &[], &[], Case::Upper, false, false).is_none());
+        assert!(hints("select 'fro", 11, Dialect::Postgres, &[], &[], &[], Case::Upper, false, false).is_none());
     }
 
     #[test]
     fn schemas_quoted_when_asked() {
         let r = vec![Relation { schema: "sales".into(), name: "invoices".into(), cols: vec![("id".into(), "int".into())], qualify: true }];
         let src = "select * from inv";
-        let plain = hints(src, src.len(), Dialect::Postgres, &r, &[], Case::Upper, false, false).unwrap();
+        let plain = hints(src, src.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, false).unwrap();
         assert!(plain.items.iter().any(|i| i.insert == "sales.invoices"));
-        let quoted = hints(src, src.len(), Dialect::Postgres, &r, &[], Case::Upper, false, true).unwrap();
+        let quoted = hints(src, src.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, true).unwrap();
         assert!(quoted.items.iter().any(|i| i.insert == "\"sales\".invoices"), "{:?}", quoted.items.iter().map(|i| &i.insert).collect::<Vec<_>>());
-        let ch = hints(src, src.len(), Dialect::ClickHouse, &r, &[], Case::Upper, false, true).unwrap();
+        let ch = hints(src, src.len(), Dialect::ClickHouse, &r, &[], &[], Case::Upper, false, true).unwrap();
         assert!(ch.items.iter().any(|i| i.insert == "`sales`.invoices"));
         let s = "select * from sal";
-        let schema = hints(s, s.len(), Dialect::Postgres, &r, &[], Case::Upper, false, true).unwrap();
+        let schema = hints(s, s.len(), Dialect::Postgres, &r, &[], &[], Case::Upper, false, true).unwrap();
         assert!(schema.items.iter().any(|i| i.insert == "\"sales\""), "{:?}", schema.items.iter().map(|i| &i.insert).collect::<Vec<_>>());
     }
 
@@ -701,7 +1069,7 @@ mod tests {
     #[test]
     fn clickhouse_default_database() {
         let r = vec![Relation { schema: "default".into(), name: "orders".into(), cols: vec![("id".into(), "UInt64".into()), ("total".into(), "Float64".into())], qualify: true }];
-        let ins = |src: &str, at: usize| hints(src, at, Dialect::ClickHouse, &r, &[], Case::Upper, false, false).map(|h| h.items.iter().map(|i| i.insert.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let ins = |src: &str, at: usize| hints(src, at, Dialect::ClickHouse, &r, &[], &[], Case::Upper, false, false).map(|h| h.items.iter().map(|i| i.insert.clone()).collect::<Vec<_>>()).unwrap_or_default();
         // Put in bare: `default` is a fine name there.
         let src = "select * from ord";
         assert!(ins(src, src.len()).contains(&"default.orders".to_string()), "{:?}", ins(src, src.len()));

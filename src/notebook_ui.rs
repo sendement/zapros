@@ -328,6 +328,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let conn = app.tab_conn(app.ws(), &tab);
     let dialect = app.dialect_of(conn.as_deref());
     let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
+    let routines = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.routines.clone()).unwrap_or_default();
     let settings = app.settings.clone();
     let accent = crate::editor::rgb(app.ws().color);
     let dark = ui.visuals().dark_mode;
@@ -416,7 +417,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             let issues = std::mem::take(&mut rt.issues);
                             let server_err = rt.server_err.clone();
                             let rows = text.lines().count().max(2) + 1;
-                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &lent, rows, read_only: held, outer_wheel: true };
+                            let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &lent, routines: &routines, rows, read_only: held, outer_wheel: true };
                             let id = egui::Id::new(("cell", &tab.id, &cell.id));
                             // The code on a rounded ground of its own (a shade
                             // off the cell's), as wide as the output's table.

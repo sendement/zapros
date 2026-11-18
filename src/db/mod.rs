@@ -292,6 +292,25 @@ pub struct Relation {
     pub qualify: bool,
 }
 
+/// A function or procedure, with its parameters (for hints in its call).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Routine {
+    pub schema: String,
+    /// Oracle: its package ("" — standalone).
+    pub package: String,
+    pub name: String,
+    pub args: Vec<Arg>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Arg {
+    pub name: String,
+    pub ty: String,
+    /// IN, OUT, IN OUT / INOUT, VARIADIC.
+    pub mode: String,
+    pub default: bool,
+}
+
 /// Marks the relations outside `visible` schemas as needing their schema.
 pub fn qualify(mut rels: Vec<Relation>, visible: &[String]) -> Vec<Relation> {
     for r in &mut rels {
@@ -367,6 +386,11 @@ pub trait Session: Send {
     }
     /// Tables and their columns of the schemas given (empty: the current).
     fn relations(&mut self, schemas: &[String]) -> Res<Vec<Relation>>;
+    /// Functions and procedures with their parameters (where the
+    /// database names them).
+    fn routines(&mut self) -> Res<Vec<Routine>> {
+        Ok(Vec::new())
+    }
     /// Stops what `run` is doing, from another thread.
     fn canceller(&self) -> Canceller;
     fn version(&mut self) -> String;
@@ -597,6 +621,7 @@ pub enum What {
     /// It ended: rows' statements run, or why not (`stopped`: asked to).
     Imported { key: String, result: Result<usize, String>, stopped: bool },
     Relations(Result<Vec<Relation>, String>),
+    Routines(Vec<Routine>),
     /// Where the transaction stands (after a run or a commit).
     Tx { auto: bool, pending: bool },
     TxDone { op: TxOp, result: Result<(), String> },
@@ -971,6 +996,10 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 if ensure(&mut session) {
                     let r = session.as_mut().unwrap().relations(&schemas);
                     tell(What::Relations(r.map_err(|f| f.message)));
+                    // (Not there: no hints for calls, nothing more.)
+                    if let Ok(r) = session.as_mut().unwrap().routines() {
+                        tell(What::Routines(r));
+                    }
                 }
             }
         }

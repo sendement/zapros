@@ -32,6 +32,8 @@ pub struct Live {
     pub state: ConnState,
     pub version: String,
     pub rels: Arc<Vec<Relation>>,
+    /// Functions and procedures with their parameters.
+    pub routines: Arc<Vec<crate::db::Routine>>,
     pub known: Arc<Known>,
     pub rels_version: u64,
     pub rels_loading: bool,
@@ -296,6 +298,12 @@ pub struct App {
     pub last_frame: Option<Instant>,
     /// The save-a-result window: (tab, result, what).
     pub export: Option<(String, usize, crate::export::Export)>,
+    /// Runs waiting for their parameters' values (the first one asked).
+    pub param_ask: Vec<crate::dialogs::ParamAsk>,
+    /// Parameters' values as last given (by ":name" / "&name", lower case).
+    pub param_values: HashMap<String, (String, sql::params::As)>,
+    /// The columns a `*` stands for (Ctrl+click on it), while shown.
+    pub star: Option<crate::dialogs::StarWin>,
     /// "Table from a file…", while open.
     pub import: Option<crate::import_ui::ImportDlg>,
     dirty: bool,
@@ -419,6 +427,9 @@ impl App {
             last_frame: None,
             export: None,
             import: None,
+            star: None,
+            param_ask: Vec::new(),
+            param_values: HashMap::new(),
             dirty: false,
             last_save: Instant::now(),
             sync,
@@ -556,7 +567,7 @@ impl App {
         let id_ = id.clone();
         // (What the tree had stays shown, looked at again once drawn.)
         self.mark_stale(&id, &[]);
-        self.live.insert(id, Live { spec, password, query, meta, state: ConnState::Connecting, version: String::new(), rels: Arc::default(), known: Arc::default(), rels_version: 0, rels_loading: false, auto: true, pending: false });
+        self.live.insert(id, Live { spec, password, query, meta, state: ConnState::Connecting, version: String::new(), rels: Arc::default(), routines: Arc::default(), known: Arc::default(), rels_version: 0, rels_loading: false, auto: true, pending: false });
         if let Some(l) = self.live.get_mut(&id_) {
             l.auto = l.spec.auto_commit || !l.spec.kind.transactions();
         }
@@ -1092,7 +1103,19 @@ impl App {
         self.dispatch(ctx, tab_id, stmts, &conn);
     }
 
+    /// Runs statements; with `:name` / `&name` in them, asks for their
+    /// values first.
     pub fn dispatch(&mut self, ctx: &egui::Context, tab_id: String, stmts: Vec<Stmt>, conn: &str) {
+        let d = self.dialect_of(Some(conn));
+        let params = sql::params::names(stmts.iter().map(|s| s.sql.as_str()), d);
+        if !params.is_empty() {
+            self.param_ask.push(crate::dialogs::ParamAsk { tab: tab_id, stmts, conn: conn.to_string(), params, d });
+            return;
+        }
+        self.dispatch_now(ctx, tab_id, stmts, conn);
+    }
+
+    pub fn dispatch_now(&mut self, ctx: &egui::Context, tab_id: String, stmts: Vec<Stmt>, conn: &str) {
         if !self.ensure_live(ctx, conn, Some((tab_id.clone(), stmts.clone()))) {
             return;
         }
@@ -1639,6 +1662,7 @@ impl App {
                     }
                     Err(e) => self.toast(e),
                 },
+                What::Routines(r) => l.routines = Arc::new(r),
                 What::Relations(r) => {
                     l.rels_loading = false;
                     match r {
@@ -1951,6 +1975,10 @@ impl eframe::App for App {
                 }
                 Action::Open { schema, name, call } => self.locate(&ctx, schema, name, call),
                 Action::Help { entry, at } => self.help = Some((entry, at)),
+                Action::Star { cols, range, editor, qualify, at } => {
+                    let d = self.dialect_of(self.tab_conn(self.ws(), self.tab()).as_deref());
+                    self.star = Some(crate::dialogs::StarWin { on: vec![true; cols.len()], cols, range, editor, qualify, at, d });
+                }
             }
         }
         crate::dialogs::all(self, &ctx);

@@ -794,3 +794,29 @@ fn import_on_real_servers() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Functions and procedures with their parameters, for the hints in a
+/// call: a function with a default and an OUT, a package's procedure.
+#[test]
+fn routines_on_real_servers() {
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) {
+        let mut s = open(&sp, &pw).unwrap();
+        s.run_limit("create or replace function zz_add(p_user integer, p_total numeric default 0, out p_id bigint) as $$ select 1::bigint $$ language sql", 0, &mut |_| {}).unwrap();
+        s.finish(true).ok();
+        let r = s.routines().unwrap();
+        let f = r.iter().find(|r| r.name == "zz_add").expect("zz_add");
+        assert_eq!(f.args.iter().map(|a| (a.name.as_str(), a.ty.as_str(), a.mode.as_str(), a.default)).collect::<Vec<_>>(), [("p_user", "integer", "", false), ("p_total", "numeric", "", true), ("p_id", "bigint", "OUT", false)]);
+        s.run_limit("drop function zz_add", 0, &mut |_| {}).unwrap();
+        s.finish(true).ok();
+    }
+    if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
+        let mut s = open(&sp, &pw).unwrap();
+        s.run_limit("create or replace package zz_pkg as procedure add_order(p_user in number, p_note in varchar2 default null, p_id out number); end;", 0, &mut |_| {}).unwrap();
+        let r = s.routines().unwrap();
+        let p = r.iter().find(|r| r.package == "ZZ_PKG" && r.name == "ADD_ORDER").expect("ZZ_PKG.ADD_ORDER");
+        assert_eq!(p.args.iter().map(|a| (a.name.as_str(), a.mode.as_str(), a.default)).collect::<Vec<_>>(), [("P_USER", "IN", false), ("P_NOTE", "IN", true), ("P_ID", "OUT", false)]);
+        let hits = crate::sql::complete::routines_named(&r, Some("zz_pkg"), "add_order");
+        assert_eq!(hits.len(), 1);
+        s.run_limit("drop package zz_pkg", 0, &mut |_| {}).unwrap();
+    }
+}

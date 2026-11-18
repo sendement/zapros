@@ -37,6 +37,162 @@ pub fn all(app: &mut App, ctx: &egui::Context) {
     workspace(app, ctx);
     small(app, ctx);
     help(app, ctx);
+    star(app, ctx);
+    params(app, ctx);
+}
+
+/// A run waiting for its parameters.
+pub struct ParamAsk {
+    pub tab: String,
+    pub stmts: Vec<crate::db::Stmt>,
+    pub conn: String,
+    pub params: Vec<crate::sql::params::Param>,
+    pub d: Dialect,
+}
+
+fn params(app: &mut App, ctx: &egui::Context) {
+    use crate::sql::params::{self, As};
+    if app.param_ask.is_empty() {
+        return;
+    }
+    let ask = app.param_ask.remove(0);
+    let mut done: Option<Option<bool>> = None;
+    egui::Modal::new(egui::Id::new("params")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        ui.heading(t("Параметры", "Parameters"));
+        ui.label(RichText::new(t(":имя — значение (число как есть, остальное в кавычках); &имя — текст вставляется как есть", ":name: a value (a number as is, the rest quoted); &name: text put in as it is")).small().weak());
+        ui.add_space(4.0);
+        egui::Grid::new("params-grid").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+            for (k, p) in ask.params.iter().enumerate() {
+                let entry = app.param_values.entry(p.key()).or_insert_with(|| (String::new(), if p.amp { As::Raw } else { As::Auto }));
+                ui.label(RichText::new(p.shown()).monospace().strong());
+                let r = ui.add_enabled_ui(entry.1 != As::Null, |ui| ui.add_sized([320.0, 22.0], egui::TextEdit::singleline(&mut entry.0).font(egui::TextStyle::Monospace))).inner;
+                if k == 0 && ui.memory(|m| m.focused().is_none()) {
+                    r.request_focus();
+                }
+                if p.amp {
+                    ui.label(RichText::new(t("как есть", "as is")).small().weak());
+                } else {
+                    egui::ComboBox::from_id_salt(("param-as", k)).width(100.0).selected_text(entry.1.name()).show_ui(ui, |ui| {
+                        for a in As::ALL {
+                            ui.selectable_value(&mut entry.1, a, a.name());
+                        }
+                    });
+                }
+                ui.end_row();
+            }
+        });
+        // What will run (the first statement).
+        let get = |p: &params::Param| app.param_values.get(&p.key()).map(|(v, a)| if p.amp { v.clone() } else { params::value(v, *a, ask.d) });
+        if let Some(s) = ask.stmts.first() {
+            let shown = params::put(&s.sql, ask.d, get);
+            ui.add_space(4.0);
+            egui::Frame::NONE.fill(ui.visuals().code_bg_color).corner_radius(4).inner_margin(6).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(crate::app::head(&shown, 400)).monospace().small());
+            });
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.add(crate::ui::tinted(format!("▶ {}", t("Выполнить", "Run")), crate::ui::GREEN)).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) {
+                done = Some(Some(true));
+            }
+            if ui.button(t("Без подстановки", "Run as written")).on_hover_text(t("Выполнить текст как есть, с :имя и &имя", "Run the text as it is, :name and &name included")).clicked() {
+                done = Some(Some(false));
+            }
+            if ui.button(t("Отмена", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                done = Some(None);
+            }
+        });
+    });
+    match done {
+        Some(Some(fill)) => {
+            let mut stmts = ask.stmts;
+            if fill {
+                let vals = app.param_values.clone();
+                let get = |p: &params::Param| vals.get(&p.key()).map(|(v, a)| if p.amp { v.clone() } else { params::value(v, *a, ask.d) });
+                for s in &mut stmts {
+                    s.sql = params::put(&s.sql, ask.d, get);
+                }
+            }
+            app.dispatch_now(ctx, ask.tab, stmts, &ask.conn);
+        }
+        Some(None) => {}
+        None => app.param_ask.insert(0, ask),
+    }
+}
+
+/// What a `*` stands for: its columns, to copy or to put in its place.
+pub struct StarWin {
+    pub cols: Vec<(String, String, String)>,
+    pub on: Vec<bool>,
+    pub range: std::ops::Range<usize>,
+    pub editor: egui::Id,
+    pub qualify: bool,
+    pub at: egui::Pos2,
+    pub d: Dialect,
+}
+
+impl StarWin {
+    /// The columns picked as written: `t.name` when they need their table's.
+    pub fn names(&self) -> Vec<String> {
+        let q = |s: &str| crate::sql::complete::quote(s, self.d);
+        self.cols.iter().zip(&self.on).filter(|(_, on)| **on).map(|((c, _, t), _)| if self.qualify { format!("{}.{}", q(t), q(c)) } else { q(c) }).collect()
+    }
+}
+
+fn star(app: &mut App, ctx: &egui::Context) {
+    let Some(mut w) = app.star.take() else { return };
+    let mut open = true;
+    let mut done = false;
+    egui::Window::new(format!("{} ({})", t("Колонки вместо *", "Columns for *"), w.cols.len()))
+        .id(egui::Id::new("star-window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_pos(w.at + egui::vec2(12.0, 12.0))
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button(t("Все", "All")).clicked() {
+                    w.on.iter_mut().for_each(|x| *x = true);
+                }
+                if ui.small_button(t("Ни одной", "None")).clicked() {
+                    w.on.iter_mut().for_each(|x| *x = false);
+                }
+            });
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                egui::Grid::new("star-cols").striped(true).num_columns(3).show(ui, |ui| {
+                    for (k, (c, ty, owner)) in w.cols.iter().enumerate() {
+                        ui.checkbox(&mut w.on[k], RichText::new(c).monospace());
+                        ui.label(RichText::new(ty).small().weak());
+                        ui.label(RichText::new(owner).small().weak());
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.separator();
+            let names = w.names();
+            ui.add_enabled_ui(!names.is_empty(), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(t("Копировать через запятую", "Copy, comma-separated")).clicked() {
+                        ctx.copy_text(names.join(", "));
+                        app.toast(t("Скопировано", "Copied"));
+                    }
+                    if ui.button(t("Копировать столбиком", "Copy one a line")).clicked() {
+                        ctx.copy_text(names.join("\n"));
+                        app.toast(t("Скопировано", "Copied"));
+                    }
+                    if ui.add(crate::ui::tinted(t("Заменить * списком", "Replace * with them").into(), crate::ui::GREEN)).clicked() {
+                        crate::editor::replace_later(ctx, w.editor, w.range.clone(), names.join(", "));
+                        done = true;
+                    }
+                });
+            });
+        });
+    if open && !done {
+        app.star = Some(w);
+    }
 }
 
 /// A function's, operator's or keyword's help (Ctrl+click on it): how it's
@@ -91,7 +247,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
                 });
             });
             let ex = e.example();
-            let cx = crate::editor::Ctx { dialect: d, settings: &snapshot, dark, issues: &[], server_err: None, rels: &[], lent: &[], rows: 1, read_only: false, outer_wheel: false };
+            let cx = crate::editor::Ctx { dialect: d, settings: &snapshot, dark, issues: &[], server_err: None, rels: &[], lent: &[], routines: &[], rows: 1, read_only: false, outer_wheel: false };
             let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
             let job = crate::editor::layout(&ex, &cx, None, font, mono_bold);
             egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
@@ -389,7 +545,7 @@ fn password(app: &mut App, ctx: &egui::Context) {
             app.live.remove(&spec.id);
             app.start_live(ctx, spec.clone(), ask.password.clone());
             if let Some((tab, stmts)) = ask.then.take() {
-                app.dispatch(ctx, tab, stmts, &spec.id);
+                app.dispatch_now(ctx, tab, stmts, &spec.id);
             }
         }
         Some(false) => {}
@@ -1076,7 +1232,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\nselect (1 + 2";
                 let issues = crate::sql::check::check(&sample, Dialect::Postgres, None);
                 let snapshot = s.clone();
-                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], lent: &[], rows: 30, read_only: false, outer_wheel: false };
+                let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], lent: &[], routines: &[], rows: 30, read_only: false, outer_wheel: false };
                 let mono_bold = ui.ctx().fonts(|f| f.families().iter().any(|fam| *fam == egui::FontFamily::Name("mono-bold".into())));
                 let job = crate::editor::layout(&sample, &cx, None, snapshot.font_size, mono_bold);
                 egui::Frame::group(ui.style()).show(ui, |ui| {

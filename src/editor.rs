@@ -35,6 +35,16 @@ pub enum Action {
     /// Ctrl+click on a function, operator or keyword the reference knows:
     /// its help (an entry of sql::help), by the pointer.
     Help { entry: usize, at: egui::Pos2 },
+    /// Ctrl+click on a SELECT's `*`: the columns it stands for (name,
+    /// type, whose), by the pointer; `range` in the editor `editor`'s text,
+    /// `qualify`: written with their table's name.
+    Star { cols: Vec<(String, String, String)>, range: Range<usize>, editor: egui::Id, qualify: bool, at: egui::Pos2 },
+}
+
+/// Text put in place of `range` in an editor's text on its next frame
+/// (from outside it: "* → the columns").
+pub fn replace_later(ctx: &egui::Context, editor: egui::Id, range: Range<usize>, with: String) {
+    ctx.data_mut(|d| d.insert_temp(editor.with("replace-later"), (range, with)));
 }
 
 pub struct Popup {
@@ -137,6 +147,8 @@ pub struct Ctx<'a> {
     pub rels: &'a [Relation],
     /// Relations from elsewhere for hints: a notebook's CTEs from cells above.
     pub lent: &'a [Relation],
+    /// Functions and procedures, for their parameters in a call.
+    pub routines: &'a [crate::db::Routine],
     /// Rows it takes at least (a notebook's cell: as many as its text has).
     pub rows: usize,
     /// Shown, selectable, not changed (another window is typing in it).
@@ -870,6 +882,22 @@ fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str
     }
     let Some(pos) = ctx.pointer_hover_pos().filter(|p| output.response.rect.contains(*p)) else { return };
     let at = byte_of(text, output.galley.cursor_from_pos(pos - gp).index.0);
+    // A SELECT's `*`: the columns it stands for.
+    let star_here = text.get(at..).is_some_and(|r| r.starts_with('*')) || (at > 0 && text.get(at - 1..at) == Some("*"));
+    if star_here {
+        let at_star = if text.get(at..).is_some_and(|r| r.starts_with('*')) { at } else { at - 1 };
+        if let Some((range, cols, qualify)) = crate::sql::complete::star_at(text, at_star, cx.dialect, cx.rels, cx.lent) {
+            let wr = rect_of(&(at_star..at_star + 1));
+            if wr.expand(3.0).contains(pos) {
+                ui.painter().hline(wr.x_range(), wr.bottom() - 1.0, egui::Stroke::new(1.2, ui.visuals().hyperlink_color));
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                if output.response.clicked() {
+                    out.actions.push(Action::Star { cols, range, editor: id, qualify, at: pos });
+                }
+                return;
+            }
+        }
+    }
     // A function, operator or keyword the reference knows: its help.
     if let Some((r, entry)) = help_at(text, at, cx.dialect) {
         let wr = rect_of(&r);
@@ -1004,6 +1032,16 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let ctx = ui.ctx().clone();
     let focused = ctx.memory(|m| m.has_focus(id));
     let tab = cx.settings.tab_width.max(1);
+    // Put in from outside ("* → the columns").
+    if let Some((r, with)) = ctx.data_mut(|d| d.remove_temp::<(Range<usize>, String)>(id.with("replace-later"))) {
+        if !cx.read_only && r.start <= r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end) {
+            text.replace_range(r.clone(), &with);
+            out.changed = true;
+            let e = r.start + with.len();
+            set_cursor(&ctx, id, text, e, e);
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+    }
     if let Some(g) = st.goto.take() {
         set_cursor(&ctx, id, text, g, g);
         ctx.memory_mut(|m| m.request_focus(id));
@@ -1853,7 +1891,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         st.popup = None;
     }
     if let Some(c) = cursor_b.filter(|_| has_focus && cx.settings.hints) {
-        let word_char = typed.as_deref().is_some_and(|s| s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.'));
+        // (A bracket or a comma: a call's parameters, when it's one.)
+        let word_char = typed.as_deref().is_some_and(|s| s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') || s == "(" || s == ",");
         let moved = st.cursor.is_some_and(|(p, _)| p != c) && !out.changed;
         if moved && !forced {
             st.popup = None;
@@ -1861,7 +1900,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let want = forced || (out.changed && st.popup.is_some()) || (cx.settings.hints_auto && word_char && out.changed);
         if want {
             let forced = forced || st.popup.as_ref().is_some_and(|p| p.forced);
-            match complete::hints(text, c, cx.dialect, cx.rels, cx.lent, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
+            match complete::hints(text, c, cx.dialect, cx.rels, cx.lent, cx.routines, cx.settings.hint_case, forced, cx.settings.hint_quote_schemas) {
                 Some(h) => {
                     let typed_first = cx.settings.hints_typed_first;
                     // The same hint stays picked as the list changes (with

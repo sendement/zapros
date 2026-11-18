@@ -2845,3 +2845,59 @@ fn table_made_from_a_file() {
     assert_eq!(rows.len(), 200);
     assert_eq!(rows[0], [Some("1".into()), Some("Товар 1".into()), Some("10.1".into()), Some("2024-04-02".into())], "numbers and dates as SQL has them");
 }
+
+#[test]
+fn parameters_asked_before_running() {
+    let (mut h, _g) = harness("params", "select :n + 1 as x, '&lit :no' as s, &col as c from orders where id = :n", false);
+    settle(&mut h);
+    focus_editor(&mut h, 0);
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, false, false);
+    h.step();
+    h.step();
+    assert_eq!(h.state().param_ask.len(), 1, "asked first");
+    assert_eq!(h.state().param_ask[0].params.iter().map(|p| p.shown()).collect::<Vec<_>>(), [":n", "&col"]);
+    // The first one's field has the focus.
+    type_text(&mut h, "41");
+    h.state_mut().param_values.get_mut("&col").unwrap().0 = "total".into();
+    h.step();
+    h.step();
+    assert_eq!(h.state().param_values[":n"].0, "41");
+    shot(&mut h, "params");
+    h.get_by_label_contains("Выполнить").click();
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let r = &h.state().rt[&id].results[0];
+    assert_eq!(r.table.rows[0][0].as_deref(), Some("42"));
+    assert_eq!(r.table.rows[0][1].as_deref(), Some("&lit :no"));
+    // Remembered for the next run.
+    h.state_mut().run(&ctx, false, false);
+    h.step();
+    h.step();
+    assert_eq!(h.state().param_values[":n"].0, "41");
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(h.state().param_ask.is_empty(), "cancelled");
+}
+
+#[test]
+fn star_opened_into_columns() {
+    let (mut h, _g) = harness("star", "select * from orders o", false);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let rels = h.state().live["lite"].rels.clone();
+    let (range, cols, qualify) = crate::sql::complete::star_at("select * from orders o", 7, crate::sql::Dialect::Sqlite, &rels, &[]).unwrap();
+    assert_eq!(cols.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["id", "customer_id", "total", "note"]);
+    let editor = egui::Id::new(("editor", &id, false));
+    h.state_mut().star = Some(crate::dialogs::StarWin { on: vec![true; cols.len()], cols, range, editor, qualify, at: egui::pos2(500.0, 200.0), d: crate::sql::Dialect::Sqlite });
+    h.step();
+    h.step();
+    // One left out.
+    h.get_by_label("note").click();
+    h.step();
+    shot(&mut h, "star");
+    h.get_by_label("Заменить * списком").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().tab().text, "select id, customer_id, total from orders o");
+    assert!(h.state().star.is_none());
+}

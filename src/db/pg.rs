@@ -585,6 +585,27 @@ impl Session for Pg {
         Ok(qualify(group_relations(rows), &path))
     }
 
+    fn routines(&mut self) -> Res<Vec<Routine>> {
+        let rows = self.rows(
+            "select n.nspname::text, p.proname::text, coalesce(array_to_string(p.proargnames, chr(1), ''), ''),
+                    pg_get_function_arguments(p.oid)
+               from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prokind in ('f', 'p')
+                and has_schema_privilege(n.oid, 'USAGE')",
+            &[],
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let mut r = r.into_iter();
+                let (schema, name, names, args) = (r.next()?, r.next()?, r.next()?, r.next()?);
+                let names: Vec<&str> = names.split('\u{1}').collect();
+                let args = split_args(&args).into_iter().enumerate().map(|(k, a)| pg_arg(&a, names.get(k).copied().unwrap_or(""))).collect();
+                Some(Routine { schema, package: String::new(), name, args })
+            })
+            .collect())
+    }
+
     fn server_id(&mut self) -> Option<String> {
         self.one("select pg_backend_pid()::text", &[]).ok()
     }
@@ -681,4 +702,49 @@ pub fn group_relations(rows: Vec<Vec<String>>) -> Vec<Relation> {
         out.last_mut().unwrap().cols.push((r[2].clone(), r.get(3).cloned().unwrap_or_default()));
     }
     out
+}
+
+/// pg_get_function_arguments' list, split at its own commas.
+fn split_args(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0, false);
+    for c in s.chars() {
+        match c {
+            '\'' => quote = !quote,
+            '(' if !quote => depth += 1,
+            ')' if !quote => depth -= 1,
+            ',' if !quote && depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// One parameter: "[mode] [name] type [DEFAULT …]", its name from proargnames.
+fn pg_arg(a: &str, name: &str) -> crate::db::Arg {
+    let mut rest = a.trim();
+    let mut mode = String::new();
+    for m in ["INOUT ", "OUT ", "IN ", "VARIADIC "] {
+        if let Some(r) = rest.strip_prefix(m) {
+            mode = m.trim().to_string();
+            rest = r;
+            break;
+        }
+    }
+    if !name.is_empty() {
+        let q = crate::sql::complete::quote(name, crate::sql::Dialect::Postgres);
+        rest = rest.strip_prefix(q.as_str()).or_else(|| rest.strip_prefix(name)).map(str::trim_start).unwrap_or(rest);
+    }
+    let (ty, default) = match rest.find(" DEFAULT ").or_else(|| rest.find(" = ")) {
+        Some(i) => (rest[..i].trim(), true),
+        None => (rest, false),
+    };
+    crate::db::Arg { name: name.to_string(), ty: ty.to_string(), mode, default }
 }

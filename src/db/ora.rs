@@ -612,6 +612,33 @@ impl Session for Ora {
         Ok(qualify(out, &[me]))
     }
 
+    fn routines(&mut self) -> Res<Vec<Routine>> {
+        // The user's own and others' it may run (not Oracle's own schemas).
+        let rows = self.rows(
+            "SELECT a.owner, NVL(a.package_name, ' '), a.object_name, NVL(a.overload, ' '), a.argument_name, a.data_type, a.in_out, a.defaulted
+               FROM all_arguments a JOIN all_users u ON u.username = a.owner
+              WHERE u.oracle_maintained = 'N' AND a.data_level = 0
+              ORDER BY a.owner, a.package_name, a.object_name, a.overload, a.position",
+            &[],
+        )?;
+        let mut out: Vec<Routine> = Vec::new();
+        let mut last = (String::new(), String::new(), String::new(), String::new());
+        for r in rows {
+            let mut r = r.into_iter();
+            let (owner, pkg, name, overload, arg, ty, mode, def) = (r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default(), r.next().unwrap_or_default());
+            let key = (owner.clone(), pkg.clone(), name.clone(), overload);
+            if key != last || out.is_empty() {
+                out.push(Routine { schema: owner, package: pkg.trim().to_string(), name, args: Vec::new() });
+                last = key;
+            }
+            // (No name: a function's result, or a procedure without any.)
+            if !arg.is_empty() {
+                out.last_mut().unwrap().args.push(Arg { name: arg, ty, mode: mode.replace('/', " "), default: def == "Y" });
+            }
+        }
+        Ok(out)
+    }
+
     fn server_id(&mut self) -> Option<String> {
         // (DBMS_DEBUG_JDWP's are open to every user; v$session often isn't.)
         self.rows("SELECT DBMS_DEBUG_JDWP.CURRENT_SESSION_ID || ',' || DBMS_DEBUG_JDWP.CURRENT_SESSION_SERIAL FROM dual", &[]).ok()?.into_iter().next()?.into_iter().next().filter(|s| s.len() > 2)

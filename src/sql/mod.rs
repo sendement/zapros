@@ -11,6 +11,7 @@ pub mod help;
 pub mod follow;
 pub mod lex;
 pub mod notebook;
+pub mod params;
 pub mod outline;
 
 use std::ops::Range;

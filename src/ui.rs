@@ -270,7 +270,7 @@ fn query_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Action::Cancel => app.cancel(),
                 Action::Commit => app.commit_current(true),
                 Action::Rollback => app.commit_current(false),
-                Action::Save | Action::Open { .. } | Action::Help { .. } => {}
+                Action::Save | Action::Open { .. } | Action::Help { .. } | Action::Star { .. } => {}
             }
         }
     };
@@ -1067,6 +1067,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let dialect = app.dialect_of(conn.as_deref());
         let dark = ui.visuals().dark_mode;
         let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
+        let routines = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.routines.clone()).unwrap_or_default();
         // Being typed in another window: shown as it goes, not changed here.
         let held = app.sync.held_elsewhere(&tab_id);
         if held && held_bar(ui) {
@@ -1082,7 +1083,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let part = tab.on_body;
         let issues = std::mem::take(&mut rt.issues);
         let server_err = rt.server_err.clone();
-        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &[], rows: 30, read_only: held, outer_wheel: false };
+        let cx = editor::Ctx { dialect, settings: &settings, dark, issues: &issues, server_err: server_err.as_ref(), rels: &rels, lent: &[], routines: &routines, rows: 30, read_only: held, outer_wheel: false };
         // The code on a rounded ground, as a notebook cell's.
         let v = ui.visuals();
         let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });

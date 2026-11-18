@@ -266,6 +266,22 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   the dialect, snippets (`sel`, `case`, `cte`, …). CTEs of `WITH` and
   subqueries in `FROM` count as tables, with the columns their `SELECT`
   gives (`*` opened up); in a notebook, the CTEs of WITH cells above too.
+  By the clause: in `GROUP BY` what the query's SELECT has (its aggregates
+  left out), in `ORDER BY` its aliases, in `HAVING` its aggregates and
+  `COUNT(*)`, `SUM(…)`… first. In a call of a function or procedure (after
+  `(` or `,`) its parameters by name, `p_id => `, with their types, IN /
+  OUT and defaults (PostgreSQL functions and procedures, Oracle's with
+  packages').
+- **Ctrl+click on a SELECT's `*`**: the columns it stands for (with their
+  tables when there are several), to copy comma-separated or one a line,
+  or to put in its place — all or those ticked.
+- **Parameters**: a statement with `:name` or `&name` (`&&name`) asks for
+  their values before it runs. `:name` is a value: a number goes in as is,
+  anything else in quotes, nothing is NULL (or picked: text, number, as
+  is, NULL); `&name` is text put in as it is (a table's name, a piece of
+  SQL). The statement is shown as it'll run; values are kept for the next
+  time; "Run as written" leaves them alone. Strings, comments, `::` casts,
+  `:=` and a trigger's `:new` / `:old` are not parameters.
   Schemas can be put in
   quotes always (a setting). Another setting puts the word as typed first in the list,
   picked: Enter then just starts a new line (an alias needs no hint), a
