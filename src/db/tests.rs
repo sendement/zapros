@@ -342,21 +342,32 @@ fn designer_round_trip(s: &mut dyn Session, kind: Kind, path: &[&str], first_col
 
 #[test]
 fn designer_on_real_servers() {
+    // (A table of its own: the shared ones change under other tests.)
     if let Some((sp, pw)) = spec("ZAPROS_TEST_PG", Kind::Postgres) {
         let mut s = open(&sp, &pw).unwrap();
-        designer_round_trip(s.as_mut(), Kind::Postgres, &["public", "tables", "orders"], "id");
+        s.run_limit("drop table if exists zz_designer", 0, &mut |_| {}).unwrap();
+        s.run_limit("create table zz_designer (id integer primary key, name text not null default 'x', total numeric(10, 2))", 0, &mut |_| {}).unwrap();
+        s.run_limit("comment on column zz_designer.total is 'сумма'", 0, &mut |_| {}).unwrap();
+        s.finish(true).ok();
+        designer_round_trip(s.as_mut(), Kind::Postgres, &["public", "tables", "zz_designer"], "id");
+        s.run_limit("drop table zz_designer", 0, &mut |_| {}).unwrap();
+        s.finish(true).ok();
     }
     if let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) {
         let mut s = open(&sp, &pw).unwrap();
-        let c = rows(s.run_limit("select name from system.columns where database = 'default' and table = 'events' order by position limit 1", 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
-        designer_round_trip(s.as_mut(), Kind::ClickHouse, &["default", "tables", "events"], &c);
+        s.run_limit("drop table if exists zz_designer", 0, &mut |_| {}).unwrap();
+        s.run_limit("create table zz_designer (id UInt64, name String default 'x', total Nullable(Float64) comment 'сумма') engine = MergeTree order by id", 0, &mut |_| {}).unwrap();
+        designer_round_trip(s.as_mut(), Kind::ClickHouse, &["default", "tables", "zz_designer"], "id");
+        s.run_limit("drop table zz_designer", 0, &mut |_| {}).unwrap();
     }
     if let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) {
         let mut s = open(&sp, &pw).unwrap();
         let owner = sp.user.to_uppercase();
-        let t = rows(s.run_limit("select table_name from user_tables order by table_name", 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
-        let c = rows(s.run_limit(&format!("select column_name from user_tab_columns where table_name = '{t}' order by column_id"), 1, &mut |_| {}).unwrap()).rows[0][0].clone().unwrap();
-        designer_round_trip(s.as_mut(), Kind::Oracle, &[&owner, "tables", &t], &c);
+        let _ = s.run_limit("drop table zz_designer", 0, &mut |_| {});
+        s.run_limit("create table zz_designer (id number(10) primary key, name varchar2(40) default 'x' not null, total number(10, 2))", 0, &mut |_| {}).unwrap();
+        s.run_limit("comment on column zz_designer.total is 'сумма'", 0, &mut |_| {}).unwrap();
+        designer_round_trip(s.as_mut(), Kind::Oracle, &[&owner, "tables", "ZZ_DESIGNER"], "ID");
+        s.run_limit("drop table zz_designer", 0, &mut |_| {}).unwrap();
     }
 }
 
