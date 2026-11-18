@@ -820,3 +820,45 @@ fn routines_on_real_servers() {
         s.run_limit("drop package zz_pkg", 0, &mut |_| {}).unwrap();
     }
 }
+
+/// Cyrillic through Oracle whatever NLS_LANG says (run this one with
+/// NLS_LANG set to a single-byte charset too): code compiled with it in
+/// comments, strings, a quoted name and an error message; read back from
+/// ALL_SOURCE, from the code's own output, from the error raised and from
+/// the DDL the tree shows.
+#[test]
+fn oracle_keeps_cyrillic() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_ORA", Kind::Oracle) else { return };
+    let mut s = open(&sp, &pw).unwrap();
+    let cs = rows(s.run_limit("select value from nls_database_parameters where parameter = 'NLS_CHARACTERSET'", 1, &mut |_| {}).unwrap()).rows;
+    eprintln!("database charset: {:?}; NLS_LANG={:?}", cs[0][0], std::env::var("NLS_LANG").ok());
+    let text = "Привет, мир — ёлка «Ё» №1";
+    let spec_sql = "create or replace package zz_кирилл as\n  -- Комментарий: проверка «кириллицы» и ё\n  function привет return varchar2;\n  procedure ошибка;\nend;";
+    let body_sql = format!("create or replace package body zz_кирилл as\n  function привет return varchar2 is\n  begin\n    return '{text}'; -- строка с ё\n  end;\n  procedure ошибка is\n  begin\n    raise_application_error(-20001, 'Нет такого заказа: №5');\n  end;\nend;");
+    for sql in [spec_sql.to_string(), body_sql] {
+        s.run_limit(&sql, 0, &mut |_| {}).unwrap_or_else(|e| panic!("{}", e.message));
+    }
+    // Compiled clean.
+    let errs = rows(s.run_limit("select count(*) from user_errors where name = 'ZZ_КИРИЛЛ'", 1, &mut |_| {}).unwrap()).rows;
+    assert_eq!(errs[0][0].as_deref(), Some("0"), "compiled without errors");
+    // Its output.
+    let got = rows(s.run_limit("select zz_кирилл.привет from dual", 1, &mut |_| {}).unwrap()).rows;
+    assert_eq!(got[0][0].as_deref(), Some(text));
+    // Its code as kept.
+    let src = rows(s.run_limit("select text from user_source where name = 'ZZ_КИРИЛЛ' and type = 'PACKAGE' and line = 2", 1, &mut |_| {}).unwrap()).rows;
+    assert_eq!(src[0][0].as_deref().map(str::trim_end), Some("  -- Комментарий: проверка «кириллицы» и ё"));
+    // Its error's message.
+    let e = s.run_limit("begin zz_кирилл.ошибка; end;", 0, &mut |_| {}).err().expect("an error");
+    assert!(e.message.contains("Нет такого заказа: №5"), "{}", e.message);
+    // The DDL the tree opens.
+    let ddl = s.source(&[sp.user.to_uppercase(), "packages".into(), "ZZ_КИРИЛЛ".into()], ObjKind::Package).unwrap();
+    assert!(ddl.contains("Комментарий: проверка «кириллицы» и ё") && ddl.contains(text), "{ddl}");
+    // A table and data with it.
+    let _ = s.run_limit("drop table \"Заказы_тест\"", 0, &mut |_| {});
+    s.run_limit("create table \"Заказы_тест\" (\"Имя\" varchar2(50 char), примечание nvarchar2(50))", 0, &mut |_| {}).unwrap();
+    s.run_limit("insert into \"Заказы_тест\" values ('Ёжик', N'Щука')", 0, &mut |_| {}).unwrap();
+    let r = rows(s.run_limit("select \"Имя\", примечание from \"Заказы_тест\"", 1, &mut |_| {}).unwrap()).rows;
+    assert_eq!((r[0][0].as_deref(), r[0][1].as_deref()), (Some("Ёжик"), Some("Щука")));
+    s.run_limit("drop table \"Заказы_тест\"", 0, &mut |_| {}).unwrap();
+    s.run_limit("drop package zz_кирилл", 0, &mut |_| {}).unwrap();
+}

@@ -416,8 +416,11 @@ system's (e.g. AUR `oracle-instantclient-basic`), or one downloaded in
 **Settings → Drivers** — any version on Oracle's page (19, 21, 23…), Basic
 or Basic Light, into `~/.local/share/zapros/drivers/oracle`; no system
 install, no `LD_LIBRARY_PATH` to set (zapros restarts itself with the chosen
-folder on it — older clients find their own libraries only that way). Build
-without Oracle: `--no-default-features`.
+folder on it — older clients find their own libraries only that way). The
+client always talks UTF-8 to the server, whatever `NLS_LANG` says: Cyrillic
+and other letters in code, comments, strings, names and error messages go
+in and come back as they are (no `NLS_LANG` to set). Build without Oracle:
+`--no-default-features`.
 
 Settings and connections: `~/.config/zapros`; session: `~/.local/share/zapros`.
 
