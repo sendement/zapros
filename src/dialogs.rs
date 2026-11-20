@@ -654,7 +654,7 @@ fn tx_ask(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-const SAMPLE: &str = "-- orders by customer\nselect c.name, count(o.id) as orders, sum(o.total) total,\n  case when sum(o.total) > 1000 then 'vip' else 'regular' end kind\nfrom customers c left join orders o on o.customer_id = c.id\nwhere o.created_at >= date '2026-01-01' and c.active = true and o.note <> 'x' group by c.name having count(o.id) > :min order by total desc limit 10;";
+const SAMPLE: &str = "-- orders by customer\nselect /*+ index(o orders_created_idx) */ c.name, count(o.id) as orders, sum(o.total) total,\n  case when sum(o.total) > 1000 then 'vip' else 'regular' end kind\nfrom customers c left join orders o on o.customer_id = c.id\nwhere o.created_at >= date '2026-01-01' and c.active = true and o.note <> 'x' group by c.name having count(o.id) > :min order by total desc limit 10;\n\nselect distinct s.code, s.city as town from shop.stores s;";
 
 fn case_pick(ui: &mut egui::Ui, v: &mut Case, id: &str) -> bool {
     let mut changed = false;
@@ -1328,18 +1328,28 @@ fn settings(app: &mut App, ctx: &egui::Context) {
             }
             3 => {
                 ui.label(RichText::new(t("Регистр", "Case")).strong());
-                ui.horizontal(|ui| {
-                    ui.label(t("Ключевые слова", "Keywords"));
-                    case_pick(ui, &mut s.format.keywords, "fk");
-                });
-                ui.horizontal(|ui| {
-                    ui.label(t("Функции", "Functions"));
-                    case_pick(ui, &mut s.format.functions, "ff");
+                egui::Grid::new("format-cases").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                    let f = &mut s.format;
+                    let rows: [(&str, &str, &mut Case, &str); 8] = [
+                        ("Ключевые слова", "Keywords", &mut f.keywords, "fk"),
+                        ("Функции", "Functions", &mut f.functions, "ff"),
+                        ("Хинты /*+ … */", "Hints /*+ … */", &mut f.hints, "fh"),
+                        ("Схемы", "Schemas", &mut f.schemas, "fs"),
+                        ("Таблицы", "Tables", &mut f.tables, "ft"),
+                        ("Колонки", "Columns", &mut f.columns, "fc"),
+                        ("Алиасы таблиц", "Table aliases", &mut f.table_aliases, "fta"),
+                        ("Алиасы колонок", "Column aliases", &mut f.column_aliases, "fca"),
+                    ];
+                    for (ru, en, v, id) in rows {
+                        ui.label(t(ru, en));
+                        case_pick(ui, v, id);
+                        ui.end_row();
+                    }
                 });
                 ui.checkbox(&mut s.format.case_while_typing, t("Менять регистр ключевых слов прямо при вводе («select» и пробел → «SELECT »)", "Keywords take the case as they're typed («select» and a space → «SELECT »)"));
                 ui.label(RichText::new(t(
-                    "Меняются только слова самого SQL и только там, где они ключевые: имена таблиц и колонок, x.поле, строки, комментарии и вызовы функций остаются как набраны. В ClickHouse функции и имена чувствительны к регистру (toDate, countIf) — их не трогает ни ввод, ни форматирование.",
-                    "Only SQL's own words, and only where they're keywords: table and column names, x.field, strings, comments and function calls stay as typed. In ClickHouse functions and names are case-sensitive (toDate, countIf): neither typing nor formatting touches them.",
+                    "Ключевые слова и функции — только слова самого SQL и только там, где они ключевые. Имена меняются при форматировании; имена в кавычках не трогаются. В хинте меняются названия (full, index), а алиасы в скобках следуют регистру алиасов. В ClickHouse функции и имена чувствительны к регистру (toDate, countIf): схемы, таблицы и колонки там остаются как набраны, а алиас меняется, только если все его упоминания в запросе найдены.",
+                    "Keywords and functions: only SQL's own words, and only where they're keywords. Names change when formatting; quoted names stay. In a hint its names change (full, index), aliases in its brackets follow the aliases' case. In ClickHouse functions and names are case-sensitive (toDate, countIf): its schemas, tables and columns stay as typed, an alias changes only when all its uses in the statement are found.",
                 )).weak().small());
                 ui.separator();
                 ui.label(RichText::new(t("Раскладка (форматирование, Ctrl+Shift+F)", "Layout (formatting, Ctrl+Shift+F)")).strong());
@@ -1348,6 +1358,8 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     ui.radio_value(&mut s.format.river, true, t("«река»: слова выровнены по SELECT", "\"river\": clause words end where SELECT does"));
                     ui.radio_value(&mut s.format.river, false, t("обычная: слова слева, списки с отступом", "plain: clause words at the left, lists indented"));
                 });
+                ui.checkbox(&mut s.format.break_hint, t("Перенос строки после хинта /*+ … */", "A new line after the hint /*+ … */"));
+                ui.checkbox(&mut s.format.break_distinct, t("Перенос строки после DISTINCT", "A new line after DISTINCT"));
                 ui.horizontal(|ui| {
                     ui.label(t("Запятые", "Commas"));
                     ui.radio_value(&mut s.format.leading_commas, true, t("в начале строки", "at the line's start"));

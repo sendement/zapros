@@ -827,29 +827,10 @@ pub fn crisp_frame(painter: &egui::Painter, rect: egui::Rect, radius: f32, color
 /// for: where it is and its entry. Not a qualified name (schema.f), not a
 /// column named like a function (no bracket after it).
 pub fn help_at(text: &str, at: usize, d: crate::sql::Dialect) -> Option<(Range<usize>, usize)> {
-    use crate::sql::lex::{self, Tk};
     let at = floor(text, at.min(text.len()));
-    let ls = text[..at].rfind('\n').map_or(0, |i| i + 1);
-    let le = text[at..].find('\n').map_or(text.len(), |i| at + i);
-    let line = &text[ls..le];
-    let toks: Vec<lex::Tok> = lex::lex(line, d).into_iter().filter(|t| !t.trivia()).collect();
-    let rel = at - ls;
-    let k = toks.iter().position(|t| t.start <= rel && rel < t.end).or_else(|| toks.iter().position(|t| t.end == rel && rel > t.start))?;
-    let t = toks[k];
-    if !matches!(t.kind, Tk::Word | Tk::Keyword | Tk::Op) {
-        return None;
-    }
-    if k > 0 && toks[k - 1].kind == Tk::Dot || toks.get(k + 1).is_some_and(|n| n.kind == Tk::Dot) {
-        return None;
-    }
-    let call = toks.get(k + 1).is_some_and(|n| n.kind == Tk::Open && n.text(line) == "(");
-    let e = crate::sql::help::lookup(t.text(line), d, call)?;
-    // A bare word: a keyword's help, never a function's.
-    if t.kind == Tk::Word && !call && e.kind == 'f' {
-        return None;
-    }
-    let idx = crate::sql::help::entries().iter().position(|x| std::ptr::eq(x, e))?;
-    Some((ls + t.start..ls + t.end, idx))
+    let r = crate::sql::statement_at(text, at, d, false).filter(|r| r.start <= at && at <= r.end).unwrap_or(0..text.len());
+    let (place, idx) = crate::sql::help::at(&text[r.clone()], at - r.start, d)?;
+    Some((r.start + place.start..r.start + place.end, idx))
 }
 
 fn name_at(text: &str, at: usize) -> Option<Range<usize>> {

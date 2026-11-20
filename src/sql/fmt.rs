@@ -32,10 +32,14 @@ struct Style {
     /// A call or window longer than this goes over several lines, however
     /// long the line (0: only by `wrap`).
     split: usize,
+    /// SELECT's optimizer hint /*+ … */ ends its line.
+    break_hint: bool,
+    /// SELECT DISTINCT ends its line.
+    break_distinct: bool,
 }
 
 thread_local! {
-    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2, wrap: 0, one_line: 0, split: 0 }) };
+    static STYLE: std::cell::Cell<Style> = const { std::cell::Cell::new(Style { river: true, leading_commas: true, indent: 2, wrap: 0, one_line: 0, split: 0, break_hint: false, break_distinct: false }) };
 }
 
 fn style() -> Style {
@@ -444,6 +448,8 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
     let mut first = true;
     // CREATE TABLE t (…): its columns one to a line, two in from CREATE.
     let mut columns = is_kw(nodes.first(), "CREATE") && nodes.iter().take(8).any(|n| is_kw(Some(n), "TABLE"));
+    // Right after SELECT: its hint and DISTINCT, maybe each ending a line.
+    let mut head = false;
     while i < nodes.len() {
         if let Some(words) = clause_at(nodes, i) {
             let lead = &words[0];
@@ -455,6 +461,7 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
             // Items' further lines: under the first (river), or a level in.
             item = if style().river { indent + phrase.len() + 1 } else { indent + ind() };
             let set_ops = matches!(lead.as_str(), "UNION" | "INTERSECT" | "EXCEPT" | "MINUS");
+            head = lead == "SELECT";
             clause = phrase;
             i += words.len();
             first = false;
@@ -467,6 +474,33 @@ fn statement(nodes: &[Node], base: usize, anchor: usize, out: &mut Out) {
             continue;
         }
         let n = &nodes[i];
+        if head {
+            match n {
+                Node::T(t) if t.k == K::BlockComment && t.s.starts_with("/*+") => {
+                    out.word(&t.s, true);
+                    if style().break_hint {
+                        out.start(item);
+                    }
+                    i += 1;
+                    continue;
+                }
+                Node::T(t) if t.k == K::Keyword && matches!(t.s.as_str(), "DISTINCT" | "UNIQUE") => {
+                    out.word(&t.s, true);
+                    i += 1;
+                    // DISTINCT ON (a, b)
+                    if let (true, Some(Node::Group(g))) = (is_kw(nodes.get(i), "ON"), nodes.get(i + 1)) {
+                        out.word("ON", true);
+                        out.word(&format!("({})", inline(g)), true);
+                        i += 2;
+                    }
+                    if style().break_distinct {
+                        out.start(item);
+                    }
+                    continue;
+                }
+                _ => head = false,
+            }
+        }
         if first && !matches!(n, Node::T(t) if matches!(t.k, K::LineComment | K::BlockComment)) {
             out.start(base);
             first = false;
@@ -791,11 +825,41 @@ pub struct Options {
     /// Pasted text, or a selection put in brackets: its statements laid
     /// out at once.
     pub on_paste: bool,
+    /// Optimizer hints' names (/*+ full(t) */).
+    pub hints: Case,
+    /// SELECT /*+ … */ and the list from the next line.
+    pub break_hint: bool,
+    /// SELECT DISTINCT and the list from the next line.
+    pub break_distinct: bool,
+    /// Names' cases (`AsIs`: as written). ClickHouse's are case-sensitive:
+    /// see names::recased.
+    pub schemas: Case,
+    pub tables: Case,
+    pub columns: Case,
+    pub table_aliases: Case,
+    pub column_aliases: Case,
+}
+
+impl Options {
+    fn names(&self) -> super::names::Cases {
+        super::names::Cases { schemas: self.schemas, tables: self.tables, columns: self.columns, table_aliases: self.table_aliases, column_aliases: self.column_aliases }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60, bare_names: true, on_paste: false }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60,
+            bare_names: true,
+            on_paste: false,
+            hints: Case::AsIs,
+            break_hint: false,
+            break_distinct: false,
+            schemas: Case::AsIs,
+            tables: Case::AsIs,
+            columns: Case::AsIs,
+            table_aliases: Case::AsIs,
+            column_aliases: Case::AsIs,
+        }
     }
 }
 
@@ -809,7 +873,7 @@ pub fn format(src: &str, d: Dialect, o: Options) -> String {
     } else {
         src
     };
-    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize, split: o.split as usize }));
+    STYLE.with(|s| s.set(Style { river: o.river, leading_commas: o.leading_commas, indent: (o.indent as usize).clamp(1, 8), wrap: o.wrap as usize, one_line: o.one_line as usize, split: o.split as usize, break_hint: o.break_hint, break_distinct: o.break_distinct }));
     let ranges = super::split(src, d, false);
     let mut s = String::new();
     let mut prev = 0;
@@ -848,18 +912,36 @@ pub fn format(src: &str, d: Dialect, o: Options) -> String {
 
 /// Keywords and functions in the case asked for ("as is": as in `orig`).
 fn cased(orig: &str, formatted: &str, d: Dialect, o: Options) -> String {
-    if o.keywords == Case::Upper && o.functions == Case::Upper {
+    let names = o.names();
+    if o.keywords == Case::Upper && o.functions == Case::Upper && o.hints == Case::AsIs && !names.any() {
         return formatted.to_string();
     }
     let a: Vec<lex::Tok> = lex::lex(orig, d).into_iter().filter(|t| !t.trivia()).collect();
     let b = lex::lex(formatted, d);
     let same = a.len() == b.iter().filter(|t| !t.trivia()).count();
+    let renamed: std::collections::HashMap<usize, String> = if names.any() { super::names::recased(formatted, &b, d, names).into_iter().collect() } else { Default::default() };
+    // A hint's aliases and tables (full(o)) as they are in the statement.
+    let tables: std::collections::HashSet<usize> = if renamed.is_empty() {
+        Default::default()
+    } else {
+        super::names::classify(formatted, &b).into_iter().filter(|(_, n)| matches!(n, super::names::Name::Table | super::names::Name::TableAlias)).map(|(k, _)| k).collect()
+    };
+    let in_hints: std::collections::HashMap<String, String> = renamed.iter().filter(|(k, _)| tables.contains(k)).map(|(_, v)| (v.to_lowercase(), v.clone())).collect();
     let mut out = String::with_capacity(formatted.len());
     let mut k = 0;
     for (i, t) in b.iter().enumerate() {
         let text = t.text(formatted);
+        if let Some(n) = renamed.get(&i) {
+            out += n;
+            k += 1;
+            continue;
+        }
         if t.trivia() {
-            out += text;
+            if (o.hints != Case::AsIs || !in_hints.is_empty()) && matches!(t.kind, Tk::BlockComment | Tk::LineComment) && (text.starts_with("/*+") || text.starts_with("--+")) {
+                out += &hint_cased(text, o.hints, &in_hints);
+            } else {
+                out += text;
+            }
             continue;
         }
         let was = a.get(k).filter(|_| same).map(|x| x.text(orig)).filter(|w| w.eq_ignore_ascii_case(text));
@@ -884,6 +966,36 @@ fn cased(orig: &str, formatted: &str, d: Dialect, o: Options) -> String {
             Case::AsIs => out += was.unwrap_or(text),
         }
     }
+    out
+}
+
+/// An optimizer hint with its names in `case`; in their brackets the
+/// statement's aliases and tables as they're there, the rest as written.
+fn hint_cased(text: &str, case: Case, names: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String, depth: usize| {
+        if !word.is_empty() {
+            *out += &if depth == 0 { case.apply(word) } else { names.get(&word.to_lowercase()).cloned().unwrap_or_else(|| word.clone()) };
+            word.clear();
+        }
+    };
+    for (i, c) in text.char_indices() {
+        // (Past the opening /*+ or --+.)
+        if i >= 3 && (c.is_alphanumeric() || c == '_' || c == '$') {
+            word.push(c);
+            continue;
+        }
+        flush(&mut word, &mut out, depth);
+        match c {
+            '(' if i >= 3 => depth += 1,
+            ')' if i >= 3 => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        out.push(c);
+    }
+    flush(&mut word, &mut out, depth);
     out
 }
 
@@ -1318,5 +1430,30 @@ mod reformat_tests {
         // A PL/SQL block: left alone.
         let b = "begin\n  null;\nend;\n/\n";
         assert!(reformat(b, Dialect::Oracle, o, 7..8, 7).is_none());
+    }
+}
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn names_hints_and_breaks() {
+        let o = Options { hints: Case::Lower, break_hint: true, break_distinct: true, schemas: Case::Lower, tables: Case::Upper, columns: Case::Lower, table_aliases: Case::Upper, column_aliases: Case::Lower, ..Default::default() };
+        let q = "select /*+ FULL(t) parallel(t 4) */ distinct t.a, t.B AS Bee from SHOP.t t where t.x = 1 order by bee";
+        assert_eq!(
+            format(q, Dialect::Oracle, o),
+            "SELECT /*+ full(T) parallel(T 4) */\n       DISTINCT\n       T.a\n     , T.b AS bee\n  FROM shop.T T\n WHERE T.x = 1\n ORDER BY bee"
+        );
+        let plain = Options { river: false, leading_commas: false, break_hint: false, ..o };
+        assert_eq!(format("select distinct on (a) a, b from t", Dialect::Postgres, plain), "SELECT DISTINCT ON (a)\n  a,\n  b\nFROM T");
+        // As written by default.
+        let q = "select /*+ FULL(t) */ distinct T.A, b Bee from Shop.Orders t";
+        assert_eq!(format(q, Dialect::Oracle, Options::default()), "SELECT /*+ FULL(t) */ DISTINCT T.A\n     , b Bee\n  FROM Shop.Orders t");
+        // ClickHouse: names stay, aliases change where all their uses are known.
+        let up = Options { schemas: Case::Upper, tables: Case::Upper, columns: Case::Upper, table_aliases: Case::Upper, column_aliases: Case::Upper, ..Default::default() };
+        let ch = format("select e.userId as u, count() as n from db.events e where u > 0 group by u order by n", Dialect::ClickHouse, up);
+        assert_eq!(ch, "SELECT E.userId AS u\n     , count() AS N\n  FROM db.events E\n WHERE u > 0\n GROUP BY u\n ORDER BY N");
+        // Quoted names stay.
+        assert!(format("select \"Id\" from \"Orders\"", Dialect::Postgres, up).contains("\"Id\""));
     }
 }

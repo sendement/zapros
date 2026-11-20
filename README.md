@@ -139,8 +139,13 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   toStartOfMonth, NVL, strftime…), an operator (||, ::, ->>, @>, <=>…) or a
   keyword (LEFT JOIN, OVER, EXISTS, BETWEEN, CONNECT BY, PREWHERE…) opens
   its help — how it's written, what it does (each database's own version
-  first: length counts bytes in ClickHouse), an example to copy. The
-  reference is src/sql/help.txt.
+  first: length counts bytes in ClickHouse), an example to copy. Help goes
+  by where the word stands: ORDER BY in `KEEP (DENSE_RANK LAST ORDER BY …)`,
+  in `OVER (…)`, in `WITHIN GROUP (…)`, in `string_agg(… ORDER BY …)` and in
+  a MergeTree table each has its own; so do DENSE_RANK / FIRST / LAST in
+  KEEP, a window's frame, NULLS FIRST, DISTINCT ON, ON CONFLICT, MERGE's
+  ON / WHEN MATCHED, START WITH, WITH TIES / FILL / TOTALS. The reference is
+  src/sql/help.txt.
 - **Ctrl+click in the code** (the script and notebook cells; with Ctrl held
   the name under the pointer is underlined): an alias — its table (or CTE)
   picked and lit; a CTE's name — its definition; a function or procedure of
@@ -164,6 +169,12 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **Selection** drawn by zapros: the text keeps its colours, the rainbow
   bands show through in another shade, the corners rounded outside and in.
 - **Code style** (Settings → Code style): keyword and function case;
+  the case of optimizer hints (`/*+ full(t) */`; aliases in their
+  brackets follow the aliases' case), schemas, tables, columns, table and
+  column aliases (as typed by default; quoted names never change; in
+  ClickHouse, case-sensitive, schemas, tables and columns stay and an alias
+  changes only when all its uses in the statement are found); a new line
+  after SELECT's hint and after DISTINCT;
   calls (if(…), coalesce(…)) and windows (OVER (PARTITION BY … ORDER BY …))
   longer than a set length split over lines even when the line fits;
   keywords take that case as they're typed (only SQL's own words where they
@@ -288,7 +299,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   in red with whose it is. Menus and tooltips show the keys as set.
 - **Settings** in sections at the side, the section's settings beside
   them; the window stays in the middle.
-- **The side panel put away** by its button by the workspaces (Ctrl+B),
+- **The side panel put away** by its button at the window's corner (it
+  stays there either way; Ctrl+B),
   a double click on its edge, or its edge pulled well past its narrowest;
   its menus go beside the workspaces then, and pulling from the window's
   edge brings it back.

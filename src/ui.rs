@@ -127,7 +127,9 @@ fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     let size = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("icon-size"))).unwrap_or(ICON_H);
     // (Its lit square as far from the panel's card below as from the
     // window's top above.)
-    let (rect, r) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    // (Narrower in a narrow panel, as tall.)
+    let w = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("icon-w"))).unwrap_or(size);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, size), egui::Sense::click());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     let v = ui.visuals();
     let fill = if on {
@@ -175,6 +177,13 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
     let row = ui.horizontal(|ui| {
         ui.set_height(size);
         ui.spacing_mut().item_spacing.x = 2.0;
+        // (Clear of the panel's own button, drawn by the sheet at the
+        // window's corner: see side_rail.)
+        let clear = ctx.content_rect().left() + gap + size + 4.0;
+        ui.add_space((clear - ui.cursor().left()).max(0.0));
+        // Seven squares and the line: narrower when they don't fit.
+        let fit = ((ui.available_width() - 9.0 - 7.0 * 2.0) / 7.0).floor();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("icon-w"), size.min(fit).max(16.0)));
         let start = ui.cursor().left();
         // (Not measured yet: no room before it — the panel mustn't widen.)
         if last > 0.0 {
@@ -190,7 +199,7 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
             app.touch();
         }
         menus(app, ui);
-        ui.min_rect().width() - from
+        ui.min_rect().right() - start - from
     });
     let w = row.inner;
     if (w - last).abs() > 0.5 {
@@ -221,8 +230,14 @@ fn side_rail(app: &mut App, ui: &mut egui::Ui, at: Pos2, size: f32) -> f32 {
     let hidden = app.session.side_hidden;
     let rect = Rect::from_min_size(at, Vec2::new(400.0, size));
     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    // (Always at the window's corner, over the side panel while it's out:
+    // the button doesn't jump when the panel goes or comes.)
+    ui.set_clip_rect(ui.ctx().content_rect());
     ui.spacing_mut().item_spacing.x = 2.0;
-    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("icon-size"), size));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(egui::Id::new("icon-size"), size);
+        d.insert_temp(egui::Id::new("icon-w"), size);
+    });
     let tip = if hidden { t("Показать боковую панель", "Show the side panel") } else { t("Скрыть боковую панель", "Hide the side panel") };
     let (r, resp) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
@@ -1038,11 +1053,17 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // (Its squares as the side panel's: from the window's top to as far
         // above the sheet.)
         let size = (sheet.top() - win.top() - 2.0 * m).max(16.0);
-        let rail = side_rail(app, ui, Pos2::new(sheet.left() + reserve.0 + if app.session.side_hidden { 0.0 } else { 2.0 }, win.top() + m), size);
-        reserve.0 += rail + 4.0 - TABS_FROM.min(rail);
+        let hidden = app.session.side_hidden;
+        let rail = side_rail(app, ui, Pos2::new(win.left() + m, win.top() + m), size);
+        // (The panel put away: the tabs, and buttons on the left, after
+        // the button and the menus.)
+        let after = if hidden { rail + 4.0 } else { 0.0 };
+        if hidden {
+            reserve.0 += after - TABS_FROM.min(rail);
+        }
         workspaces(app, ui, row, sheet, reserve);
         if own {
-            let edge = if look.left { sheet.left() } else { win.right() };
+            let edge = if look.left { sheet.left() + after } else { win.right() };
             let (x, cy, scale) = crate::titlebar::place(look.style, edge, btn_top, btn_bottom - btn_top, m, look.left);
             if let Some(b) = crate::titlebar::buttons(ui, look, x, cy, scale) {
                 crate::titlebar::press(ui.ctx(), b);

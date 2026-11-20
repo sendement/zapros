@@ -1721,12 +1721,13 @@ fn hints_with_the_word_as_typed_first() {
     settle(&mut h);
     key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
     assert_eq!(h.state().tab().text, "select * from o\nfrom orders join customers");
-    // The panel's icons centred on it.
+    // The panel's icons centred on it, past its button at the corner.
     let w = h.state().session.side_width;
+    let from = h.get_by_label("Скрыть боковую панель").rect().right() + 4.0;
     let first = h.get_by_label("Подключения и объекты баз").rect();
     let last = h.get_by_label("Клавиши и о программе").rect();
     let (l, r) = (first.left() as f32, last.right() as f32);
-    assert!(((l - 6.0) - (w - 6.0 - r)).abs() < 3.0, "centred: {l} … {r} in {w}");
+    assert!(((l - from) - (w - 6.0 - r)).abs() < 3.0, "centred: {l} … {r} in {from} … {w}");
 }
 
 #[test]
@@ -3094,13 +3095,16 @@ fn formatted_on_paste_and_brackets() {
 fn side_panel_put_away_and_back() {
     let (mut h, _g) = harness("side-away", SCRIPT, false);
     let w = h.state().session.side_width;
-    // Its button by the workspaces.
+    shot(&mut h, "side-out");
+    // Its button at the window's corner, staying there.
+    let at = h.get_by_label("Скрыть боковую панель").rect();
     h.get_by_label("Скрыть боковую панель").click();
     for _ in 0..30 {
         h.step();
     }
     assert!(h.state().session.side_hidden);
     shot(&mut h, "side-hidden");
+    assert_eq!(h.get_by_label("Показать боковую панель").rect(), at, "the button stays put");
     // The menus there now.
     assert!(h.query_by_label("Настройки").is_some());
     let ws = h.get_by_label_contains("Отчёты").rect();
@@ -3132,6 +3136,7 @@ fn side_panel_put_away_and_back() {
     drag(&mut h, 180.0, true);
     assert!(!h.state().session.side_hidden, "a little past: still there");
     assert!((h.state().session.side_width - 240.0).abs() < 2.0, "{}", h.state().session.side_width);
+    shot(&mut h, "side-narrowest");
     drag(&mut h, 60.0, true);
     assert!(h.state().session.side_hidden, "well past: away");
     shot(&mut h, "side-pulled-away");

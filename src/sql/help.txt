@@ -1007,3 +1007,512 @@ sig: WHERE a.id = b.a_id(+)
 ru: Старая запись внешнего соединения в Oracle: (+) у таблицы, которой может не быть. Лучше LEFT JOIN.
 en: Oracle's old outer join notation: (+) on the side that may be missing. LEFT JOIN is better.
 ex: SELECT c.name, o.id FROM customers c, orders o WHERE c.id = o.customer_id(+);
+
+# ---------------------------------------------------- by where it stands
+#
+# A fourth field: where the entry is meant (the word before it, ">word"
+# after it, a bracket's word — keep, over, within, call for an aggregate's
+# own — "case" inside CASE, the statement's first word). Found only there.
+
+@ order | ora | k | keep
+title: ORDER BY в KEEP (…) | ORDER BY in KEEP (…)
+sig: агрегат(x) KEEP (DENSE_RANK FIRST | LAST ORDER BY expr [DESC] …)
+ru: Внутри KEEP: по какому порядку выбрать «первые» или «последние» строки группы. Агрегат считается только по ним, а не по всей группе.
+ru: Строки с одинаковым ключом сортировки (ничьи) попадают все — отсюда DENSE_RANK; поэтому агрегат (max, min, sum…) нужен и здесь.
+en: Inside KEEP: the order that picks the group's "first" or "last" rows. The aggregate is computed over only those, not the whole group.
+en: Rows tied on the sort key all get in (hence DENSE_RANK), so an aggregate (max, min, sum…) is still needed.
+ex: -- the last price of each product, by date
+ex: SELECT product_id,
+ex:        max(price) KEEP (DENSE_RANK LAST ORDER BY changed_at) AS last_price
+ex:   FROM price_history
+ex:  GROUP BY product_id;
+
+@ dense_rank | ora | k | keep
+title: DENSE_RANK в KEEP (…) | DENSE_RANK in KEEP (…)
+sig: агрегат(x) KEEP (DENSE_RANK FIRST | LAST ORDER BY …)
+ru: Здесь не оконная функция, а часть KEEP: «взять строки с первым (FIRST) или последним (LAST) местом» по ORDER BY. Скобок у неё нет.
+en: Not the window function here but part of KEEP: "take the rows ranked first (FIRST) or last (LAST)" by ORDER BY. It has no brackets.
+ex: SELECT customer_id,
+ex:        min(status) KEEP (DENSE_RANK FIRST ORDER BY created_at) AS first_status
+ex:   FROM orders
+ex:  GROUP BY customer_id;
+
+@ first, last | ora | k | keep
+title: FIRST / LAST в KEEP (…) | FIRST / LAST in KEEP (…)
+sig: KEEP (DENSE_RANK FIRST | LAST ORDER BY …)
+ru: FIRST — строки, идущие первыми по ORDER BY, LAST — последними. LAST при ORDER BY x — то же, что FIRST при ORDER BY x DESC.
+en: FIRST: the rows coming first by ORDER BY, LAST: the ones coming last. LAST with ORDER BY x is FIRST with ORDER BY x DESC.
+ex: SELECT dept_id,
+ex:        max(name) KEEP (DENSE_RANK FIRST ORDER BY salary DESC) AS best_paid
+ex:   FROM employees
+ex:  GROUP BY dept_id;
+
+@ keep | ora | k
+sig: агрегат(x) KEEP (DENSE_RANK FIRST | LAST ORDER BY …) [OVER (PARTITION BY …)]
+ru: Агрегат только по первым или последним строкам группы в заданном порядке: «значение из самой поздней строки» без подзапроса и ROW_NUMBER.
+ru: С OVER (PARTITION BY …) работает как оконная функция.
+en: An aggregate over only the group's first or last rows in a given order: "the value from the latest row" with no subquery or ROW_NUMBER.
+en: With OVER (PARTITION BY …) it works as a window function.
+ex: SELECT customer_id,
+ex:        max(total) KEEP (DENSE_RANK LAST ORDER BY created_at) AS last_total,
+ex:        count(*) AS orders
+ex:   FROM orders
+ex:  GROUP BY customer_id;
+
+@ order | * | k | over
+title: ORDER BY в OVER (…) | ORDER BY in OVER (…)
+sig: функция(…) OVER ([PARTITION BY …] ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST] [рамка])
+ru: Порядок строк внутри окна — на порядок результата не влияет. Нужен ранжирующим функциям (row_number, rank, lag, lead…).
+ru: Агрегат с ORDER BY становится нарастающим: рамка по умолчанию — от начала окна до текущей строки (RANGE … CURRENT ROW, ровни по ключу входят вместе). Поэтому last_value без своей рамки возвращает текущую строку.
+en: The rows' order inside the window; the result's order isn't affected. Ranking functions need it (row_number, rank, lag, lead…).
+en: An aggregate with ORDER BY becomes a running one: the default frame runs from the window's start to the current row (RANGE … CURRENT ROW, ties on the key come in together). That's why last_value without a frame of its own gives the current row.
+ex: SELECT id, created_at, total,
+ex:        sum(total) OVER (PARTITION BY customer_id ORDER BY created_at) AS running_total,
+ex:        row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS from_latest
+ex:   FROM orders;
+
+@ order | pg ora | k | within
+title: ORDER BY в WITHIN GROUP (…) | ORDER BY in WITHIN GROUP (…)
+sig: функция(…) WITHIN GROUP (ORDER BY expr [DESC])
+ru: Порядок значений, по которому считает упорядоченный агрегат: склейка LISTAGG, перцентили percentile_cont / percentile_disc, mode. Для перцентиля сортируется то, от чего он берётся.
+en: The order of values an ordered-set aggregate works by: LISTAGG's joining, the percentiles percentile_cont / percentile_disc, mode. For a percentile it's what the percentile is taken of.
+ex: SELECT customer_id,
+ex:        percentile_cont(0.9) WITHIN GROUP (ORDER BY total) AS p90
+ex:   FROM orders
+ex:  GROUP BY customer_id;
+
+@ within | pg ora | k
+title: WITHIN GROUP | WITHIN GROUP
+sig: функция(args) WITHIN GROUP (ORDER BY expr)
+ru: Агрегат, которому нужен порядок значений группы (упорядоченный агрегат): LISTAGG, percentile_cont, percentile_disc, mode (PostgreSQL), rank(x) как гипотетическое место.
+en: An aggregate that needs the group's values in order (an ordered-set aggregate): LISTAGG, percentile_cont, percentile_disc, mode (PostgreSQL), rank(x) as a hypothetical place.
+ex: SELECT dept_id,
+ex:        percentile_disc(0.5) WITHIN GROUP (ORDER BY salary) AS median_salary
+ex:   FROM employees
+ex:  GROUP BY dept_id;
+
+@ order | pg lite | k | call
+title: ORDER BY в агрегате | ORDER BY in an aggregate
+sig: string_agg(x, sep ORDER BY expr) | array_agg(x ORDER BY expr) | group_concat(x, sep ORDER BY expr)
+ru: Порядок, в котором агрегат собирает значения: склеенная строка, массив, JSON. Без него порядок элементов не гарантирован. Пишется внутри скобок, после аргументов, без запятой.
+ru: В SQLite — с версии 3.44.
+en: The order an aggregate gathers values in: a joined string, an array, JSON. Without it the elements' order isn't guaranteed. Written inside the brackets after the arguments, no comma.
+en: SQLite: since 3.44.
+ex: SELECT customer_id,
+ex:        string_agg(product, ', ' ORDER BY product) AS products
+ex:   FROM order_items
+ex:  GROUP BY customer_id;
+
+@ order | ch | k | create
+title: ORDER BY в таблице MergeTree | ORDER BY of a MergeTree table
+sig: CREATE TABLE … ENGINE = MergeTree [PARTITION BY …] ORDER BY (col, …) [PRIMARY KEY …]
+ru: Ключ сортировки: так строки лежат на диске в каждой части. Он же первичный ключ (разреженный индекс), если PRIMARY KEY не задан — запросы с условиями по его началу читают меньше.
+ru: Не уникальность! Первыми — колонки, по которым чаще фильтруют, с небольшим числом значений. ORDER BY tuple() — без сортировки.
+en: The sorting key: how the rows lie on disk in each part. Also the primary key (a sparse index) when PRIMARY KEY isn't given: queries filtering on its leading columns read less.
+en: Not uniqueness! Columns filtered by most, with few distinct values, go first. ORDER BY tuple(): no sorting.
+ex: CREATE TABLE events
+ex: (
+ex:     day     Date,
+ex:     user_id UInt64,
+ex:     kind    LowCardinality(String)
+ex: )
+ex: ENGINE = MergeTree
+ex: PARTITION BY toYYYYMM(day)
+ex: ORDER BY (kind, user_id, day);
+
+@ partition | ch | k | create
+title: PARTITION BY в таблице MergeTree | PARTITION BY of a MergeTree table
+sig: CREATE TABLE … ENGINE = MergeTree PARTITION BY expr ORDER BY …
+ru: Ключ партиционирования: строки с разным значением выражения хранятся в разных частях. Удобно удалять и перемещать старые данные целиком (ALTER TABLE … DROP PARTITION).
+ru: Обычно по месяцу — toYYYYMM(date). Слишком мелкие партиции (по дню на годы, по id) замедляют вставку и запросы.
+en: The partitioning key: rows with different values of the expression are kept in different parts. Old data is easy to drop or move as a whole (ALTER TABLE … DROP PARTITION).
+en: Usually by month, toYYYYMM(date). Too fine partitions (a day each over years, by id) slow inserts and queries down.
+ex: CREATE TABLE logs (ts DateTime, msg String)
+ex: ENGINE = MergeTree
+ex: PARTITION BY toYYYYMM(ts)
+ex: ORDER BY ts;
+ex: ALTER TABLE logs DROP PARTITION 202401;
+
+@ partition | pg ora | k | create
+title: PARTITION BY в CREATE TABLE | PARTITION BY in CREATE TABLE
+sig: CREATE TABLE … PARTITION BY RANGE | LIST | HASH (col)
+ru: Секционированная таблица: строки раскладываются по секциям по значению колонки. Запросы с условием по ней читают только нужные секции, старые секции удаляются целиком.
+ru: В PostgreSQL секции — отдельные таблицы (CREATE TABLE … PARTITION OF … FOR VALUES …); в Oracle перечисляются в скобках или создаются сами (INTERVAL).
+en: A partitioned table: rows are spread over partitions by a column's value. Queries filtering on it read only the partitions needed, old partitions are dropped whole.
+en: In PostgreSQL partitions are tables of their own (CREATE TABLE … PARTITION OF … FOR VALUES …); in Oracle they're listed in brackets or made on their own (INTERVAL).
+ex: CREATE TABLE measures (taken_at timestamp, value numeric)
+ex: PARTITION BY RANGE (taken_at);
+ex: CREATE TABLE measures_2026 PARTITION OF measures
+ex:   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+
+@ rows, range, groups | * | k | over
+title: Рамка окна: ROWS / RANGE / GROUPS | The window frame: ROWS / RANGE / GROUPS
+sig: OVER (… ORDER BY … ROWS | RANGE | GROUPS BETWEEN начало AND конец)
+ru: Какие строки окна видит функция для текущей строки. ROWS — считает строки, RANGE — по значению ключа ORDER BY (ровни идут вместе, RANGE '7 days' PRECEDING), GROUPS — группами ровней.
+ru: По умолчанию с ORDER BY — RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, без него — всё окно. GROUPS: PostgreSQL 11+, SQLite.
+en: Which of the window's rows the function sees for the current row. ROWS counts rows, RANGE goes by the ORDER BY key's value (ties together, RANGE '7 days' PRECEDING), GROUPS by groups of ties.
+en: The default with ORDER BY is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, without it the whole window. GROUPS: PostgreSQL 11+, SQLite.
+ex: SELECT day, amount,
+ex:        avg(amount) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS avg_7
+ex:   FROM daily_sales;
+
+@ unbounded, preceding, following, current, row, between, and | * | k | over
+title: Границы рамки окна | The window frame's bounds
+sig: BETWEEN UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n FOLLOWING | UNBOUNDED FOLLOWING AND …
+ru: UNBOUNDED PRECEDING — начало окна, n PRECEDING — n строк (или значений для RANGE) назад, CURRENT ROW — текущая строка, n FOLLOWING — вперёд, UNBOUNDED FOLLOWING — конец окна.
+ru: last_value по всему окну: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+en: UNBOUNDED PRECEDING: the window's start, n PRECEDING: n rows (or values for RANGE) back, CURRENT ROW: this row, n FOLLOWING: ahead, UNBOUNDED FOLLOWING: the window's end.
+en: last_value over the whole window: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+ex: SELECT customer_id, created_at,
+ex:        last_value(total) OVER (PARTITION BY customer_id ORDER BY created_at
+ex:                                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_total
+ex:   FROM orders;
+
+@ nulls | * | k
+sig: ORDER BY expr [ASC | DESC] NULLS FIRST | NULLS LAST
+ru: Где в порядке окажутся NULL. Без указания в PostgreSQL и Oracle NULL считаются больше всех (в конце при ASC, в начале при DESC), в SQLite — меньше всех, в ClickHouse — в конце.
+en: Where NULLs come in the order. Unsaid, PostgreSQL and Oracle take NULL as the largest (last with ASC, first with DESC), SQLite as the smallest, ClickHouse puts them last.
+ex: SELECT * FROM orders ORDER BY shipped_at DESC NULLS LAST;
+
+@ first, last | * | k | nulls
+title: NULLS FIRST / NULLS LAST | NULLS FIRST / NULLS LAST
+sig: ORDER BY expr [ASC | DESC] NULLS FIRST | NULLS LAST
+ru: NULL в начале (FIRST) или в конце (LAST) порядка — независимо от ASC / DESC.
+en: NULLs at the start (FIRST) or the end (LAST) of the order, whatever ASC / DESC say.
+ex: SELECT name, last_login FROM users ORDER BY last_login DESC NULLS LAST;
+
+@ first, next | pg ora | k | fetch
+title: FETCH FIRST / NEXT | FETCH FIRST / NEXT
+sig: [OFFSET m ROWS] FETCH FIRST | NEXT n ROWS ONLY | WITH TIES
+ru: FIRST и NEXT — одно и то же: не больше n строк (после OFFSET). WITH TIES добавляет строки, равные последней по ORDER BY.
+en: FIRST and NEXT are the same: at most n rows (after OFFSET). WITH TIES adds the rows equal to the last one by ORDER BY.
+ex: SELECT * FROM orders ORDER BY total DESC
+ex: OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY;
+
+@ ties | pg ora ch | k
+title: WITH TIES | WITH TIES
+sig: FETCH FIRST n ROWS WITH TIES | LIMIT n WITH TIES (ClickHouse)
+ru: К первым n строкам добавляются все, что равны последней по ORDER BY, — «топ-3» не обрывается посреди ничьей.
+en: The first n rows plus all equal to the last one by ORDER BY: a "top 3" doesn't cut a tie in half.
+ex: SELECT name, score FROM players ORDER BY score DESC FETCH FIRST 3 ROWS WITH TIES;
+
+@ with | pg ora ch | k | >ties
+title: WITH TIES | WITH TIES
+sig: FETCH FIRST n ROWS WITH TIES | LIMIT n WITH TIES (ClickHouse)
+ru: К первым n строкам добавляются все, что равны последней по ORDER BY, — «топ-3» не обрывается посреди ничьей.
+en: The first n rows plus all equal to the last one by ORDER BY: a "top 3" doesn't cut a tie in half.
+ex: SELECT name, score FROM players ORDER BY score DESC FETCH FIRST 3 ROWS WITH TIES;
+
+@ with | ch | k | >fill
+title: WITH FILL | WITH FILL
+sig: ORDER BY expr WITH FILL [FROM a] [TO b] [STEP s]
+ru: Дописывает недостающие значения ключа сортировки (дни без продаж и т. п.) строками со значениями по умолчанию.
+en: Adds the sort key's missing values (days with no sales and so on) as rows with default values.
+ex: SELECT toDate(ts) AS day, count() AS n
+ex:   FROM events GROUP BY day
+ex:  ORDER BY day WITH FILL STEP 1;
+
+@ fill | ch | k
+title: WITH FILL | WITH FILL
+sig: ORDER BY expr WITH FILL [FROM a] [TO b] [STEP s]
+ru: Дописывает недостающие значения ключа сортировки (дни без продаж и т. п.) строками со значениями по умолчанию.
+en: Adds the sort key's missing values (days with no sales and so on) as rows with default values.
+ex: SELECT toDate(ts) AS day, count() AS n
+ex:   FROM events GROUP BY day
+ex:  ORDER BY day WITH FILL STEP 1;
+
+@ with | ch | k | >totals
+title: WITH TOTALS | WITH TOTALS
+sig: … GROUP BY … WITH TOTALS
+ru: Кроме групп — ещё строка итогов по всем строкам (агрегаты без группировки).
+en: Besides the groups, a totals row over all rows (the aggregates with no grouping).
+ex: SELECT kind, count() FROM events GROUP BY kind WITH TOTALS;
+
+@ totals | ch | k
+sig: … GROUP BY … WITH TOTALS
+ru: Кроме групп — ещё строка итогов по всем строкам (агрегаты без группировки).
+en: Besides the groups, a totals row over all rows (the aggregates with no grouping).
+ex: SELECT kind, count() FROM events GROUP BY kind WITH TOTALS;
+
+@ rollup, cube | pg ora ch | k
+sig: GROUP BY ROLLUP (a, b) | CUBE (a, b) | a, b WITH ROLLUP (ClickHouse)
+ru: Промежуточные итоги: ROLLUP — по (a, b), (a) и общий; CUBE — по всем сочетаниям. В строках итогов свёрнутые колонки — NULL (различать — grouping()).
+en: Subtotals: ROLLUP by (a, b), (a) and the grand total; CUBE by every combination. Totals rows have NULL in the rolled-up columns (grouping() tells them apart).
+ex: SELECT region, city, sum(amount) FROM sales GROUP BY ROLLUP (region, city);
+
+@ with | ch | k | >rollup >cube
+title: WITH ROLLUP / CUBE | WITH ROLLUP / CUBE
+sig: GROUP BY a, b WITH ROLLUP | WITH CUBE
+ru: Промежуточные итоги: ROLLUP — по (a, b), (a) и общий; CUBE — по всем сочетаниям. В строках итогов свёрнутые колонки — значения по умолчанию.
+en: Subtotals: ROLLUP by (a, b), (a) and the grand total; CUBE by every combination. Totals rows hold default values in the rolled-up columns.
+ex: SELECT region, city, sum(amount) FROM sales GROUP BY region, city WITH ROLLUP;
+
+@ grouping | pg ora ch | k
+title: GROUPING SETS | GROUPING SETS
+sig: GROUP BY GROUPING SETS ((a, b), (a), ())
+ru: Несколько группировок в одном запросе — как UNION ALL нескольких GROUP BY. () — общий итог.
+en: Several groupings in one query, like a UNION ALL of several GROUP BYs. () is the grand total.
+ex: SELECT region, city, sum(amount) FROM sales
+ex:  GROUP BY GROUPING SETS ((region, city), (region), ());
+
+@ recursive | pg lite | k
+sig: WITH RECURSIVE name (cols) AS (начало UNION ALL шаг, ссылающийся на name) SELECT …
+ru: CTE, который ссылается на себя: сначала начальные строки, потом шаг повторяется по только что полученным, пока они есть. Деревья, графы, ряды.
+en: A CTE that refers to itself: the starting rows first, then the step repeats over the rows just got, while there are any. Trees, graphs, series.
+ex: WITH RECURSIVE tree AS (
+ex:     SELECT id, parent_id, name, 1 AS depth FROM departments WHERE parent_id IS NULL
+ex:     UNION ALL
+ex:     SELECT d.id, d.parent_id, d.name, t.depth + 1 FROM departments d JOIN tree t ON d.parent_id = t.id
+ex: )
+ex: SELECT * FROM tree;
+
+@ on | * | k
+title: ON в JOIN | ON of a JOIN
+sig: … JOIN t ON cond
+ru: Условие соединения: какие строки двух таблиц идут в пару. У LEFT JOIN условие на правую таблицу пишется здесь, а не в WHERE — иначе строки без пары пропадут.
+en: The join condition: which rows of the two tables pair up. With LEFT JOIN a condition on the right table goes here, not in WHERE, or the rows without a pair vanish.
+ex: SELECT c.name, o.id
+ex:   FROM customers c
+ex:   LEFT JOIN orders o ON o.customer_id = c.id AND o.status = 'paid';
+
+@ on | pg | k | distinct
+title: DISTINCT ON | DISTINCT ON
+sig: SELECT DISTINCT ON (expr, …) … ORDER BY expr, …, что-то ещё
+ru: Одна строка на каждое значение выражения — первая по ORDER BY (его начало должно совпадать с выражением). «Последний заказ каждого клиента» без оконных функций.
+en: One row per value of the expression, the first by ORDER BY (which must start with the expression). "Each customer's latest order" with no window functions.
+ex: SELECT DISTINCT ON (customer_id) customer_id, id, created_at
+ex:   FROM orders
+ex:  ORDER BY customer_id, created_at DESC;
+
+@ on | pg lite | k | >conflict
+title: ON CONFLICT | ON CONFLICT
+sig: INSERT … ON CONFLICT (cols) DO UPDATE SET … | DO NOTHING
+ru: «Вставить или обновить»: при конфликте по ключу — обновить (EXCLUDED — вставляемая строка) или пропустить.
+en: "Insert or update": on a key conflict, update (EXCLUDED is the row being inserted) or skip.
+ex: INSERT INTO stock (product_id, qty) VALUES (1, 5)
+ex: ON CONFLICT (product_id) DO UPDATE SET qty = stock.qty + EXCLUDED.qty;
+
+@ on | pg ora | k | merge
+title: ON в MERGE | ON of a MERGE
+sig: MERGE INTO target USING source ON (cond) WHEN MATCHED … WHEN NOT MATCHED …
+ru: Как сопоставить строки источника со строками цели: нашлась пара — ветка WHEN MATCHED, нет — WHEN NOT MATCHED. Если строке цели подходят несколько строк источника — ошибка. В Oracle условие в скобках.
+en: How the source's rows match the target's: a pair found goes to WHEN MATCHED, none to WHEN NOT MATCHED. Several source rows for one target row is an error. Oracle wants the condition in brackets.
+ex: MERGE INTO stock s USING incoming i ON (s.product_id = i.product_id)
+ex: WHEN MATCHED THEN UPDATE SET s.qty = s.qty + i.qty
+ex: WHEN NOT MATCHED THEN INSERT (product_id, qty) VALUES (i.product_id, i.qty);
+
+@ using | * | k
+title: USING в JOIN | USING of a JOIN
+sig: … JOIN t USING (col, …)
+ru: Соединение по одноимённым колонкам: USING (id) — то же, что ON a.id = b.id, но колонка в результате одна.
+en: A join on same-named columns: USING (id) is ON a.id = b.id, but the column comes out once.
+ex: SELECT * FROM orders JOIN order_items USING (order_id);
+
+@ using | pg ora | k | merge
+title: USING в MERGE | USING of a MERGE
+sig: MERGE INTO target USING source | (SELECT …) alias ON …
+ru: Источник: таблица или подзапрос, строки которого вливаются в цель.
+en: The source: a table or a subquery whose rows are merged into the target.
+ex: MERGE INTO stock s
+ex: USING (SELECT product_id, sum(qty) AS qty FROM incoming GROUP BY product_id) i
+ex:    ON (s.product_id = i.product_id)
+ex: WHEN MATCHED THEN UPDATE SET s.qty = s.qty + i.qty;
+
+@ when | pg ora | k | merge
+title: WHEN MATCHED / NOT MATCHED | WHEN MATCHED / NOT MATCHED
+sig: WHEN MATCHED [AND cond] THEN UPDATE … | DELETE — WHEN NOT MATCHED [AND cond] THEN INSERT …
+ru: Ветки MERGE: для строк, у которых нашлась пара по ON (MATCHED), и для тех, у кого нет (NOT MATCHED).
+en: MERGE's branches: for rows that found a pair by ON (MATCHED) and for those that didn't (NOT MATCHED).
+ex: MERGE INTO stock s USING incoming i ON (s.product_id = i.product_id)
+ex: WHEN MATCHED THEN UPDATE SET s.qty = s.qty + i.qty
+ex: WHEN NOT MATCHED THEN INSERT (product_id, qty) VALUES (i.product_id, i.qty);
+
+@ matched | pg ora | k
+title: WHEN MATCHED / NOT MATCHED | WHEN MATCHED / NOT MATCHED
+sig: WHEN MATCHED [AND cond] THEN UPDATE … | DELETE — WHEN NOT MATCHED [AND cond] THEN INSERT …
+ru: Ветки MERGE: для строк, у которых нашлась пара по ON (MATCHED), и для тех, у кого нет (NOT MATCHED).
+en: MERGE's branches: for rows that found a pair by ON (MATCHED) and for those that didn't (NOT MATCHED).
+ex: MERGE INTO stock s USING incoming i ON (s.product_id = i.product_id)
+ex: WHEN MATCHED THEN UPDATE SET s.qty = s.qty + i.qty
+ex: WHEN NOT MATCHED THEN INSERT (product_id, qty) VALUES (i.product_id, i.qty);
+
+@ when, then, else, end | * | k | case
+title: CASE … WHEN … THEN … ELSE … END | CASE … WHEN … THEN … ELSE … END
+sig: CASE WHEN cond THEN res … [ELSE res] END | CASE expr WHEN value THEN res … END
+ru: Ветки CASE проверяются по порядку: результат первой подошедшей (THEN), иначе ELSE, а без ELSE — NULL. END закрывает выражение.
+en: CASE's branches are tried in order: the first matching one's result (THEN), else ELSE, and without it NULL. END closes the expression.
+ex: SELECT CASE WHEN total > 1000 THEN 'big'
+ex:             WHEN total > 100 THEN 'medium'
+ex:             ELSE 'small' END AS kind
+ex:   FROM orders;
+
+@ excluded | pg lite | k
+sig: INSERT … ON CONFLICT (…) DO UPDATE SET col = EXCLUDED.col
+ru: В DO UPDATE — строка, которую пытались вставить (а имя таблицы — строка, что уже есть).
+en: In DO UPDATE: the row that was being inserted (the table's name is the row already there).
+ex: INSERT INTO stock (product_id, qty) VALUES (1, 5)
+ex: ON CONFLICT (product_id) DO UPDATE SET qty = stock.qty + EXCLUDED.qty;
+
+@ for | pg ora | k | >update
+title: FOR UPDATE | FOR UPDATE
+sig: SELECT … FOR UPDATE [OF …] [NOWAIT | SKIP LOCKED]
+ru: Блокирует выбранные строки до конца транзакции: другие не изменят их и не заблокируют. NOWAIT — ошибка, если строка занята; SKIP LOCKED — пропустить занятые (очереди задач).
+en: Locks the rows selected till the transaction ends: others can't change or lock them. NOWAIT: an error if a row is taken; SKIP LOCKED: skip the taken ones (job queues).
+ex: SELECT * FROM jobs WHERE state = 'new'
+ex:  ORDER BY id
+ex:  FETCH FIRST 1 ROWS ONLY
+ex:    FOR UPDATE SKIP LOCKED;
+
+@ skip, locked, nowait | pg ora | k
+title: NOWAIT / SKIP LOCKED | NOWAIT / SKIP LOCKED
+sig: SELECT … FOR UPDATE NOWAIT | SKIP LOCKED
+ru: Что делать с уже заблокированными строками: NOWAIT — сразу ошибка, а не ожидание; SKIP LOCKED — молча пропустить их.
+en: What to do with rows already locked: NOWAIT errors at once instead of waiting; SKIP LOCKED quietly skips them.
+ex: SELECT * FROM jobs WHERE state = 'new' FOR UPDATE SKIP LOCKED;
+
+@ percent_rank, cume_dist | pg ora lite | f
+sig: percent_rank() / cume_dist() OVER (… ORDER BY …)
+ru: Относительное место строки в окне от 0 до 1. percent_rank = (rank − 1) / (строк − 1); cume_dist — доля строк, что не больше текущей.
+en: The row's relative place in the window, 0 to 1. percent_rank = (rank − 1) / (rows − 1); cume_dist: the share of rows not above this one.
+ex: SELECT name, score, round(cume_dist() OVER (ORDER BY score), 2) AS share_below FROM players;
+
+@ nth_value | pg ora lite ch | f
+sig: nth_value(expr, n) OVER (… ORDER BY … [рамка])
+ru: Значение из n-й строки рамки окна. С рамкой по умолчанию (до текущей строки) в первых строках — NULL; для всего окна — ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+en: The value from the n-th row of the window frame. With the default frame (up to this row) the first rows get NULL; for the whole window: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+ex: SELECT name, score,
+ex:        nth_value(name, 2) OVER (ORDER BY score DESC
+ex:                                 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS runner_up
+ex:   FROM players;
+
+@ ratio_to_report | ora | f
+sig: RATIO_TO_REPORT(expr) OVER ([PARTITION BY …])
+ru: Доля значения в сумме окна: x / sum(x) OVER (…).
+en: The value's share of the window's sum: x / sum(x) OVER (…).
+ex: SELECT region, amount, RATIO_TO_REPORT(amount) OVER () AS share FROM sales_by_region;
+
+@ stddev, stddev_samp, stddev_pop | pg ora | f
+sig: stddev(expr) | stddev_samp(expr) | stddev_pop(expr)
+ru: Стандартное отклонение группы: выборочное (stddev, stddev_samp) или по генеральной совокупности (stddev_pop).
+en: The group's standard deviation: of a sample (stddev, stddev_samp) or of the population (stddev_pop).
+ex: SELECT product_id, avg(price), stddev(price) FROM price_history GROUP BY product_id;
+
+@ variance, var_samp, var_pop | pg ora | f
+sig: variance(expr) | var_samp(expr) | var_pop(expr)
+ru: Дисперсия группы: выборочная (variance, var_samp) или по генеральной совокупности (var_pop).
+en: The group's variance: of a sample (variance, var_samp) or of the population (var_pop).
+ex: SELECT product_id, variance(price) FROM price_history GROUP BY product_id;
+
+@ bool_and, bool_or, every | pg | f
+sig: bool_and(cond) | bool_or(cond) | every(cond)
+ru: Истинно ли условие для всех строк группы (bool_and, every) или хотя бы для одной (bool_or).
+en: Whether the condition holds for every row of the group (bool_and, every) or for at least one (bool_or).
+ex: SELECT order_id, bool_and(shipped) AS all_shipped FROM order_items GROUP BY order_id;
+
+@ json_agg, jsonb_agg | pg | f
+sig: json_agg(expr [ORDER BY …]) | jsonb_agg(…)
+ru: Собирает значения группы в JSON-массив; строку таблицы — в массив объектов: json_agg(t).
+en: Gathers the group's values into a JSON array; a table's row into an array of objects: json_agg(t).
+ex: SELECT c.id, json_agg(o ORDER BY o.created_at) AS orders
+ex:   FROM customers c JOIN orders o ON o.customer_id = c.id
+ex:  GROUP BY c.id;
+
+@ mode | pg | f
+sig: mode() WITHIN GROUP (ORDER BY expr)
+ru: Самое частое значение группы (при равенстве — первое по порядку).
+en: The group's most frequent value (on a tie, the first in order).
+ex: SELECT customer_id, mode() WITHIN GROUP (ORDER BY payment_method) FROM orders GROUP BY customer_id;
+
+@ percentile_disc | pg ora | f
+sig: percentile_disc(fraction) WITHIN GROUP (ORDER BY expr)
+ru: Дискретный перцентиль: ближайшее настоящее значение из группы, без интерполяции.
+en: A discrete percentile: the nearest real value of the group, not interpolated.
+ex: SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY total) AS median FROM orders;
+
+@ median | ora | f
+sig: MEDIAN(expr)
+ru: Медиана группы (с интерполяцией, как percentile_cont(0.5)).
+en: The group's median (interpolated, as percentile_cont(0.5)).
+ex: SELECT dept_id, MEDIAN(salary) FROM employees GROUP BY dept_id;
+
+@ groupUniqArray, topK | ch | f
+sig: groupUniqArray([max])(x) | topK(n)(x)
+ru: groupUniqArray — массив разных значений группы; topK — примерно n самых частых значений (приближённо, зато быстро).
+en: groupUniqArray: an array of the group's distinct values; topK: about the n most frequent values (approximate but fast).
+ex: SELECT user_id, groupUniqArray(page), topK(3)(page) FROM visits GROUP BY user_id;
+
+@ pivot, unpivot | ora | k
+sig: FROM t PIVOT (агрегат(x) FOR col IN (v1 AS a, v2 AS b)) | UNPIVOT (val FOR col IN (a, b))
+ru: PIVOT — значения колонки становятся колонками (с агрегатом), UNPIVOT — наоборот, колонки в строки.
+en: PIVOT turns a column's values into columns (with an aggregate), UNPIVOT the other way, columns into rows.
+ex: SELECT * FROM (SELECT region, quarter, amount FROM sales)
+ex: PIVOT (sum(amount) FOR quarter IN (1 AS q1, 2 AS q2, 3 AS q3, 4 AS q4));
+
+@ start | ora | k
+title: START WITH | START WITH
+sig: START WITH cond CONNECT BY PRIOR child = parent
+ru: Корни иерархического запроса: с каких строк начинать обход дерева.
+en: A hierarchical query's roots: the rows the tree walk starts from.
+ex: SELECT LEVEL, name FROM departments
+ex:  START WITH parent_id IS NULL CONNECT BY PRIOR id = parent_id;
+
+@ with | ora | k | start
+title: START WITH | START WITH
+sig: START WITH cond CONNECT BY PRIOR child = parent
+ru: Корни иерархического запроса: с каких строк начинать обход дерева.
+en: A hierarchical query's roots: the rows the tree walk starts from.
+ex: SELECT LEVEL, name FROM departments
+ex:  START WITH parent_id IS NULL CONNECT BY PRIOR id = parent_id;
+
+@ prior | ora | k
+sig: CONNECT BY PRIOR id = parent_id
+ru: Значение из строки-родителя (предыдущего шага обхода). С какой стороны равенства PRIOR — туда и идёт обход: PRIOR id = parent_id — вниз к детям.
+en: The value from the parent row (the walk's previous step). The side of the equality PRIOR is on sets the direction: PRIOR id = parent_id goes down to the children.
+ex: SELECT name FROM departments START WITH id = 1 CONNECT BY PRIOR id = parent_id;
+
+@ level | ora | k
+sig: LEVEL
+ru: Глубина строки в иерархическом запросе: 1 у корней. Без иерархии с CONNECT BY LEVEL <= n — ряд чисел.
+en: The row's depth in a hierarchical query, 1 for the roots. Without a hierarchy, CONNECT BY LEVEL <= n makes a series of numbers.
+ex: SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 10;
+
+@ sys_connect_by_path, connect_by_root | ora | f
+sig: SYS_CONNECT_BY_PATH(col, '/') | CONNECT_BY_ROOT col
+ru: Путь от корня до строки, склеенный через разделитель; CONNECT_BY_ROOT — значение из корня ветки.
+en: The path from the root to the row joined with a separator; CONNECT_BY_ROOT: the value from the branch's root.
+ex: SELECT SYS_CONNECT_BY_PATH(name, ' / ') AS path FROM departments
+ex:  START WITH parent_id IS NULL CONNECT BY PRIOR id = parent_id;
+
+@ dual | ora | k
+sig: SELECT expr FROM dual
+ru: Служебная таблица из одной строки — для SELECT без таблицы (в Oracle до 23ai FROM обязателен).
+en: A built-in one-row table, for a SELECT with no table (Oracle before 23ai requires FROM).
+ex: SELECT sysdate, 1 + 1 FROM dual;
+
+@ asof | ch | k
+title: ASOF JOIN | ASOF JOIN
+sig: … ASOF [LEFT] JOIN t ON a.key = t.key AND a.ts >= t.ts
+ru: Соединение с ближайшей подходящей строкой: по равенству ключа и ближайшему значению последнего условия (цена на момент сделки).
+en: Joins the nearest fitting row: by the key's equality and the nearest value for the last condition (the price at the trade's time).
+ex: SELECT t.id, t.ts, p.price
+ex:   FROM trades t
+ex:   ASOF JOIN prices p ON t.symbol = p.symbol AND t.ts >= p.ts;
+
+@ any, all | ch | k | >join
+title: ANY / ALL JOIN | ANY / ALL JOIN
+sig: [LEFT | INNER] ANY | ALL JOIN t ON …
+ru: ALL (по умолчанию) — все пары, как в стандартном SQL; ANY — только одна пара на строку слева (первая найденная), без размножения строк.
+en: ALL (the default): every pair, as in standard SQL; ANY: a single pair per left row (the first found), no rows multiplied.
+ex: SELECT u.id, s.started_at FROM users u LEFT ANY JOIN sessions s ON s.user_id = u.id;
+
+@ global | ch | k
+sig: … GLOBAL IN (SELECT …) | GLOBAL JOIN
+ru: Для распределённых таблиц: подзапрос выполняется один раз на инициаторе, а результат рассылается на шарды — вместо выполнения на каждом шарде.
+en: For distributed tables: the subquery runs once on the initiator and its result is sent to the shards, instead of running on each shard.
+ex: SELECT count() FROM events_all WHERE user_id GLOBAL IN (SELECT id FROM users_all WHERE vip);
+
+@ settings | ch | k
+sig: SELECT … SETTINGS name = value, …
+ru: Настройки только для этого запроса: max_threads, max_memory_usage, join_use_nulls…
+en: Settings for this query only: max_threads, max_memory_usage, join_use_nulls…
+ex: SELECT count() FROM events SETTINGS max_threads = 4;

@@ -10,6 +10,7 @@ pub mod fmt;
 pub mod help;
 pub mod follow;
 pub mod lex;
+pub mod names;
 pub mod notebook;
 pub mod params;
 pub mod outline;
