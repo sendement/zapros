@@ -3162,3 +3162,33 @@ fn side_panel_put_away_and_back() {
     key(&mut h, egui::Key::B, egui::Modifiers::COMMAND);
     assert!(!h.state().session.side_hidden);
 }
+
+#[test]
+fn side_panel_slides_with_the_sheet() {
+    let (mut h, _g) = harness("side-slide", SCRIPT, false);
+    h.state_mut().tab_mut().set_notebook(true, crate::sql::Dialect::Sqlite);
+    // (Animations are off in tests: on here, as in the app.)
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.2);
+    settle(&mut h);
+    let sheet = |h: &Harness<'static, App>| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(crate::ui::SHEET_KEY))).unwrap().left();
+    for (label, from, to) in [("Скрыть боковую панель", 280.0, 6.0), ("Показать боковую панель", 6.0, 280.0)] {
+        assert!((sheet(&h) - from).abs() < 1.0, "{label}: {}", sheet(&h));
+        h.get_by_label(label).click();
+        let mut xs = Vec::new();
+        for _ in 0..30 {
+            h.step();
+            xs.push(sheet(&h));
+        }
+        // The sheet's edge goes with the panel's, a little every frame, no
+        // standing still on the way, no jumps.
+        // (The click's own frame laid the sheet out before it.)
+        let moving: Vec<f32> = xs.iter().copied().skip_while(|x| (x - from).abs() < 0.01).take_while(|x| (x - to).abs() > 0.5).collect();
+        assert!(moving.len() >= 5, "{label}: {xs:?}");
+        let mut prev = from;
+        for x in &moving {
+            assert!((x - prev).abs() > 0.1 && (x - prev).abs() < 80.0 && (to - x) * (to - prev) >= 0.0, "{label}: {xs:?}");
+            prev = *x;
+        }
+        assert!((xs.last().unwrap() - to).abs() < 0.5, "{label}: {xs:?}");
+    }
+}

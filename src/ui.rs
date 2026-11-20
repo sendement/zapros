@@ -178,9 +178,9 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
         ui.set_height(size);
         ui.spacing_mut().item_spacing.x = 2.0;
         // (Clear of the panel's own button, drawn by the sheet at the
-        // window's corner: see side_rail.)
-        let clear = ctx.content_rect().left() + gap + size + 4.0;
-        ui.add_space((clear - ui.cursor().left()).max(0.0));
+        // window's corner: see side_rail. As far from the panel's own edge,
+        // not the window's: sliding away, its row goes along.)
+        ui.add_space(size + 4.0);
         // Seven squares and the line: narrower when they don't fit.
         let fit = ((ui.available_width() - 9.0 - 7.0 * 2.0) / 7.0).floor();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("icon-w"), size.min(fit).max(16.0)));
@@ -1024,7 +1024,9 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let row = Rect::from_min_size(full.min + Vec2::new(0.0, gap), Vec2::new(full.width() - gap, ROW_H));
         // (Its gap to the side card as wide as the one to the window's edge.)
         // (The side panel put away: a gap at the window's edge as at the right.)
-        let left = if app.session.side_hidden { full.left() + gap } else { full.left() };
+        // (Grows as the panel slides away, not at once.)
+        let out = ui.ctx().animate_bool_responsive(egui::Id::new("side").with("animation"), !app.session.side_hidden);
+        let left = full.left() + gap * (1.0 - out);
         let sheet = Rect::from_min_max(Pos2::new(left, snap(ui.ctx(), row.bottom())), Pos2::new(full.right() - gap, full.bottom() - snap(ui.ctx(), 2.0)));
         if ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))) != Some(sheet) {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
