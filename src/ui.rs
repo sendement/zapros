@@ -148,6 +148,33 @@ fn icon(ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str) -> egui::Response {
     r.on_hover_text(tip)
 }
 
+/// The boards' square: a sheet with two boxes and a link between.
+fn board_icon(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let size = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("icon-size"))).unwrap_or(ICON_H);
+    let w = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("icon-w"))).unwrap_or(size);
+    let tip = t("Доски: схемы, заметки, таблицы и ноутбуки на холсте", "Boards: diagrams, notes, tables and notebooks on a canvas");
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, size), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    let v = ui.visuals();
+    let fill = if on {
+        v.selection.bg_fill.gamma_multiply(if v.dark_mode { 0.55 } else { 0.35 })
+    } else if r.hovered() || r.has_focus() {
+        v.widgets.hovered.weak_bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, RADIUS, fill);
+    let c = if on || r.hovered() { v.strong_text_color() } else { v.text_color() };
+    let s = Stroke::new(1.4, c);
+    let a = Rect::from_center_size(rect.center() + Vec2::new(-4.0, -3.5), Vec2::new(7.0, 5.5));
+    let b = Rect::from_center_size(rect.center() + Vec2::new(4.0, 4.0), Vec2::new(7.0, 5.5));
+    ui.painter().rect_stroke(a, 1.5, s, egui::StrokeKind::Middle);
+    ui.painter().rect_filled(b, 1.5, c);
+    ui.painter().line_segment([Pos2::new(a.center().x, a.bottom()), Pos2::new(a.center().x, b.center().y)], s);
+    ui.painter().line_segment([Pos2::new(a.center().x, b.center().y), Pos2::new(b.left(), b.center().y)], s);
+    r.on_hover_text(tip)
+}
+
 /// A menu dropping from an icon.
 fn icon_menu(ui: &mut egui::Ui, glyph: &str, tip: &str, add: impl FnOnce(&mut egui::Ui)) {
     let r = icon(ui, glyph, false, tip);
@@ -181,8 +208,8 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
         // window's corner: see side_rail. As far from the panel's own edge,
         // not the window's: sliding away, its row goes along.)
         ui.add_space(size + 4.0);
-        // Seven squares and the line: narrower when they don't fit.
-        let fit = ((ui.available_width() - 9.0 - 7.0 * 2.0) / 7.0).floor();
+        // Eight squares and the line: narrower when they don't fit.
+        let fit = ((ui.available_width() - 9.0 - 8.0 * 2.0) / 8.0).floor();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("icon-w"), size.min(fit).max(16.0)));
         let start = ui.cursor().left();
         // (Not measured yet: no room before it — the panel mustn't widen.)
@@ -190,12 +217,19 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(((ui.available_width() - last) / 2.0).floor().max(0.0));
         }
         let from = ui.cursor().left() - start;
-        if icon(ui, "🗄", !app.session.side_files, t("Подключения и объекты баз", "Connections and database objects")).clicked() {
+        let (files, boards) = (app.session.side_files && !app.session.side_boards, app.session.side_boards);
+        if icon(ui, "🗄", !files && !boards, t("Подключения и объекты баз", "Connections and database objects")).clicked() {
             app.session.side_files = false;
+            app.session.side_boards = false;
             app.touch();
         }
-        if icon(ui, "🗁", app.session.side_files, t("Файлы проекта", "Project files")).clicked() {
+        if icon(ui, "🗁", files, t("Файлы проекта", "Project files")).clicked() {
             app.session.side_files = true;
+            app.session.side_boards = false;
+            app.touch();
+        }
+        if board_icon(ui, boards).clicked() {
+            app.session.side_boards = true;
             app.touch();
         }
         menus(app, ui);
@@ -687,6 +721,18 @@ fn script_tabs(app: &mut App, ui: &mut egui::Ui) {
                             app.save_tab(wi, i);
                             ui.close();
                         }
+                        let tb_id = app.ws().tabs[i].id.clone();
+                        let can_board = app.ws().tabs[i].board.is_none() && app.ws().tabs[i].object.is_none();
+                        if can_board {
+                            if let Some(b) = app.boards.last.clone().filter(|id| app.boards.list.iter().any(|(k, _)| k == id)) {
+                                if ui.button(format!("{} «{}»", t("На доску", "On the board"), app.boards.name(&b))).clicked() {
+                                    crate::board_ui::put_on_last(app, |app, b, at| {
+                                        crate::board_ui::add_notebook(app, b, &tb_id, at);
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        }
                         if ui.button(t("Дублировать", "Duplicate")).clicked() {
                             let tb = app.ws().tabs[i].clone();
                             app.new_tab(Some(format!("{} (2)", tb.title)), tb.full_text(), tb.conn);
@@ -1076,6 +1122,11 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.set_clip_rect(sheet.shrink(1.0));
         script_tabs(app, ui);
         ui.add_space(3.0);
+        // A board: its canvas instead of everything else.
+        if let Some(id) = app.tab().board.clone() {
+            crate::board_ui::show(app, ui, &id);
+            return;
+        }
         // A table's or a job's tab: Designer | Code; the designer instead
         // of the text and the results.
         if app.tab().object.is_some() {

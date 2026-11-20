@@ -324,7 +324,10 @@ pub struct App {
     pub help: Option<(usize, egui::Pos2)>,
     pub tree_search: crate::search::TreeSearch,
     pub about: bool,
-    ctx: egui::Context,
+    pub ctx: egui::Context,
+    /// The boards (Side panel → Boards) and their tools.
+    pub boards: crate::board::Boards,
+    pub board_ui: crate::board_ui::State,
     /// Connections started on their own once (not again after failing).
     auto_tried: HashSet<String>,
 }
@@ -394,6 +397,8 @@ impl App {
             find: Default::default(),
             help: None,
             tree_search: Default::default(),
+            boards: crate::board::Boards::load(),
+            board_ui: Default::default(),
             settings,
             conns: config::load(&conns_path()),
             session,
@@ -847,6 +852,58 @@ impl App {
         self.touch();
     }
 
+    /// A board in its tab (the one it has in this workspace, or a new one
+    /// beside the current).
+    pub fn open_board(&mut self, id: &str) {
+        let wi = self.session.active;
+        if let Some(i) = self.session.workspaces[wi].tabs.iter().position(|tb| tb.board.as_deref() == Some(id)) {
+            self.session.workspaces[wi].active = i;
+            self.touch();
+            return;
+        }
+        let name = self.boards.name(id);
+        // An untouched empty tab gives way.
+        let ws = self.ws();
+        let blank = ws.tabs.len() == 1 && ws.tabs[0].text.is_empty() && ws.tabs[0].path.is_none() && ws.tabs[0].board.is_none() && ws.tabs[0].object.is_none() && ws.tabs[0].notebook.is_none();
+        if blank {
+            let tab = self.tab_mut();
+            tab.title = name;
+            tab.board = Some(id.to_string());
+        } else {
+            self.new_tab_next(Some(name), String::new(), None);
+            self.tab_mut().board = Some(id.to_string());
+        }
+        self.boards.last = Some(id.to_string());
+        self.touch();
+    }
+
+    pub fn new_board(&mut self) -> String {
+        let n = self.boards.list.len() + 1;
+        let id = self.boards.create(&format!("{} {n}", t("Доска", "Board")));
+        self.open_board(&id);
+        id
+    }
+
+    pub fn rename_board(&mut self, id: &str, name: &str) {
+        self.boards.rename(id, name);
+        for ws in &mut self.session.workspaces {
+            for tb in ws.tabs.iter_mut().filter(|tb| tb.board.as_deref() == Some(id)) {
+                tb.title = name.to_string();
+            }
+        }
+        self.touch();
+    }
+
+    /// A board deleted, its tabs closed.
+    pub fn delete_board(&mut self, id: &str) {
+        for wi in 0..self.session.workspaces.len() {
+            while let Some(ti) = self.session.workspaces[wi].tabs.iter().position(|tb| tb.board.as_deref() == Some(id)) {
+                self.close_tab(wi, ti);
+            }
+        }
+        self.boards.remove(id);
+    }
+
     /// Opens a file (or the tab that has it).
     pub fn open_file(&mut self, path: &std::path::Path) {
         for (wi, ws) in self.session.workspaces.iter_mut().enumerate() {
@@ -881,6 +938,10 @@ impl App {
 
     pub fn save_tab(&mut self, wi: usize, ti: usize) {
         let tab = &self.session.workspaces[wi].tabs[ti];
+        // (A board keeps itself.)
+        if tab.board.is_some() {
+            return;
+        }
         match tab.path.clone() {
             Some(p) => match std::fs::write(&p, tab.full_text()) {
                 Ok(()) => {

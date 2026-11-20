@@ -3192,3 +3192,120 @@ fn side_panel_slides_with_the_sheet() {
         assert!((xs.last().unwrap() - to).abs() < 0.5, "{label}: {xs:?}");
     }
 }
+
+/// A mouse drag from `a` to `b` in `n` steps (the button let go at the end).
+fn drag_to(h: &mut Harness<'static, App>, a: egui::Pos2, b: egui::Pos2, n: usize) {
+    h.input_mut().events.push(egui::Event::PointerMoved(a));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=n {
+        h.input_mut().events.push(egui::Event::PointerMoved(a + (b - a) * k as f32 / n as f32));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    for _ in 0..3 {
+        h.step();
+    }
+}
+
+#[test]
+fn boards_drawn_linked_and_filled() {
+    use crate::board::Kind as B;
+    let (mut h, _g) = harness("boards", SCRIPT, false);
+    // Side panel → Boards → New board: named as it's made.
+    h.get_by_label_contains("Доски: схемы").click();
+    settle(&mut h);
+    h.get_by_label_contains("Новая доска").click();
+    settle(&mut h);
+    key(&mut h, egui::Key::A, egui::Modifiers::COMMAND);
+    type_text(&mut h, "Схема заказов");
+    key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    settle(&mut h);
+    let id = h.state().tab().board.clone().expect("a board's tab");
+    assert_eq!(h.state().boards.name(&id), "Схема заказов");
+    assert_eq!(h.state().tab().title, "Схема заказов");
+    let canvas: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("board-canvas"))).unwrap();
+    let board = |h: &Harness<'static, App>| h.state().boards.open[&id].board.clone();
+    let at = |h: &Harness<'static, App>, w: egui::Pos2| {
+        let b = &h.state().boards.open[&id].board;
+        canvas.min + (w.to_vec2() - egui::vec2(b.pan[0], b.pan[1])) * b.zoom
+    };
+    // A frame drawn, its text typed in place.
+    h.get_by_label_contains("Рамка (R)").click();
+    settle(&mut h);
+    drag_to(&mut h, canvas.min + egui::vec2(60.0, 60.0), canvas.min + egui::vec2(260.0, 150.0), 6);
+    type_text(&mut h, "Начало");
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    settle(&mut h);
+    assert!(matches!(&board(&h).items[0].kind, B::Frame { text, .. } if text == "Начало"), "{:?}", board(&h).items);
+    // Two tables: one named in the properties, the other given a field.
+    h.get_by_label_contains("Таблица-сущность (E)").click();
+    settle(&mut h);
+    click_at(&mut h, canvas.min + egui::vec2(340.0, 60.0), egui::PointerButton::Primary);
+    settle(&mut h);
+    key(&mut h, egui::Key::A, egui::Modifiers::COMMAND);
+    type_text(&mut h, "customers");
+    settle(&mut h);
+    h.get_by_label_contains("Таблица-сущность (E)").click();
+    settle(&mut h);
+    click_at(&mut h, canvas.min + egui::vec2(340.0, 260.0), egui::PointerButton::Primary);
+    settle(&mut h);
+    h.get_by_label_contains("Поле").click();
+    settle(&mut h);
+    shot(&mut h, "board-entity");
+    let b = board(&h);
+    let (a, c) = (b.items[1].clone(), b.items[2].clone());
+    assert!(matches!(&a.kind, B::Entity { name, .. } if name == "customers"), "{:?}", a.kind);
+    assert!(matches!(&c.kind, B::Entity { fields, .. } if fields.len() == 2), "{:?}", c.kind);
+    // A link from the second's second field to the first's id.
+    h.get_by_label_contains("Связь (A)").click();
+    settle(&mut h);
+    let from = at(&h, egui::pos2(c.rect[0] + 40.0, c.row_y(1)));
+    let to = at(&h, egui::pos2(a.rect[0] + 40.0, a.row_y(0)));
+    drag_to(&mut h, from, to, 8);
+    settle(&mut h);
+    let b = board(&h);
+    assert_eq!(b.links.len(), 1, "{:?}", b.links);
+    assert_eq!((b.links[0].from, b.links[0].from_field, b.links[0].to, b.links[0].to_field), (c.id, Some(1), a.id, Some(0)));
+    // A table dragged from the tree: its columns come along.
+    h.get_by_label("Подключения и объекты баз").click();
+    h.state_mut().open_nodes.insert(("lite".into(), vec![]));
+    h.state_mut().open_nodes.insert(("lite".into(), vec!["tables".into()]));
+    settle(&mut h);
+    let orders = h.get_by_label("orders").rect().center();
+    drag_to(&mut h, orders, canvas.min + egui::vec2(640.0, 120.0), 12);
+    settle(&mut h);
+    settle(&mut h);
+    let b = board(&h);
+    let obj = b.items.iter().find(|i| matches!(i.kind, B::Object { .. })).expect("the table on the board");
+    assert!(matches!(&obj.kind, B::Object { name, cols, .. } if name == "orders" && cols.iter().any(|c| c.0 == "customer_id")), "{:?}", obj.kind);
+    // A script from a tab, as a flowchart of its statements.
+    h.get_by_label_contains("Добавить").click();
+    settle(&mut h);
+    h.get_by_label("📜 Клиенты").click();
+    settle(&mut h);
+    h.get_by_label("блок-схема").click();
+    settle(&mut h);
+    let b = board(&h);
+    let nb = b.items.iter().find(|i| matches!(i.kind, B::Notebook { .. })).expect("the script on the board");
+    assert!(matches!(&nb.kind, B::Notebook { cells, flow: true, .. } if cells.len() >= 2), "{:?}", nb.kind);
+    // Its first statement's box lies past the card's head; it's as tall as its boxes.
+    assert_eq!(nb.rect[3], nb.natural_h().unwrap());
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("board-fit"), true));
+    settle(&mut h);
+    shot(&mut h, "board");
+    // A step back takes the flowchart switch back; forth again.
+    h.input_mut().events.push(egui::Event::PointerMoved(canvas.center()));
+    h.step();
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    assert!(board(&h).items.iter().any(|i| matches!(i.kind, B::Notebook { flow: false, .. })));
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    settle(&mut h);
+    assert!(board(&h).items.iter().any(|i| matches!(i.kind, B::Notebook { flow: true, .. })));
+    // On disk as on screen.
+    let saved = crate::board::load(&id).expect("saved");
+    assert_eq!(saved.items, board(&h).items);
+    assert_eq!(saved.links, board(&h).links);
+}

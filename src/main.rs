@@ -2,6 +2,8 @@
 
 mod app;
 mod block;
+mod board;
+mod board_ui;
 mod config;
 mod db;
 mod design;

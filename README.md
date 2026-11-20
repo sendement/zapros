@@ -299,6 +299,18 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   in red with whose it is. Menus and tooltips show the keys as set.
 - **Settings** in sections at the side, the section's settings beside
   them; the window stays in the middle.
+- **Boards** (Side panel → Boards): a canvas beside the scripts, each
+  board in a tab of its own and kept by itself (a JSON file in the data
+  folder). Frames — rectangles, ellipses, diamonds — with text typed right
+  in them, free text, a brush; table entities with their fields (keys,
+  types) and a note; arrows between items, and between fields of tables;
+  notebooks and scripts from the tabs (as a card or a flowchart of their
+  cells, refreshed on demand); tables, views and routines of any saved
+  connection (dragged from the tree, from its menu or "Add"), with their
+  columns, opened by a double click, each with a note. Drag empty space or
+  the middle button to pan, Ctrl+wheel to zoom, Shift+drag to pick by a
+  box, Ctrl+Z / Ctrl+Shift+Z, Ctrl+D a copy, Delete; tools by keys V R O
+  D T B E A.
 - **The side panel put away** by its button at the window's corner (it
   stays there either way; Ctrl+B),
   a double click on its edge, or its edge pulled well past its narrowest;

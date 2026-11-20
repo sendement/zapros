@@ -68,7 +68,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                 f.size += 1.5;
             }
         }
-        if app.session.side_files { files(app, &mut inner) } else { databases(app, &mut inner) }
+        if app.session.side_boards {
+            boards(app, &mut inner)
+        } else if app.session.side_files {
+            files(app, &mut inner)
+        } else {
+            databases(app, &mut inner)
+        }
         ui.allocate_rect(egui::Rect::from_min_max(ui.cursor().min, egui::pos2(max.right(), card.bottom())), egui::Sense::hover());
     });
     ui.set_style(own);
@@ -232,6 +238,113 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     });
+}
+
+/// Kinds a board can hold.
+fn boardable(k: ObjKind) -> bool {
+    matches!(k, ObjKind::Table | ObjKind::View | ObjKind::MatView | ObjKind::Function | ObjKind::Procedure | ObjKind::Package | ObjKind::Dictionary)
+}
+
+/// What's dragged from the tree, under the pointer.
+fn drag_ghost(ctx: &egui::Context, name: &str) {
+    let Some(p) = ctx.pointer_latest_pos() else { return };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tree-drag")));
+    let v = ctx.global_style().visuals.clone();
+    let g = painter.layout_no_wrap(name.to_string(), egui::FontId::proportional(13.0), v.strong_text_color());
+    let r = egui::Rect::from_min_size(p + egui::vec2(14.0, 10.0), g.size() + egui::vec2(12.0, 6.0));
+    painter.rect_filled(r, 5.0, v.window_fill);
+    painter.rect_stroke(r, 5.0, v.selection.stroke, egui::StrokeKind::Middle);
+    painter.galley(r.min + egui::vec2(6.0, 3.0), g, v.strong_text_color());
+}
+
+/// The boards: a row each (a click opens it), "New board" above.
+fn boards(app: &mut App, ui: &mut egui::Ui) {
+    let rename_id = egui::Id::new("board-rename");
+    ui.horizontal(|ui| {
+        if ui.button(format!("➕ {}", t("Новая доска", "New board"))).clicked() {
+            let id = app.new_board();
+            let name = app.boards.name(&id);
+            ui.ctx().data_mut(|d| d.insert_temp(rename_id, Some((id, name, 3u8))));
+        }
+    });
+    ui.add_space(4.0);
+    let mut rename: Option<(String, String, u8)> = ui.ctx().data(|d| d.get_temp(rename_id)).flatten();
+    let open_id = app.tab().board.clone();
+    let mut delete = None;
+    let mut done_rename = None;
+    egui::ScrollArea::vertical().id_salt("boards").auto_shrink([false, false]).show(ui, |ui| {
+        if app.boards.list.is_empty() {
+            ui.add_space(12.0);
+            ui.label(RichText::new(t("Досок пока нет. На доске рисуют блок-схемы, набрасывают таблицы со связями, кладут ноутбуки и объекты баз и пишут к ним заметки.", "No boards yet. On a board you draw flowcharts, sketch tables with their links, put notebooks and database objects and write notes by them.")).weak());
+        }
+        for (id, name) in app.boards.list.clone() {
+            if let Some((rid, text, fresh)) = rename.as_mut().filter(|r| r.0 == id) {
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
+                // (A few frames: the click that made it lets go meanwhile.)
+                if *fresh > 0 {
+                    if !r.has_focus() {
+                        r.request_focus();
+                    }
+                    *fresh -= 1;
+                }
+                if r.lost_focus() && *fresh == 0 {
+                    let keep = !ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    done_rename = Some((rid.clone(), text.clone(), keep));
+                }
+                continue;
+            }
+            let on = open_id.as_deref() == Some(id.as_str());
+            let r = ui.horizontal(|ui| {
+                let (ic, _) = ui.allocate_exact_size(egui::Vec2::new(16.0, 16.0), egui::Sense::hover());
+                let c = ui.visuals().weak_text_color();
+                ui.painter().rect_stroke(egui::Rect::from_center_size(ic.center(), egui::Vec2::new(13.0, 10.0)), 2.0, egui::Stroke::new(1.2, c), egui::StrokeKind::Middle);
+                ui.painter().line_segment([ic.center() + egui::Vec2::new(-3.0, -1.0), ic.center() + egui::Vec2::new(3.0, 2.0)], egui::Stroke::new(1.2, c));
+                ui.add(egui::Button::selectable(on, &name).frame_when_inactive(false))
+            }).inner;
+            if r.clicked() {
+                app.open_board(&id);
+            }
+            if r.double_clicked() {
+                rename = Some((id.clone(), name.clone(), 3));
+            }
+            r.context_menu(|ui| {
+                if ui.button(t("Открыть", "Open")).clicked() {
+                    app.open_board(&id);
+                    ui.close();
+                }
+                if ui.button(t("Переименовать", "Rename")).clicked() {
+                    rename = Some((id.clone(), name.clone(), 3));
+                    ui.close();
+                }
+                if ui.button(t("Копия доски", "Duplicate")).clicked() {
+                    if let Some(o) = app.boards.get(&id) {
+                        let mut b = o.board.clone();
+                        b.id = crate::db::new_id();
+                        b.name = format!("{name} (2)");
+                        let _ = crate::board::save(&b);
+                        app.boards.list = crate::board::list();
+                    }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.add(crate::ui::tinted(t("Удалить доску", "Delete the board").into(), crate::ui::RED)).clicked() {
+                    delete = Some(id.clone());
+                    ui.close();
+                }
+            });
+        }
+    });
+    if let Some((id, name, keep)) = done_rename {
+        if keep && !name.trim().is_empty() {
+            app.rename_board(&id, name.trim());
+        }
+        rename = None;
+    }
+    if let Some(id) = delete {
+        app.delete_board(&id);
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(rename_id, rename));
 }
 
 /// An object kind's icon in the tree: the pack's (in the kind's colour),
@@ -447,7 +560,15 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
                     Some(crate::ui::chevron(ui, open))
                 };
                 kind_icon(app, ui, o.kind);
-                let n = ui.add(egui::Label::new(&label).sense(egui::Sense::click()).selectable(false));
+                // (Objects can be dragged onto a board.)
+                let sense = if boardable(o.kind) { egui::Sense::click_and_drag() } else { egui::Sense::click() };
+                let n = ui.add(egui::Label::new(&label).sense(sense).selectable(false));
+                if boardable(o.kind) {
+                    n.dnd_set_drag_payload(crate::board::Drop { conn: conn.to_string(), path: p.clone(), obj: o.kind, name: o.name.clone() });
+                    if n.dragged() {
+                        drag_ghost(ui.ctx(), &o.name);
+                    }
+                }
                 if !o.note.is_empty() {
                     ui.add(egui::Label::new(RichText::new(&o.note).small().weak()).truncate());
                 }
@@ -489,6 +610,17 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
             _ => name,
         };
         name.context_menu(|ui| {
+            if boardable(o.kind) {
+                if let Some(b) = app.boards.last.clone().filter(|id| app.boards.list.iter().any(|(i, _)| i == id)) {
+                    if ui.button(format!("{} «{}»", t("На доску", "On the board"), app.boards.name(&b))).clicked() {
+                        let d = crate::board::Drop { conn: conn.to_string(), path: p.clone(), obj: o.kind, name: o.name.clone() };
+                        crate::board_ui::put_on_last(app, |app, b, at| {
+                            crate::board_ui::add_object(app, b, &d, at, false);
+                        });
+                        ui.close();
+                    }
+                }
+            }
             let q = qualified(kind, &path, &o.name);
             if o.kind.is_relation() && ui.button(t("Первые 200 строк", "First 200 rows")).clicked() {
                 app.new_tab(Some(o.name.clone()), first_rows(kind, &q), Some(conn.to_string()));

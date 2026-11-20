@@ -291,6 +291,8 @@ pub struct Tab {
     pub notebook: Option<Notebook>,
     /// A database object's tab: its designer, or its code (the text).
     pub object: Option<ObjRef>,
+    /// A board's tab (its id): the canvas instead of the text.
+    pub board: Option<String>,
 }
 
 /// The object a tab shows.
@@ -462,7 +464,7 @@ impl Notebook {
 
 impl Default for Tab {
     fn default() -> Self {
-        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false, notebook: None, object: None }
+        Self { id: crate::db::new_id(), title: String::new(), text: String::new(), path: None, conn: None, modified: false, other: None, on_body: false, notebook: None, object: None, board: None }
     }
 }
 
@@ -588,6 +590,8 @@ pub struct Session {
     pub side_files: bool,
     /// The side panel put away (its menus beside the workspaces then).
     pub side_hidden: bool,
+    /// The side panel shows the boards (before side_files).
+    pub side_boards: bool,
     /// The structure panel beside the editor.
     pub outline: bool,
     pub outline_width: f32,
@@ -597,7 +601,7 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
-        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, side_hidden: false, outline: true, outline_width: 250.0, schema_filters: Default::default() }
+        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, side_hidden: false, side_boards: false, outline: true, outline_width: 250.0, schema_filters: Default::default() }
     }
 }
 
