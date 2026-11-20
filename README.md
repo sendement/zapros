@@ -288,6 +288,17 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   in red with whose it is. Menus and tooltips show the keys as set.
 - **Settings** in sections at the side, the section's settings beside
   them; the window stays in the middle.
+- **The side panel put away** by its button by the workspaces (Ctrl+B),
+  a double click on its edge, or its edge pulled well past its narrowest;
+  its menus go beside the workspaces then, and pulling from the window's
+  edge brings it back.
+- **Lines moved** with Alt+Shift+↑ / ↓: the caret's line, or all the
+  selected ones.
+- **Formatted as pasted** (a setting, off at first): pasted code, or a
+  selection put in brackets, and the statements it lands in are laid out
+  at once.
+- The text **follows the caret** moved by the keys (in notebook cells
+  too), and the wheel while selecting scrolls at its full speed.
 - **Parameters**: a statement with `:name` or `&name` (`&&name`) asks for
   their values before it runs. `:name` is a value: a number goes in as is,
   anything else in quotes, nothing is NULL (or picked: text, number, as
@@ -401,6 +412,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 | Ctrl+Shift+F | format |
 | Ctrl+Space | hints |
 | Ctrl+/ · Ctrl+D | comment lines · duplicate line |
+| Alt+Shift+↑ · Alt+Shift+↓ | move lines up · down |
+| Ctrl+B | side panel |
 | Ctrl+T · Ctrl+W · Ctrl+Tab | new · close · next tab |
 | Ctrl+S | save to file |
 

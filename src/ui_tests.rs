@@ -2984,3 +2984,176 @@ fn ghost_of_the_likely_next_words() {
     h.step();
     assert!(h.state().rt[&id].ed.ghost.is_none());
 }
+
+#[test]
+fn caret_keeps_in_view() {
+    let text: String = (0..200).map(|i| format!("select {i} from dual;\n")).collect();
+    let (mut h, _g) = harness("caret-view", &text, false);
+    focus_editor(&mut h, 0);
+    for _ in 0..60 {
+        key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    }
+    for _ in 0..5 {
+        h.step();
+    }
+    shot(&mut h, "caret-down");
+    let id = h.state().tab().id.clone();
+    let c = h.state().rt[&id].ed.cursor.map(|c| c.0).unwrap();
+    assert_eq!(h.state().tab().text[..c].matches('\n').count(), 60);
+    // Held down (the key repeating every frame): along too.
+    h.input_mut().events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for _ in 0..80 {
+        h.input_mut().events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    shot(&mut h, "caret-held");
+    h.input_mut().events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    // Alt+Shift+↓: the caret's line goes a line down, the caret with it.
+    focus_editor(&mut h, 0);
+    key(&mut h, egui::Key::ArrowDown, egui::Modifiers::ALT | egui::Modifiers::SHIFT);
+    h.step();
+    assert!(h.state().tab().text.starts_with("select 1 from dual;\nselect 0 from dual;\nselect 2"), "{}", &h.state().tab().text[..60]);
+    assert_eq!(h.state().rt[&id].ed.cursor.map(|c| c.0), Some(20));
+    // In a notebook too: the cell's lines past the notebook's bottom.
+    let nb = format!("-- %%\n{text}-- %%\nselect 1;\n");
+    h.state_mut().tab_mut().text = nb;
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let cells: Vec<String> = h.state().tab().notebook.as_ref().unwrap().cells.iter().map(|c| c.id.clone()).collect();
+    let k = crate::app::App::cell_key(&tab, &cells[0]);
+    h.state_mut().rt.entry(tab.clone()).or_default().cell_focus = Some(cells[0].clone());
+    h.state_mut().rt.entry(k.clone()).or_default().ed.goto = Some(0);
+    for _ in 0..3 {
+        h.step();
+    }
+    for _ in 0..60 {
+        key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    }
+    for _ in 0..5 {
+        h.step();
+    }
+    shot(&mut h, "caret-down-nb");
+    // (Its scroll area: the notebook's, by its offset.)
+    let down = h.state().rt[&k].ed.cursor.unwrap().0;
+    assert_eq!(h.state().tab().notebook.as_ref().unwrap().cells[0].text[..down].matches('\n').count(), 60);
+    let offs = |h: &Harness<'static, App>| h.ctx.data(|d| d.get_temp::<f32>(egui::Id::new(("nb-offset", &tab)))).unwrap_or(0.0);
+    let low = offs(&h);
+    assert!(low > 500.0, "the notebook went down after the caret: {low}");
+    for _ in 0..50 {
+        key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    }
+    for _ in 0..5 {
+        h.step();
+    }
+    shot(&mut h, "caret-up-nb");
+    assert!(offs(&h) < low - 400.0, "and back up: {} from {low}", offs(&h));
+}
+
+#[test]
+fn formatted_on_paste_and_brackets() {
+    let text = "select 1;\n\n";
+    let (mut h, _g) = harness("fmt-paste", text, false);
+    h.state_mut().settings.format.on_paste = true;
+    focus_editor(&mut h, text.len());
+    h.input_mut().events.push(egui::Event::Paste("select id,total from orders where total>100".into()));
+    h.step();
+    h.step();
+    let t = h.state().tab().text.clone();
+    assert!(t.starts_with("select 1;\n\nSELECT id"), "{t}");
+    assert!(t.contains("\n  FROM orders") || t.contains("\nFROM orders") || t.contains(" FROM orders\n"), "{t}");
+    let id = h.state().tab().id.clone();
+    assert_eq!(h.state().rt[&id].ed.cursor.map(|c| c.0), Some(t.trim_end().len()), "the caret after what was pasted: {t:?}");
+    shot(&mut h, "fmt-paste");
+    // A selection put in brackets: laid out too.
+    let s = "select * from orders where customer_id in select id from customers;";
+    h.state_mut().tab_mut().text = s.into();
+    let a = s.find("select id").unwrap();
+    let b = s.len() - 1;
+    h.state_mut().rt.get_mut(&id).unwrap().ed.select = Some((a, b));
+    h.step();
+    h.step();
+    type_text(&mut h, "(");
+    h.step();
+    let t = h.state().tab().text.clone();
+    assert!(t.starts_with("SELECT *"), "{t}");
+    assert!(t.contains("(SELECT id") || t.contains("(\n"), "{t}");
+    shot(&mut h, "fmt-brackets");
+    // Off: as pasted.
+    h.state_mut().settings.format.on_paste = false;
+    h.state_mut().tab_mut().text = String::new();
+    focus_editor(&mut h, 0);
+    h.input_mut().events.push(egui::Event::Paste("select a from b".into()));
+    h.step();
+    assert_eq!(h.state().tab().text, "select a from b");
+}
+
+#[test]
+fn side_panel_put_away_and_back() {
+    let (mut h, _g) = harness("side-away", SCRIPT, false);
+    let w = h.state().session.side_width;
+    // Its button by the workspaces.
+    h.get_by_label("Скрыть боковую панель").click();
+    for _ in 0..30 {
+        h.step();
+    }
+    assert!(h.state().session.side_hidden);
+    shot(&mut h, "side-hidden");
+    // The menus there now.
+    assert!(h.query_by_label("Настройки").is_some());
+    let ws = h.get_by_label_contains("Отчёты").rect();
+    assert!(ws.left() < 300.0, "the workspaces moved left: {ws:?}");
+    h.get_by_label("Показать боковую панель").click();
+    for _ in 0..30 {
+        h.step();
+    }
+    assert!(!h.state().session.side_hidden);
+    assert_eq!(h.state().session.side_width, w, "as wide as it was");
+    // Its edge pulled a little past the narrowest: stays; well past: away.
+    let drag = |h: &mut Harness<'static, App>, to: f32, release: bool| {
+        let from = egui::pos2(h.state().session.side_width, 400.0);
+        h.input_mut().events.push(egui::Event::PointerMoved(from));
+        h.step();
+        h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        for k in 1..=10 {
+            h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(from.x + (to - from.x) * k as f32 / 10.0, 400.0)));
+            h.step();
+        }
+        if release {
+            h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(to, 400.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        }
+        for _ in 0..30 {
+            h.step();
+        }
+    };
+    drag(&mut h, 180.0, true);
+    assert!(!h.state().session.side_hidden, "a little past: still there");
+    assert!((h.state().session.side_width - 240.0).abs() < 2.0, "{}", h.state().session.side_width);
+    drag(&mut h, 60.0, true);
+    assert!(h.state().session.side_hidden, "well past: away");
+    shot(&mut h, "side-pulled-away");
+    // Dragged back out from the window's edge.
+    let from = egui::pos2(1.0, 400.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=10 {
+        h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(30.0 * k as f32, 400.0)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: egui::pos2(300.0, 400.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    for _ in 0..30 {
+        h.step();
+    }
+    assert!(!h.state().session.side_hidden, "pulled back out");
+    shot(&mut h, "side-back");
+    // Ctrl+B: away and back.
+    key(&mut h, egui::Key::B, egui::Modifiers::COMMAND);
+    assert!(h.state().session.side_hidden);
+    key(&mut h, egui::Key::B, egui::Modifiers::COMMAND);
+    assert!(!h.state().session.side_hidden);
+}

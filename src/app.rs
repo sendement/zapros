@@ -1829,6 +1829,10 @@ impl App {
         if spec || body {
             self.show_part(body);
         }
+        if ctx.input_mut(|i| take(i, &k, Cmd::SidePanel)) {
+            self.session.side_hidden = !self.session.side_hidden;
+            self.touch();
+        }
         // (Exactly its keys: Ctrl+F isn't Ctrl+Shift+F, Format.)
         let find = ctx.input_mut(|i| take(i, &k, Cmd::Find));
         if find {

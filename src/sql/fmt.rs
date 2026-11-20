@@ -7,6 +7,8 @@
 //! functions in capitals (then put in the case the settings ask for).
 //! Taken from listok's code-block tidier, fed by this crate's lexer.
 
+use std::ops::Range;
+
 use super::lex::{self, Tk};
 use super::{Case, Dialect};
 
@@ -786,11 +788,14 @@ pub struct Options {
     /// Names quoted only where they must be (a space, another case, a
     /// keyword): "SHOP"."ORDERS" → SHOP.ORDERS, `id` → id.
     pub bare_names: bool,
+    /// Pasted text, or a selection put in brackets: its statements laid
+    /// out at once.
+    pub on_paste: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60, bare_names: true }
+        Self { keywords: Case::Upper, functions: Case::Upper, embedded: true, split_strings: true, river: true, leading_commas: true, indent: 2, case_while_typing: true, wrap: 80, one_line: 0, split: 60, bare_names: true, on_paste: false }
     }
 }
 
@@ -895,6 +900,63 @@ fn ch_default_is_name(out: &[Tok], j: usize) -> bool {
             "USE" | "DATABASE" | "DATABASES" | "USER" | "USERS" | "ROLE" | "TO" | "FROM" | "IN" | "CLUSTER" | "PROFILE" | "QUOTA" | "GRANTEES" | "EXISTS" | "IDENTIFIED"
         )
     })
+}
+
+/// The statements a change touched (`changed`: where it is in `src`, as
+/// it is now) laid out, the rest as it was: the text and where `caret`
+/// went (the same place among the letters and signs, the spaces aside).
+/// None: nothing to lay out (a PL/SQL block, a $$ body, no statement).
+pub fn reformat(src: &str, d: Dialect, o: Options, changed: Range<usize>, caret: usize) -> Option<(String, usize)> {
+    let ranges = super::split(src, d, false);
+    let hit: Vec<&Range<usize>> = ranges.iter().filter(|r| r.start <= changed.end && changed.start <= r.end).collect();
+    let (first, last) = (hit.first()?, hit.last()?);
+    let span = first.start..last.end;
+    let part = &src[span.clone()];
+    let toks = lex::lex(part, d);
+    if hit.iter().any(|r| super::is_plsql_block(&src[(*r).clone()], d)) || toks.iter().any(|t| t.kind == Tk::Str && t.text(part).starts_with('$')) {
+        return None;
+    }
+    let laid = format(part, d, o);
+    let laid = laid.trim_end();
+    // (format() ends a statement with ";": only if it had one.)
+    let laid = if part.trim_end().ends_with(';') || !laid.ends_with(';') { laid } else { &laid[..laid.len() - 1] };
+    if laid == part {
+        return None;
+    }
+    let mut out = String::with_capacity(src.len() + laid.len());
+    out += &src[..span.start];
+    out += laid;
+    out += &src[span.end..];
+    // The caret: after as many signs (no spaces, no quotes taken off).
+    let sign = |c: char| !c.is_whitespace() && c != '"' && c != '`';
+    let at = if caret <= span.start {
+        caret
+    } else if caret >= span.end {
+        caret + laid.len() - part.len()
+    } else {
+        let local = caret - span.start;
+        let n = part[..local].chars().filter(|&c| sign(c)).count();
+        // Before a sign: before the same one; else right after the last.
+        let before = part[local..].chars().next().is_some_and(sign);
+        let mut seen = 0;
+        let mut k = if n == 0 { 0 } else { laid.len() };
+        for (i, c) in laid.char_indices() {
+            if !sign(c) {
+                continue;
+            }
+            if before && seen == n {
+                k = i;
+                break;
+            }
+            seen += 1;
+            if !before && seen == n {
+                k = i + c.len_utf8();
+                break;
+            }
+        }
+        span.start + k
+    };
+    Some((out, at))
 }
 
 #[cfg(test)]
@@ -1234,5 +1296,27 @@ mod case_in_call_tests {
         // Short: on one line as before.
         let g = format("select sum(case when a then 1 else 0 end) as n from t", Dialect::Postgres, Options::default());
         assert!(g.contains("SUM(CASE WHEN a THEN 1 ELSE 0 END) AS n"), "{g}");
+    }
+}
+
+#[cfg(test)]
+mod reformat_tests {
+    use super::*;
+
+    #[test]
+    fn touched_statements_only() {
+        let o = Options::default();
+        let src = "select 1 from dual;\n\nselect a, b from t where x in (select id from u);\n";
+        let at = src.find("select id").unwrap();
+        let (out, c) = reformat(src, Dialect::Postgres, o, at..at + 5, at + 7).unwrap();
+        assert!(out.starts_with("select 1 from dual;\n\nSELECT"), "{out}");
+        assert!(out.ends_with(";\n"), "{out:?}");
+        assert!(out[c..].starts_with("ID") || out[c..].starts_with("id"), "{:?}", &out[c..]);
+        // A statement without ";" gets none.
+        let (out, _) = reformat("select a,b from t", Dialect::Postgres, o, 0..3, 0).unwrap();
+        assert!(!out.ends_with(';'), "{out}");
+        // A PL/SQL block: left alone.
+        let b = "begin\n  null;\nend;\n/\n";
+        assert!(reformat(b, Dialect::Oracle, o, 7..8, 7).is_none());
     }
 }

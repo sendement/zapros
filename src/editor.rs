@@ -166,6 +166,11 @@ pub fn outer_wheel_id() -> egui::Id {
     egui::Id::new("outer-wheel")
 }
 
+/// Where a notebook cell's editor leaves its moved caret for the notebook.
+pub fn outer_caret_id() -> egui::Id {
+    egui::Id::new("outer-caret")
+}
+
 pub struct Out {
     pub changed: bool,
     pub actions: Vec<Action>,
@@ -952,6 +957,30 @@ fn lines_of(text: &str, a: usize, b: usize) -> (usize, usize) {
     (line_start(text, a), line_end(text, b))
 }
 
+/// The lines of a..b moved over the line above (or below): how far they
+/// went (None: nothing there to pass).
+fn move_lines(text: &mut String, a: usize, b: usize, up: bool) -> Option<isize> {
+    let (s, e) = lines_of(text, a, b);
+    let block = text[s..e].to_string();
+    if up {
+        if s == 0 {
+            return None;
+        }
+        let ps = line_start(text, s - 1);
+        let prev = text[ps..s - 1].to_string();
+        text.replace_range(ps..e, &format!("{block}\n{prev}"));
+        Some(ps as isize - s as isize)
+    } else {
+        if e >= text.len() {
+            return None;
+        }
+        let ne = line_end(text, e + 1);
+        let next = text[e + 1..ne].to_string();
+        text.replace_range(s..ne, &format!("{next}\n{block}"));
+        Some((ne - e) as isize)
+    }
+}
+
 fn toggle_comment(text: &mut String, a: usize, b: usize) -> (usize, usize) {
     let (s, e) = lines_of(text, a, b);
     let block = &text[s..e];
@@ -1023,6 +1052,11 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let mut out = Out { changed: false, actions: Vec::new() };
     let ctx = ui.ctx().clone();
     let focused = ctx.memory(|m| m.has_focus(id));
+    // Pasted (or a bracket typed, maybe round a selection): laid out after,
+    // when that's on (the text as it was, to see what changed).
+    let pasting = focused && !cx.read_only && cx.settings.format.on_paste && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+    let mut wrapped: Option<Range<usize>> = None;
+    let was = pasting.then(|| text.clone());
     let tab = cx.settings.tab_width.max(1);
     // Put in from outside ("* → the columns").
     if let Some((r, with)) = ctx.data_mut(|d| d.remove_temp::<(Range<usize>, String)>(id.with("replace-later"))) {
@@ -1188,6 +1222,15 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 new_sel = Some((p + block.len() + 1, p + block.len() + 1));
                 out.changed = true;
             }
+            for (cmd, up) in [(crate::keys::Cmd::MoveUp, true), (crate::keys::Cmd::MoveDown, false)] {
+                if crate::keys::take(i, &cx.settings.keys, cmd) {
+                    if let Some(d) = move_lines(text, a, b, up) {
+                        let at = |x: usize| (x as isize + d) as usize;
+                        new_sel = Some((at(p), at(s)));
+                        out.changed = true;
+                    }
+                }
+            }
             if i.consume_key(Modifiers::SHIFT, Key::Tab) {
                 let (s, e) = shift_lines(text, a, b, tab, true);
                 new_sel = Some((e, s));
@@ -1240,6 +1283,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                                 if a0 != b0 {
                                     let inner = text[a0..b0].to_string();
                                     text.replace_range(a0..b0, &format!("{ch}{inner}{close}"));
+                                    wrapped = Some(a0..b0 + 2);
                                     Some((a0 + 1, b0 + 1))
                                 } else if next.is_none_or(|n| n.is_whitespace() || ")],;".contains(n)) {
                                     text.insert_str(a0, &format!("{ch}{close}"));
@@ -1427,6 +1471,25 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         }
         st.folds.retain(|&f| f <= text.len() && (f == 0 || text.as_bytes().get(f - 1) == Some(&b'\n')));
     }
+    // Laid out: the statements the paste (or the brackets) touched.
+    if cx.settings.format.on_paste && st.block.is_none() && !cx.read_only {
+        let changed = match (&was, wrapped) {
+            (Some(w), _) if w != text => {
+                let p = w.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
+                let tail = w.bytes().rev().zip(text.bytes().rev()).take_while(|(a, b)| a == b).count().min(w.len() - p).min(text.len() - p);
+                Some(p..text.len() - tail)
+            }
+            (None, Some(r)) if r.end <= text.len() => Some(r),
+            _ => None,
+        };
+        let caret = output.cursor_range.map_or(text.len(), |r| byte_of(text, r.primary.index.0));
+        if let Some((new, c)) = changed.and_then(|r| crate::sql::fmt::reformat(text, cx.dialect, cx.settings.format, r, caret)) {
+            *text = new;
+            set_cursor(&ctx, id, text, c, c);
+            out.changed = true;
+            ctx.request_repaint();
+        }
+    }
     st.text_rect = Some(output.response.rect);
     // The wheel while the mouse is held (a selection being dragged): egui's
     // scroll areas ignore it then, so it's passed on by hand.
@@ -1436,10 +1499,13 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             if cx.outer_wheel {
                 ctx.data_mut(|m| m.insert_temp(outer_wheel_id(), egui::vec2(0.0, d.y)));
                 if d.x != 0.0 {
-                    ui.scroll_with_delta(egui::vec2(d.x, 0.0));
+                    ui.scroll_with_delta_animation(egui::vec2(d.x, 0.0), egui::style::ScrollAnimation::none());
                 }
             } else {
-                ui.scroll_with_delta(d);
+                // (Not animated: a scroll area's running animation keeps
+                // only the last frame's bit, a free-spinning wheel's steady
+                // stream of small ones came out slow.)
+                ui.scroll_with_delta_animation(d, egui::style::ScrollAnimation::none());
             }
         }
     }
@@ -1932,7 +1998,23 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let c = ui.visuals().weak_text_color().gamma_multiply(0.85);
         ui.painter().with_clip_rect(output.text_clip_rect).text(at.left_top(), egui::Align2::LEFT_TOP, g, FontId::monospace(cx.settings.font_size), c);
     }
-    st.cursor = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
+    let now = output.cursor_range.map(|r| (byte_of(text, r.primary.index.0), byte_of(text, r.secondary.index.0)));
+    // The caret moved by the keys: the text follows it at once (egui's own
+    // follow is animated and lags a held key) with a line's room around.
+    // In a notebook's cell, left for the notebook (the cell's own sideways
+    // scroll area takes egui's "keep it in view" for both directions; room
+    // above for the cell's header stuck on top).
+    let by_keys = !ctx.input(|i| i.pointer.any_down());
+    if let (true, Some(cr)) = (focused && by_keys && (now != st.cursor || out.changed), output.cursor_range) {
+        let at = output.galley.pos_from_cursor(cr.primary).translate(output.galley_pos.to_vec2());
+        if cx.outer_wheel {
+            let r = egui::Rect::from_min_max(at.min - egui::vec2(0.0, 40.0 + row_h), at.max + egui::vec2(0.0, row_h));
+            ctx.data_mut(|d| d.insert_temp(outer_caret_id(), Some(r)));
+        } else {
+            ui.scroll_to_rect_animation(at.expand2(egui::vec2(0.0, row_h)), None, egui::style::ScrollAnimation::none());
+        }
+    }
+    st.cursor = now;
     let mut picked: Option<usize> = None;
     if let (Some(pop), Some(cr)) = (st.popup.as_ref(), output.cursor_range) {
         let at = output.galley.pos_from_cursor(cr.primary).translate(output.galley_pos.to_vec2());
@@ -2004,4 +2086,24 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
 /// The selection (bytes), if any; else None.
 pub fn selection(st: &EditorState) -> Option<Range<usize>> {
     st.cursor.filter(|(a, b)| a != b).map(|(a, b)| a.min(b)..a.max(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_moved() {
+        let mut t = String::from("one\ntwo\nthree\nfour");
+        // The caret's line up.
+        assert_eq!(move_lines(&mut t, 5, 5, true), Some(-4));
+        assert_eq!(t, "two\none\nthree\nfour");
+        assert_eq!(move_lines(&mut t, 1, 1, true), None);
+        // Two lines selected (to the next line's start) down, then to the end.
+        assert_eq!(move_lines(&mut t, 0, 8, false), Some(6));
+        assert_eq!(t, "three\ntwo\none\nfour");
+        assert_eq!(move_lines(&mut t, 6, 13, false), Some(5));
+        assert_eq!(t, "three\nfour\ntwo\none");
+        assert_eq!(move_lines(&mut t, 16, 16, false), None);
+    }
 }

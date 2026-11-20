@@ -43,7 +43,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         w.active.fg_stroke = egui::Stroke::NONE;
     }
     let inner_style = own.clone();
-    let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show(ui, |ui| {
+    // Put away by its button, a double click on its edge, or its edge
+    // pulled well past the narrowest (dragged back out from the window's
+    // edge: there again).
+    let mut open = !app.session.side_hidden;
+    let resize = egui::Id::new("side").with("__resize");
+    let left = ui.available_rect_before_wrap().left();
+    let r = egui::Panel::left("side").frame(frame).show_separator_line(false).resizable(true).default_size(app.session.side_width).size_range(240.0..=700.0).show_collapsible(ui, &mut open, |ui| {
         ui.set_style(inner_style);
         // (The gap above the icons on a whole pixel: see icon_bar.)
         ui.add_space(crate::ui::snap(ui.ctx(), 6.0));
@@ -66,12 +72,29 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.allocate_rect(egui::Rect::from_min_max(ui.cursor().min, egui::pos2(max.right(), card.bottom())), egui::Sense::hover());
     });
     ui.set_style(own);
-    let w = r.response.rect.width();
-    if (w - app.session.side_width).abs() > 1.0 {
-        app.session.side_width = w;
+    // (egui puts it away as soon as it's narrower than it may be: only
+    // when pulled a good way further.)
+    let pulled = ui.ctx().read_response(resize).filter(|r| r.dragged() || r.drag_stopped()).and_then(|r| r.interact_pointer_pos());
+    if !open && !app.session.side_hidden && pulled.is_some_and(|p| p.x - left > SIDE_AWAY) {
+        open = true;
+    }
+    if open == app.session.side_hidden {
+        app.session.side_hidden = !open;
         app.touch();
     }
+    // (Its width while sliding in or out isn't its own.)
+    let animating = ui.ctx().animate_bool_responsive(egui::Id::new("side").with("animation"), open) < 1.0;
+    if let Some(r) = r.filter(|_| open && !animating) {
+        let w = r.response.rect.width();
+        if (w - app.session.side_width).abs() > 1.0 {
+            app.session.side_width = w;
+            app.touch();
+        }
+    }
 }
+
+/// How narrow the side panel gets pulled before it's put away.
+const SIDE_AWAY: f32 = 120.0;
 
 /// How an object is written in SQL (schema-qualified where there are schemas).
 fn qualified(kind: Kind, path: &[String], name: &str) -> String {

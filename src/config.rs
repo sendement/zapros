@@ -586,6 +586,8 @@ pub struct Session {
     pub side_width: f32,
     /// The side panel shows the project's files (else the database's objects).
     pub side_files: bool,
+    /// The side panel put away (its menus beside the workspaces then).
+    pub side_hidden: bool,
     /// The structure panel beside the editor.
     pub outline: bool,
     pub outline_width: f32,
@@ -595,7 +597,7 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
-        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, outline: true, outline_width: 250.0, schema_filters: Default::default() }
+        Self { workspaces: vec![Workspace { name: "Main".into(), ..Default::default() }], active: 0, project: None, results_height: 260.0, side_width: 280.0, side_files: false, side_hidden: false, outline: true, outline_width: 250.0, schema_filters: Default::default() }
     }
 }
 

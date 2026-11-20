@@ -22,8 +22,11 @@ pub enum Cmd {
     Hints,
     Comment,
     Duplicate,
+    MoveUp,
+    MoveDown,
     Find,
     Outline,
+    SidePanel,
     ShowSpec,
     ShowBody,
     NewTab,
@@ -33,7 +36,7 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 19] = [
+    pub const ALL: [Cmd; 22] = [
         Cmd::RunStatement,
         Cmd::RunScript,
         Cmd::Explain,
@@ -45,8 +48,11 @@ impl Cmd {
         Cmd::Hints,
         Cmd::Comment,
         Cmd::Duplicate,
+        Cmd::MoveUp,
+        Cmd::MoveDown,
         Cmd::Find,
         Cmd::Outline,
+        Cmd::SidePanel,
         Cmd::ShowSpec,
         Cmd::ShowBody,
         Cmd::NewTab,
@@ -68,8 +74,11 @@ impl Cmd {
             Cmd::Hints => t("Подсказки", "Hints"),
             Cmd::Comment => t("Закомментировать строки", "Comment the lines"),
             Cmd::Duplicate => t("Повторить строку", "Duplicate the line"),
+            Cmd::MoveUp => t("Переместить строки вверх", "Move the lines up"),
+            Cmd::MoveDown => t("Переместить строки вниз", "Move the lines down"),
             Cmd::Find => t("Поиск", "Find"),
             Cmd::Outline => t("Структура скрипта", "Script outline"),
+            Cmd::SidePanel => t("Показать / скрыть боковую панель", "Show / hide the side panel"),
             Cmd::ShowSpec => t("Пакет: спецификация", "Package: specification"),
             Cmd::ShowBody => t("Пакет: тело", "Package: body"),
             Cmd::NewTab => t("Новая вкладка", "New tab"),
@@ -83,7 +92,7 @@ impl Cmd {
     pub fn group(self) -> &'static str {
         match self {
             Cmd::RunStatement | Cmd::RunScript | Cmd::Explain | Cmd::Cancel | Cmd::Commit | Cmd::Rollback => t("Выполнение", "Running"),
-            Cmd::Format | Cmd::Save | Cmd::Hints | Cmd::Comment | Cmd::Duplicate | Cmd::Find => t("Редактор", "Editor"),
+            Cmd::Format | Cmd::Save | Cmd::Hints | Cmd::Comment | Cmd::Duplicate | Cmd::MoveUp | Cmd::MoveDown | Cmd::Find => t("Редактор", "Editor"),
             _ => t("Окно и вкладки", "Window and tabs"),
         }
     }
@@ -106,8 +115,11 @@ impl Cmd {
             Cmd::Hints => vec![c(Key::Space)],
             Cmd::Comment => vec![c(Key::Slash)],
             Cmd::Duplicate => vec![c(Key::D)],
+            Cmd::MoveUp => vec![Chord::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp)],
+            Cmd::MoveDown => vec![Chord::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown)],
             Cmd::Find => vec![c(Key::F)],
             Cmd::Outline => vec![cs(Key::O)],
+            Cmd::SidePanel => vec![c(Key::B)],
             Cmd::ShowSpec => vec![Chord::new(Modifiers::ALT, Key::Num1)],
             Cmd::ShowBody => vec![Chord::new(Modifiers::ALT, Key::Num2)],
             Cmd::NewTab => vec![c(Key::T), c(Key::N)],

@@ -189,17 +189,7 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
             app.session.side_files = true;
             app.touch();
         }
-        let (sep, _) = ui.allocate_exact_size(Vec2::new(9.0, ICON_H - 8.0), egui::Sense::hover());
-        ui.painter().vline(sep.center().x, sep.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
-        icon_menu(ui, "🗋", t("Файл", "File"), |ui| file_menu(app, ui));
-        icon_menu(ui, "🔌", t("Подключения", "Connections"), |ui| conn_menu(app, ui, &ctx));
-        icon_menu(ui, "▶", t("Запрос", "Query"), |ui| query_menu(app, ui, &ctx));
-        if icon(ui, "⚙", app.settings_open, t("Настройки", "Settings")).clicked() {
-            app.settings_open = true;
-        }
-        if icon(ui, "?", app.about, t("Клавиши и о программе", "Keys and about")).clicked() {
-            app.about = true;
-        }
+        menus(app, ui);
         ui.min_rect().width() - from
     });
     let w = row.inner;
@@ -207,6 +197,57 @@ pub fn icon_bar(app: &mut App, ui: &mut egui::Ui) {
         ctx.data_mut(|d| d.insert_temp(wid, w));
         ctx.request_repaint();
     }
+}
+
+/// The menus as icons (after a line).
+fn menus(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let (sep, _) = ui.allocate_exact_size(Vec2::new(9.0, ICON_H - 8.0), egui::Sense::hover());
+    ui.painter().vline(sep.center().x, sep.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+    icon_menu(ui, "🗋", t("Файл", "File"), |ui| file_menu(app, ui));
+    icon_menu(ui, "🔌", t("Подключения", "Connections"), |ui| conn_menu(app, ui, &ctx));
+    icon_menu(ui, "▶", t("Запрос", "Query"), |ui| query_menu(app, ui, &ctx));
+    if icon(ui, "⚙", app.settings_open, t("Настройки", "Settings")).clicked() {
+        app.settings_open = true;
+    }
+    if icon(ui, "?", app.about, t("Клавиши и о программе", "Keys and about")).clicked() {
+        app.about = true;
+    }
+}
+
+/// The row's start, by the workspaces: the side panel's button (and, the
+/// panel put away, its menus). Its width.
+fn side_rail(app: &mut App, ui: &mut egui::Ui, at: Pos2, size: f32) -> f32 {
+    let hidden = app.session.side_hidden;
+    let rect = Rect::from_min_size(at, Vec2::new(400.0, size));
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("icon-size"), size));
+    let tip = if hidden { t("Показать боковую панель", "Show the side panel") } else { t("Скрыть боковую панель", "Hide the side panel") };
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    let v = ui.visuals().clone();
+    if resp.hovered() || resp.has_focus() {
+        ui.painter().rect_filled(r, RADIUS, v.widgets.hovered.weak_bg_fill);
+    }
+    // A window with its left strip: filled while the panel's out.
+    let color = if resp.hovered() { v.strong_text_color() } else { v.text_color() };
+    let fr = Rect::from_center_size(r.center(), Vec2::new(16.0, 13.0));
+    let stroke = Stroke::new(1.4, color);
+    let strip = Rect::from_min_max(fr.min, Pos2::new(fr.left() + 5.5, fr.bottom()));
+    if !hidden {
+        ui.painter().rect_filled(strip, egui::CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 }, color.gamma_multiply(0.55));
+    }
+    ui.painter().rect_stroke(fr, 2.0, stroke, egui::StrokeKind::Middle);
+    ui.painter().vline(strip.right(), fr.y_range(), stroke);
+    if resp.on_hover_text(format!("{tip}   {}", crate::keys::label(&app.settings.keys, crate::keys::Cmd::SidePanel))).clicked() {
+        app.session.side_hidden = !hidden;
+        app.touch();
+    }
+    if hidden {
+        menus(app, &mut ui);
+    }
+    ui.min_rect().width()
 }
 
 fn file_menu(app: &mut App, ui: &mut egui::Ui) {
@@ -967,7 +1008,9 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let gap = snap(ui.ctx(), 6.0);
         let row = Rect::from_min_size(full.min + Vec2::new(0.0, gap), Vec2::new(full.width() - gap, ROW_H));
         // (Its gap to the side card as wide as the one to the window's edge.)
-        let sheet = Rect::from_min_max(Pos2::new(full.left(), snap(ui.ctx(), row.bottom())), Pos2::new(full.right() - gap, full.bottom() - snap(ui.ctx(), 2.0)));
+        // (The side panel put away: a gap at the window's edge as at the right.)
+        let left = if app.session.side_hidden { full.left() + gap } else { full.left() };
+        let sheet = Rect::from_min_max(Pos2::new(left, snap(ui.ctx(), row.bottom())), Pos2::new(full.right() - gap, full.bottom() - snap(ui.ctx(), 2.0)));
         if ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::new(SHEET_KEY))) != Some(sheet) {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHEET_KEY), sheet));
             ui.ctx().request_repaint();
@@ -982,7 +1025,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let win = ui.ctx().content_rect();
         let (btn_top, btn_bottom) = (win.top() + m, sheet.top() - snap(ui.ctx(), IDLE_GAP));
         let win_w = if own { crate::titlebar::buttons_width(look.style, btn_bottom - btn_top, m) - (win.right() - row.right()) } else { 0.0 };
-        let reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
+        let mut reserve = if look.left { (win_w, 0.0) } else { (0.0, win_w) };
         if own {
             let drag = ui.interact(row, ui.id().with("title-drag"), egui::Sense::click_and_drag());
             if drag.drag_started() {
@@ -992,6 +1035,11 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 crate::titlebar::toggle_maximized(ui.ctx());
             }
         }
+        // (Its squares as the side panel's: from the window's top to as far
+        // above the sheet.)
+        let size = (sheet.top() - win.top() - 2.0 * m).max(16.0);
+        let rail = side_rail(app, ui, Pos2::new(sheet.left() + reserve.0 + if app.session.side_hidden { 0.0 } else { 2.0 }, win.top() + m), size);
+        reserve.0 += rail + 4.0 - TABS_FROM.min(rail);
         workspaces(app, ui, row, sheet, reserve);
         if own {
             let edge = if look.left { sheet.left() } else { win.right() };

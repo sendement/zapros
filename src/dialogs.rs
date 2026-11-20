@@ -1343,6 +1343,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 )).weak().small());
                 ui.separator();
                 ui.label(RichText::new(t("Раскладка (форматирование, Ctrl+Shift+F)", "Layout (formatting, Ctrl+Shift+F)")).strong());
+                ui.checkbox(&mut s.format.on_paste, t("Сразу форматировать вставленный код и выделение, взятое в скобки", "Format pasted code and a selection put in brackets at once"));
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut s.format.river, true, t("«река»: слова выровнены по SELECT", "\"river\": clause words end where SELECT does"));
                     ui.radio_value(&mut s.format.river, false, t("обычная: слова слева, списки с отступом", "plain: clause words at the left, lists indented"));

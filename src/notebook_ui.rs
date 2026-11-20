@@ -876,9 +876,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // The wheel a cell's selection passed on (see editor::Ctx::outer_wheel):
         // taken here, after every scroll area inside the cells.
         if let Some(d) = ctx.data_mut(|m| m.remove_temp::<egui::Vec2>(crate::editor::outer_wheel_id())) {
-            ui.scroll_with_delta(d);
+            ui.scroll_with_delta_animation(d, egui::style::ScrollAnimation::none());
+        }
+        if let Some(r) = ctx.data_mut(|m| m.remove_temp::<Option<egui::Rect>>(crate::editor::outer_caret_id()).flatten()) {
+            ui.scroll_to_rect_animation(r, None, egui::style::ScrollAnimation::none());
         }
     });
+    // (Where it's scrolled to, for the tests.)
+    #[cfg(test)]
+    if let Some(st) = egui::scroll_area::State::load(ui.ctx(), nb_scroll) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(("nb-offset", &tab.id)), st.offset.y));
+    }
     if pull != 0.0 {
         if let Some(mut st) = egui::scroll_area::State::load(ui.ctx(), nb_scroll) {
             st.offset.y = (st.offset.y + pull).max(0.0);
