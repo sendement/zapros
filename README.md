@@ -305,16 +305,32 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   them; the window stays in the middle.
 - **Boards** (Side panel → Boards): a canvas beside the scripts, each
   board in a tab of its own and kept by itself (a JSON file in the data
-  folder). Frames — rectangles, ellipses, diamonds — with text typed right
-  in them, free text, a brush; table entities with their fields (keys,
-  types) and a note; arrows between items, and between fields of tables;
-  notebooks and scripts from the tabs (as a card or a flowchart of their
-  cells, refreshed on demand); tables, views and routines of any saved
-  connection (dragged from the tree, from its menu or "Add"), with their
-  columns, opened by a double click, each with a note. Drag empty space or
-  the middle button to pan, Ctrl+wheel to zoom, Shift+drag to pick by a
-  box, Ctrl+Z / Ctrl+Shift+Z, Ctrl+D a copy, Delete; tools by keys V R O
-  D T B E A.
+  folder). A library on its left, dragged from (or clicked): the
+  databases' tree (tables, views, routines of any saved connection, with
+  their columns), the workspaces with their tabs and notebooks' cells,
+  shapes (rectangle, ellipse, diamond, start / end, input / output,
+  database, preparation, sticky note, text, table entity), lines (arrow,
+  plain, dashed, dotted, both ways, thick — a click sets how the Link
+  tool draws, a drag puts a line of its own with ends to pull) and
+  backgrounds (zones with a title: plain, dots, grid, stripes; the
+  board's own: dots, grid, lines, plain).
+  A script on the board is drawn by what its statements do: a query as a
+  table of the columns it gives (its CTEs, `*` and expressions worked
+  out), INSERT as a frame with the source (a query's columns or VALUES'
+  rows), an arrow and the target table, UPDATE / DELETE / MERGE /
+  CREATE TABLE as an arrow to the table (the columns set or defined), a
+  DECLARE / BEGIN block or a routine's code in full, folded to its first
+  line by its ▾; several statements: a frame of them. A workspace is a
+  frame round its tabs' frames. Click a statement: its script shows on
+  the right; "Refresh" takes the tabs as they are now.
+  Frames with text typed right in them, free text, a brush; table
+  entities with their fields (keys, types) and a note; arrows between
+  items and between fields (a query's columns too), with a label and
+  their own look. Drag empty space or the middle button to pan,
+  Ctrl+wheel to zoom, Shift+drag to pick by a box, Ctrl+Z /
+  Ctrl+Shift+Z, Ctrl+D a copy, Delete; tools by keys V R O D T B E A.
+- **SQLite triggers** (`CREATE TRIGGER … BEGIN …; END;`) run and split
+  as one statement.
 - **The side panel put away** by its button at the window's corner (it
   stays there either way; Ctrl+B),
   a double click on its edge, or its edge pulled well past its narrowest;

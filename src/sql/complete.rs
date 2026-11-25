@@ -310,6 +310,17 @@ pub fn derived(src: &str, d: Dialect, bases: &[&[Relation]]) -> Vec<(Relation, b
 /// The columns a query gives: its first SELECT's list (names as given,
 /// `*` and `t.*` opened up), with their types when they're plain columns.
 fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) -> Vec<(String, String)> {
+    out_cols_of(body, d, made, bases, false)
+}
+
+/// The columns a whole query gives, as a board draws them: its CTEs and
+/// subqueries known, `*` opened up, an expression with no name as written.
+pub fn query_columns(sql: &str, d: Dialect, rels: &[Relation]) -> Vec<(String, String)> {
+    let made: Vec<Relation> = derived(sql, d, &[rels]).into_iter().map(|(r, _)| r).collect();
+    out_cols_of(sql, d, &made, &[rels], true).into_iter().map(|(n, ty)| (col_label(&n), ty)).collect()
+}
+
+fn out_cols_of(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]], exprs: bool) -> Vec<(String, String)> {
     let toks: Vec<Tok> = lex::lex(body, d).into_iter().filter(|t| !t.trivia()).collect();
     let up = |t: &Tok| t.text(body).to_ascii_uppercase();
     let mut depth = 0;
@@ -379,13 +390,26 @@ fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) ->
             }
             continue;
         }
-        let Some(name) = written(body, last) else { continue };
+        let as_written = || {
+            let s = &body[it[0].start..last.end];
+            let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            if s.chars().count() > 40 { format!("{}…", s.chars().take(39).collect::<String>()) } else { s }
+        };
+        let Some(name) = written(body, last) else {
+            if exprs {
+                out.push((as_written(), String::new()));
+            }
+            continue;
+        };
         let plain = it.len() == 1;
         let dotted = prev.is_some_and(|p| p.kind == Tk::Dot);
         let as_ = prev.is_some_and(|p| up(p) == "AS");
         // `expr alias`: a name after something that ends an expression.
         let bare = matches!(last.kind, Tk::Word | Tk::Quoted) && prev.is_some_and(|p| matches!(p.kind, Tk::Close | Tk::Word | Tk::Quoted | Tk::Number | Tk::Str));
         if !(plain || dotted || as_ || bare) {
+            if exprs {
+                out.push((as_written(), String::new()));
+            }
             continue;
         }
         let ty = if plain {

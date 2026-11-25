@@ -3292,6 +3292,66 @@ fn drag_to(h: &mut Harness<'static, App>, a: egui::Pos2, b: egui::Pos2, n: usize
 }
 
 #[test]
+fn board_scripts_as_schemes() {
+    use crate::board::Kind as B;
+    let script = "select o.id, o.total, c.name\n  from orders o join customers c on c.id = o.customer_id;\n\ninsert into orders_archive (id, total)\nselect id, total from orders where total > 100;\n\ninsert into orders (customer_id, total) values (1, 10), (2, 20);\n\nupdate orders set note = 'checked', total = total * 1.2 where id = 7;\n\ncreate trigger orders_note after insert on orders\nbegin\n  update orders set note = 'new'\n   where id = new.id;\n  insert into audit (what) values ('order');\nend;\n";
+    let (mut h, _g) = harness("board-scripts", script, false);
+    settle(&mut h);
+    let tab = h.state().tab().id.clone();
+    let id = h.state_mut().new_board();
+    settle(&mut h);
+    {
+        let app = h.state_mut();
+        let mut open = std::mem::take(app.boards.open.get_mut(&id).unwrap());
+        crate::board_ui::add_notebook(app, &mut open.board, &tab, egui::pos2(0.0, 0.0));
+        open.board.fit_heights();
+        app.boards.open.insert(id.clone(), open);
+        app.board_ui.sel.clear();
+        app.board_ui.lib = false;
+    }
+    settle(&mut h);
+    let b = h.state().boards.open[&id].board.clone();
+    let it = b.items.iter().find(|i| matches!(i.kind, B::Notebook { .. })).unwrap().clone();
+    let B::Notebook { snap, .. } = &it.kind else { unreachable!() };
+    let kinds: Vec<&str> = snap.parts.iter().map(|p| match &p.what {
+        crate::board::What::Query { .. } => "query",
+        crate::board::What::Insert { source: Some(_), .. } => "insert-select",
+        crate::board::What::Insert { .. } => "insert-values",
+        crate::board::What::Change { .. } => "change",
+        crate::board::What::Code { .. } => "code",
+        _ => "other",
+    }).collect();
+    assert_eq!(kinds, ["query", "insert-select", "insert-values", "change", "code"], "{:?}", snap.parts);
+    // Seen at full size from its top-left corner.
+    {
+        let o = h.state_mut().boards.open.get_mut(&id).unwrap();
+        o.board.zoom = 1.0;
+        o.board.pan = [it.rect[0] - 20.0, it.rect[1] - 20.0];
+    }
+    settle(&mut h);
+    shot(&mut h, "board-scripts");
+    // A workspace: its frame round each tab's.
+    {
+        let app = h.state_mut();
+        app.ws_mut().tabs.iter_mut().find(|t| t.title == "Черновик").unwrap().text = "select id, name from customers;".into();
+        let ws = app.ws().id.clone();
+        let mut open = std::mem::take(app.boards.open.get_mut(&id).unwrap());
+        let at = egui::pos2(it.rect[0] + it.rect[2] / 2.0, it.rect[1] + it.rect[3] + 600.0);
+        crate::board_ui::put_ws(app, &mut open.board, &ws, at);
+        open.board.fit_heights();
+        let w = open.board.items.last().unwrap().clone();
+        open.board.pan = [w.rect[0] - 20.0, w.rect[1] - 20.0];
+        open.board.zoom = 0.8;
+        app.boards.open.insert(id.clone(), open);
+        app.board_ui.sel.clear();
+        let B::Workspace { tabs, .. } = &w.kind else { panic!("{:?}", w.kind) };
+        assert_eq!(tabs.len(), 2);
+    }
+    settle(&mut h);
+    shot(&mut h, "board-ws");
+}
+
+#[test]
 fn boards_drawn_linked_and_filled() {
     use crate::board::Kind as B;
     let (mut h, _g) = harness("boards", SCRIPT, false);
@@ -3350,42 +3410,71 @@ fn boards_drawn_linked_and_filled() {
     let b = board(&h);
     assert_eq!(b.links.len(), 1, "{:?}", b.links);
     assert_eq!((b.links[0].from, b.links[0].from_field, b.links[0].to, b.links[0].to_field), (c.id, Some(1), a.id, Some(0)));
-    // A table dragged from the tree: its columns come along.
-    h.get_by_label("Подключения и объекты баз").click();
+    // A table dragged from the library's tree: its columns come along.
     h.state_mut().open_nodes.insert(("lite".into(), vec![]));
     h.state_mut().open_nodes.insert(("lite".into(), vec!["tables".into()]));
     settle(&mut h);
     let orders = h.get_by_label("orders").rect().center();
-    drag_to(&mut h, orders, canvas.min + egui::vec2(640.0, 120.0), 12);
+    drag_to(&mut h, orders, canvas.min + egui::vec2(150.0, 330.0), 12);
     settle(&mut h);
     settle(&mut h);
     let b = board(&h);
     let obj = b.items.iter().find(|i| matches!(i.kind, B::Object { .. })).expect("the table on the board");
     assert!(matches!(&obj.kind, B::Object { name, cols, .. } if name == "orders" && cols.iter().any(|c| c.0 == "customer_id")), "{:?}", obj.kind);
-    // A script from a tab, as a flowchart of its statements.
+    // A script from a tab: a table per query, UPDATE's scheme.
     h.get_by_label_contains("Добавить").click();
     settle(&mut h);
     h.get_by_label("📜 Клиенты").click();
     settle(&mut h);
-    h.get_by_label("блок-схема").click();
-    settle(&mut h);
     let b = board(&h);
-    let nb = b.items.iter().find(|i| matches!(i.kind, B::Notebook { .. })).expect("the script on the board");
-    assert!(matches!(&nb.kind, B::Notebook { cells, flow: true, .. } if cells.len() >= 2), "{:?}", nb.kind);
-    // Its first statement's box lies past the card's head; it's as tall as its boxes.
+    let nb = b.items.iter().find(|i| matches!(i.kind, B::Notebook { .. })).expect("the script on the board").clone();
+    let B::Notebook { snap, .. } = &nb.kind else { unreachable!() };
+    assert_eq!(snap.parts.len(), 3, "{:?}", snap.parts);
+    assert!(matches!(&snap.parts[0].what, crate::board::What::Query { cols, .. } if cols.iter().map(|c| c.0.as_str()).collect::<Vec<_>>() == ["name", "orders", "total", "kind"]), "{:?}", snap.parts[0].what);
+    assert!(matches!(&snap.parts[2].what, crate::board::What::Change { verb, target, cols } if verb == "UPDATE" && target == "orders" && cols[0].0 == "note"), "{:?}", snap.parts[2].what);
+    // As tall as what it holds; a click on a statement shows its script.
     assert_eq!(nb.rect[3], nb.natural_h().unwrap());
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("board-fit"), true));
     settle(&mut h);
+    let inside = nb.inside();
+    let upd = inside.parts[2].2;
+    h.get_by_label_contains("Выбор и перемещение").click();
+    settle(&mut h);
+    let p = at(&h, upd.center());
+    click_at(&mut h, p, egui::PointerButton::Primary);
+    settle(&mut h);
+    assert_eq!(h.state().board_ui.sub, Some((0, 2)));
+    // (Its name on top, its script open under it, then the list.)
+    assert!(h.query_all_by_label("UPDATE orders").count() >= 2, "the statement picked in the properties");
+    // From the library: a whole workspace, a sticky note, a dashed line.
+    let ws = h.query_all_by_label("Отчёты").map(|n| n.rect()).find(|r| r.right() < canvas.min.x && r.top() > canvas.top()).expect("the workspace in the library").center();
+    drag_to(&mut h, ws, canvas.min + egui::vec2(200.0, 520.0), 12);
+    settle(&mut h);
+    let b = board(&h);
+    let w = b.items.iter().find(|i| matches!(i.kind, B::Workspace { .. })).expect("the workspace on the board");
+    assert!(matches!(&w.kind, B::Workspace { name, tabs, .. } if name == "Отчёты" && tabs.len() == 1 && tabs[0].title == "Клиенты"), "{:?}", w.kind);
+    let note = h.get_by_label("Стикер").rect().center();
+    drag_to(&mut h, note, canvas.min + egui::vec2(80.0, 440.0), 10);
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    settle(&mut h);
+    let line = h.get_by_label("Пунктирная стрелка").rect().center();
+    drag_to(&mut h, line, canvas.min + egui::vec2(300.0, 440.0), 10);
+    settle(&mut h);
+    let b = board(&h);
+    assert!(b.items.iter().any(|i| matches!(i.kind, B::Frame { shape: crate::board::Shape::Note, .. })));
+    assert!(b.items.iter().any(|i| matches!(&i.kind, B::Line { style, .. } if style.dash == crate::board::Dash::Dashed)));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("board-fit"), true));
+    settle(&mut h);
     shot(&mut h, "board");
-    // A step back takes the flowchart switch back; forth again.
+    // A step back takes the line away; forth again.
     h.input_mut().events.push(egui::Event::PointerMoved(canvas.center()));
     h.step();
     key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
     settle(&mut h);
-    assert!(board(&h).items.iter().any(|i| matches!(i.kind, B::Notebook { flow: false, .. })));
+    assert!(!board(&h).items.iter().any(|i| matches!(i.kind, B::Line { .. })));
     key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
     settle(&mut h);
-    assert!(board(&h).items.iter().any(|i| matches!(i.kind, B::Notebook { flow: true, .. })));
+    assert!(board(&h).items.iter().any(|i| matches!(i.kind, B::Line { .. })));
     // On disk as on screen.
     let saved = crate::board::load(&id).expect("saved");
     assert_eq!(saved.items, board(&h).items);

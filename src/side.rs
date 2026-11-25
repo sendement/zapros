@@ -130,7 +130,6 @@ fn insert_at_cursor(app: &mut App, s: &str) {
 }
 
 fn databases(app: &mut App, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
     // The button first (right to left), the field takes what's left: it
     // never pushes the panel wider.
     let row = egui::Vec2::new(ui.available_width(), ui.spacing().interact_size.y);
@@ -142,7 +141,14 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
         ui.add(egui::TextEdit::singleline(&mut app.tree_filter).hint_text(t("🔎 поиск объектов в базах", "🔎 find objects in the databases")).desired_width(ui.available_width()))
             .on_hover_text(t("От двух букв — поиск по всей базе (во всех схемах, кроме скрытых), а не только по раскрытому", "Two letters or more: the whole database is searched (every schema shown), not just what's open"));
     });
-    egui::ScrollArea::both().id_salt("db-tree").auto_shrink([false, false]).show(ui, |ui| {
+    egui::ScrollArea::both().id_salt("db-tree").auto_shrink([false, false]).show(ui, |ui| tree_rows(app, ui));
+}
+
+/// The connections and what's open under them (a board's library shows
+/// them too).
+pub fn tree_rows(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    {
         ui.spacing_mut().item_spacing.y = 1.0;
         if app.conns.list.is_empty() {
             ui.add_space(20.0);
@@ -237,7 +243,7 @@ fn databases(app: &mut App, ui: &mut egui::Ui) {
                 });
             }
         }
-    });
+    }
 }
 
 /// Kinds a board can hold.
@@ -246,7 +252,7 @@ fn boardable(k: ObjKind) -> bool {
 }
 
 /// What's dragged from the tree, under the pointer.
-fn drag_ghost(ctx: &egui::Context, name: &str) {
+pub fn drag_ghost(ctx: &egui::Context, name: &str) {
     let Some(p) = ctx.pointer_latest_pos() else { return };
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tree-drag")));

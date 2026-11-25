@@ -219,6 +219,9 @@ pub fn split(src: &str, d: Dialect, blank_lines: bool) -> Vec<Range<usize>> {
     let mut start: Option<usize> = None;
     let mut depth = 0i32;
     let mut block = false;
+    // SQLite's CREATE TRIGGER … BEGIN …; END: open BEGINs and CASEs.
+    let mut trigger = false;
+    let mut nest = 0i32;
     let mut first_tok = 0;
     for (k, t) in toks.iter().enumerate() {
         if start.is_none() {
@@ -229,7 +232,18 @@ pub fn split(src: &str, d: Dialect, blank_lines: bool) -> Vec<Range<usize>> {
             first_tok = k;
             depth = 0;
             block = d == Dialect::Oracle && plsql_start(src, &toks[k..(k + 16).min(toks.len())]);
+            let w = lead_words(src, &toks[k..(k + 12).min(toks.len())], 3);
+            trigger = matches!(d, Dialect::Sqlite | Dialect::Generic) && w.first().is_some_and(|x| x == "CREATE") && w[1..].iter().any(|x| x == "TRIGGER");
+            nest = 0;
         }
+        if trigger && matches!(t.kind, Tk::Keyword | Tk::Word) {
+            match t.text(src).to_ascii_uppercase().as_str() {
+                "BEGIN" | "CASE" => nest += 1,
+                "END" => nest -= 1,
+                _ => {}
+            }
+        }
+        let block = block || (trigger && nest > 0);
         let s = start.unwrap();
         match t.kind {
             Tk::Open => depth += 1,
@@ -310,6 +324,19 @@ impl Case {
             Case::Lower => w.to_lowercase(),
             Case::AsIs => w.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_trigger_is_one_statement() {
+        let src = "create trigger t after insert on o\nbegin\n  update o set n = case when 1 then 2 else 3 end;\n\n  insert into a values (1);\nend;\nselect 1;";
+        let parts: Vec<&str> = split(src, Dialect::Sqlite, true).into_iter().map(|r| &src[r]).collect();
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert!(parts[0].ends_with("end;"));
     }
 }
 
