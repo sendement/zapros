@@ -763,6 +763,70 @@ fn results_in_batches_export_and_totals() {
     assert_eq!(third.lines().count(), 1001, "header + 1000 rows");
     // The columns as shown (moved above).
     assert!(third.starts_with("total,note,id\n37.5,,2001\n"), "{}", &third[..40]);
+    // The rest went to the file only: the table kept its first batch.
+    assert_eq!(loaded(&h), 500, "rows past the first batch not loaded into the table");
+    assert!(h.state().rt[&id].results[0].exporting.is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn big_result_streamed_to_a_file() {
+    // 300 000 rows: written a batch at a time, none kept but the first.
+    let sql = "with recursive n(i) as (select 1 union all select i + 1 from n where i < 300000)\nselect i, 'row ' || i as name, i * 1.5 as v from n;\n";
+    let (mut h, _g) = harness("big-export", sql, false);
+    focus_editor(&mut h, 5);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    assert_eq!(h.state().rt[&id].results[0].table.rows.len(), 500);
+    let dir = std::env::temp_dir().join(format!("zapros-big-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (fmt, name) in [(crate::export::Format::Csv, "big.csv"), (crate::export::Format::Xlsx, "big.xlsx")] {
+        if fmt == crate::export::Format::Xlsx {
+            // Run again: the cursor's open anew.
+            focus_editor(&mut h, 5);
+            key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+            settle(&mut h);
+        }
+        h.get_by_label_contains("Экспорт").click();
+        for _ in 0..3 {
+            h.step();
+        }
+        if let Some((_, _, e)) = h.state_mut().export.as_mut() {
+            e.format = fmt;
+            e.path = dir.join(name);
+            assert!(e.load_all);
+        }
+        h.step();
+        shot(&mut h, &format!("big-export-{name}"));
+        // (Clear of the clicks before: else it counts as their double click.)
+        for _ in 0..50 {
+            h.step();
+        }
+        h.get_by_label_contains("Сохранить").click();
+        h.step();
+        let mut seen_progress = false;
+        for _ in 0..6000 {
+            h.step();
+            let v = &h.state().rt[&id].results[0];
+            seen_progress |= v.exporting.is_some_and(|n| n > 500);
+            if v.cursor.is_none() && v.exporting.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let v = &h.state().rt[&id].results[0];
+        assert!(v.cursor.is_none() && v.exporting.is_none(), "done");
+        assert_eq!(v.table.rows.len(), 500, "the table kept its first batch only");
+        assert!(seen_progress, "progress shown while writing");
+        if fmt == crate::export::Format::Csv {
+            let text = std::fs::read_to_string(dir.join(name)).unwrap();
+            assert_eq!(text.lines().count(), 300_001);
+            assert!(text.ends_with("300000,row 300000,450000\n"), "{}", &text[text.len() - 60..]);
+        } else {
+            assert!(std::fs::metadata(dir.join(name)).unwrap().len() > 1_000_000);
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

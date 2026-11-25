@@ -32,7 +32,7 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 base64 = "0.22"
-rust_xlsxwriter = { version = "0.102.0", default-features = false }
+rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
 calamine = { version = "0.37", default-features = false, features = ["chrono"] }
 csv = "1.4"
 encoding_rs = "0.8"

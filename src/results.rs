@@ -317,6 +317,9 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
             if fr.changed() {
                 reorder(v);
             }
+            if let Some(n) = v.exporting {
+                ui.label(RichText::new(format!("💾 → {} {}", n, t("строк в файл", "rows to the file"))).small());
+            }
             if v.loading.is_some() {
                 ui.add(egui::Spinner::new().size(14.0));
                 if let Some(since) = v.loading_since {
@@ -438,7 +441,7 @@ pub fn export_window(app: &mut App, ctx: &egui::Context) {
             ui.end_row();
             if open {
                 ui.label(t("Строки", "Rows"));
-                ui.checkbox(&mut e.load_all, t("сначала догрузить все с сервера", "load all from the server first"));
+                ui.checkbox(&mut e.load_all, t("все строки с сервера — пишутся прямо в файл, не в таблицу", "every row from the server — written straight to the file, not into the table"));
                 ui.end_row();
             }
         });
@@ -459,15 +462,21 @@ pub fn export_window(app: &mut App, ctx: &egui::Context) {
         keep = false;
     }
     if go {
-        if open && e.load_all {
-            if let Some(v) = app.rt.get_mut(&tab).and_then(|r| r.results.get_mut(i)) {
-                v.export_after = Some(e);
+        // The rows shown first, as shown; then (all asked for) the server's
+        // rest straight into the file, a batch at a time, not into the table.
+        let v = &app.rt[&tab].results[i];
+        let mut sink = crate::export::Sink::of(e.clone(), v);
+        let pushed = sink.push(v.order.iter().filter_map(|&r| v.table.rows.get(r)));
+        match pushed {
+            Err(err) => app.toast(format!("{}: {err}", t("Не сохранить", "Can't save"))),
+            Ok(()) if open && e.load_all => {
+                app.drain_to(&tab, i, sink);
+                app.toast(t("Выгружаю остальные строки прямо в файл — в таблицу они не грузятся", "Writing the rest of the rows straight to the file, not into the table"));
             }
-            app.fetch_more(&tab, i, true);
-            app.toast(t("Догружаю строки — файл сохранится, когда загрузятся все", "Loading the rows: the file is saved once they're all in"));
-        } else {
-            let msg = crate::export::save(&e, &crate::export::Snapshot::of(&app.rt[&tab].results[i]));
-            app.toast(msg);
+            Ok(()) => match sink.finish() {
+                Ok(m) => app.toast(m),
+                Err(err) => app.toast(format!("{}: {err}", t("Не сохранить", "Can't save"))),
+            },
         }
     } else if keep {
         app.export = Some((tab, i, e));

@@ -436,7 +436,10 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   last statement's cursor stays open, the bar above the table loads the next
   batch, all the rest, or stops (closing the cursor). Export to CSV / TSV /
   JSON / SQL INSERT / Markdown / HTML / XLSX, whole or split into files of
-  N rows, optionally loading every row first. Totals on demand: a column header's
+  N rows; with every row from the server, the rest of the cursor is written
+  straight to the file a batch at a time (not into the table: a result of
+  any size, in the memory of one batch; XLSX too, sheets past a million
+  rows go on in the next file), its progress beside the table. Totals on demand: a column header's
   right-click menu has Σ Totals → sum / min / max / average / count, the
   value shows in a row of its own under the table (right click there for
   another or to remove it), worked out again only when the rows change.

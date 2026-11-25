@@ -553,6 +553,9 @@ pub enum Req {
     Run { run: u64, stmts: Vec<Stmt>, limit: usize, go_on: bool },
     /// The open cursor: `n` more rows (`all`: batch after batch to the end).
     More { run: u64, n: usize, all: bool },
+    /// The open cursor's rest written to a file as it comes (none of it
+    /// sent back: a result of any size in the memory of one batch).
+    Drain { run: u64, sink: Box<crate::export::Sink> },
     /// The open cursor closes.
     StopFetch,
     Children { path: Vec<String> },
@@ -618,6 +621,10 @@ pub enum What {
     /// More rows of it; `open`: the cursor's still there (more can come);
     /// `more`: rows were left when it closed.
     Rows { run: u64, rows: Vec<Vec<Option<String>>>, more: bool, open: bool, error: Option<String> },
+    /// Rows written to the file so far.
+    Exporting { run: u64, rows: usize },
+    /// The file's done (or why not).
+    Exported { run: u64, msg: Result<String, String> },
     Children { path: Vec<String>, items: Result<Vec<Obj>, String> },
     Source { path: Vec<String>, open_as: String, into: Option<String>, text: Result<String, String> },
     Described { key: String, def: Result<crate::design::ObjDef, String> },
@@ -782,6 +789,10 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                         // batch: the window asks for more (or anything
                         // else ends it).
                         let mut all = false;
+                        // Draining to a file: where to, a failure, stopped.
+                        let mut sink: Option<Box<crate::export::Sink>> = None;
+                        let mut sink_err: Option<String> = None;
+                        let mut sink_stopped = false;
                         let (at, sql) = (st.at, st.sql.clone());
                         let mut more = |tb: &mut Table| -> usize {
                             if index != last || stash.is_some() {
@@ -796,6 +807,13 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                                 let first = Table { cols: tb.cols.clone(), rows: std::mem::take(&mut tb.rows), more: true };
                                 tell(What::Page { run, at, sql: sql.clone(), table: first, took: t.elapsed() });
                                 tell(What::Finished { run, cancelled: false });
+                            } else if let Some(sk) = sink.as_mut() {
+                                if let Err(e) = sk.push(&tb.rows) {
+                                    sink_err = Some(e);
+                                    return 0;
+                                }
+                                tb.rows.clear();
+                                tell(What::Exporting { run, rows: sk.rows() });
                             } else {
                                 tell(What::Rows { run, rows: std::mem::take(&mut tb.rows), more: true, open: true, error: None });
                             }
@@ -803,8 +821,11 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                                 // Batch after batch, unless told otherwise.
                                 match rx.try_recv() {
                                     Err(_) => return limit.max(5000),
-                                    Ok(Req::StopFetch) | Ok(Req::More { .. }) => {}
-                                    Ok(other) => stash = Some(other),
+                                    Ok(Req::StopFetch) | Ok(Req::More { .. }) => sink_stopped = true,
+                                    Ok(other) => {
+                                        sink_stopped = true;
+                                        stash = Some(other);
+                                    }
                                 }
                                 return 0;
                             }
@@ -816,6 +837,11 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                                         break if a { limit.max(5000) } else { n.max(1) };
                                     }
                                     Ok(Req::More { .. }) => continue,
+                                    Ok(Req::Drain { run: r, sink: s }) if r == run => {
+                                        sink = Some(s);
+                                        all = true;
+                                        break limit.max(5000);
+                                    }
                                     Ok(Req::StopFetch) => break 0,
                                     Ok(other) => {
                                         stash = Some(other);
@@ -847,6 +873,26 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                             }
                             cancelled = stop.load(Ordering::Relaxed) || is_cancel_message(&f.message);
                         }
+                        if let (true, Some(mut sk)) = (paged, sink.take()) {
+                            // Drained to a file: its last rows, the file closed.
+                            let (rows, err) = match outcome {
+                                Ok(Outcome::Rows(tb)) => (tb.rows, None),
+                                Ok(_) => (Vec::new(), None),
+                                Err(f) => (Vec::new(), Some(f.message)),
+                            };
+                            let pushed = match sink_err.take() {
+                                Some(e) => Err(e),
+                                None => sk.push(&rows),
+                            };
+                            let msg = pushed.and_then(|_| sk.finish()).map(|m| match (&err, sink_stopped) {
+                                (Some(e), _) => format!("{m} — {}: {e}", crate::i18n::t("прервано ошибкой", "cut short by an error")),
+                                (None, true) => format!("{m} — {}", crate::i18n::t("остановлено, записано не всё", "stopped, not all written")),
+                                _ => m,
+                            });
+                            tell(What::Exported { run, msg });
+                            tell(What::Rows { run, rows: Vec::new(), more: err.is_some() || sink_stopped, open: false, error: err });
+                            break;
+                        }
                         if paged {
                             // The rest of a paged result, and its cursor's end.
                             match outcome {
@@ -870,6 +916,11 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 }
             }
             Req::More { .. } | Req::StopFetch => {}
+            // (No cursor open any more: what's in it so far, saved.)
+            Req::Drain { run, sink } => {
+                tell(What::Exported { run, msg: sink.finish() });
+                tell(What::Rows { run, rows: Vec::new(), more: true, open: false, error: None });
+            }
             Req::Tx(op) => {
                 let result = match op {
                     TxOp::Auto(on) => {

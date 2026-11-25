@@ -107,7 +107,8 @@ pub struct ResultView {
     /// Since when they're asked for (the stopwatch by the spinner).
     pub loading_since: Option<Instant>,
     /// Saved once every row's in.
-    pub export_after: Option<crate::export::Export>,
+    /// Rows written to a file so far, while the cursor's rest goes there.
+    pub exporting: Option<usize>,
     /// Shown as a chart: its settings.
     pub chart: crate::chart::Chart,
 }
@@ -1284,6 +1285,19 @@ impl App {
         }
     }
 
+    /// The rest of a result's open cursor written to the file `sink`
+    /// (holding the rows shown so far) as it comes, kept out of the table.
+    pub fn drain_to(&mut self, tab: &str, i: usize, sink: crate::export::Sink) {
+        let Some((run, conn)) = self.rt.get(tab).and_then(|r| r.results.get(i)).and_then(|v| v.cursor.clone()) else { return };
+        let Some(l) = self.live.get(&conn) else { return };
+        l.query.send(Req::Drain { run, sink: Box::new(sink) });
+        if let Some(v) = self.rt.get_mut(tab).and_then(|r| r.results.get_mut(i)) {
+            v.loading = Some(true);
+            v.loading_since = Some(Instant::now());
+            v.exporting = Some(0);
+        }
+    }
+
     /// The result's cursor closes (what's loaded stays).
     pub fn fetch_stop(&mut self, tab: &str, i: usize) {
         let Some((_, conn)) = self.rt.get(tab).and_then(|r| r.results.get(i)).and_then(|v| v.cursor.clone()) else { return };
@@ -1568,7 +1582,6 @@ impl App {
                     if let Some(e) = error {
                         rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: e, at: None });
                     }
-                    let mut done_export = None;
                     if let Some(v) = rt.results.iter_mut().find(|v| v.cursor.as_ref().is_some_and(|c| c.0 == run)) {
                         let from = v.table.rows.len();
                         v.table.rows.extend(rows);
@@ -1582,14 +1595,23 @@ impl App {
                         if !open {
                             v.cursor = None;
                             v.loading = None;
-                            done_export = v.export_after.take().map(|e| (e, crate::export::Snapshot::of(v)));
                         } else if v.loading == Some(false) {
                             v.loading = None;
                         }
                     }
-                    if let Some((e, snap)) = done_export {
-                        let msg = crate::export::save(&e, &snap);
-                        self.toast(msg);
+                }
+                What::Exporting { run, rows } => {
+                    if let Some(v) = self.cursors.get(&run).and_then(|t| self.rt.get_mut(t)).and_then(|rt| rt.results.iter_mut().find(|v| v.cursor.as_ref().is_some_and(|c| c.0 == run))) {
+                        v.exporting = Some(rows);
+                    }
+                }
+                What::Exported { run, msg } => {
+                    if let Some(v) = self.cursors.get(&run).and_then(|t| self.rt.get_mut(t)).and_then(|rt| rt.results.iter_mut().find(|v| v.cursor.as_ref().is_some_and(|c| c.0 == run))) {
+                        v.exporting = None;
+                    }
+                    match msg {
+                        Ok(m) => self.toast(m),
+                        Err(e) => self.toast(format!("{}: {e}", t("Не сохранить", "Can't save"))),
                     }
                 }
                 What::Result { run, index: _, at, sql, outcome, took } => {
