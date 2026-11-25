@@ -315,9 +315,10 @@ fn out_cols(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]]) ->
 
 /// The columns a whole query gives, as a board draws them: its CTEs and
 /// subqueries known, `*` opened up, an expression with no name as written.
-pub fn query_columns(sql: &str, d: Dialect, rels: &[Relation]) -> Vec<(String, String)> {
-    let made: Vec<Relation> = derived(sql, d, &[rels]).into_iter().map(|(r, _)| r).collect();
-    out_cols_of(sql, d, &made, &[rels], true).into_iter().map(|(n, ty)| (col_label(&n), ty)).collect()
+/// (Tables looked for in these lists, the first first.)
+pub fn query_columns_in(sql: &str, d: Dialect, bases: &[&[Relation]]) -> Vec<(String, String)> {
+    let made: Vec<Relation> = derived(sql, d, bases).into_iter().map(|(r, _)| r).collect();
+    out_cols_of(sql, d, &made, bases, true).into_iter().map(|(n, ty)| (col_label(&n), ty)).collect()
 }
 
 fn out_cols_of(body: &str, d: Dialect, made: &[Relation], bases: &[&[Relation]], exprs: bool) -> Vec<(String, String)> {

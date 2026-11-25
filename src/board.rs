@@ -199,6 +199,56 @@ pub struct Link {
     pub color: Rgb,
     #[serde(default)]
     pub style: LineStyle,
+    /// Where in the items its ends are (a workspace's tab, a statement, a
+    /// table in a statement's scheme); the fields are that place's rows.
+    #[serde(default)]
+    pub from_at: At,
+    #[serde(default)]
+    pub to_at: At,
+}
+
+/// A place inside an item: a workspace's tab (its frame), a statement in
+/// it (or in a notebook), one of the tables of a statement's scheme
+/// (0: where from, 1: into which). All none: the item itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct At {
+    pub tab: Option<usize>,
+    pub part: Option<usize>,
+    pub table: Option<u8>,
+}
+
+/// A place a link can end at: where it is, its rows' middles (board units).
+#[derive(Clone, Debug)]
+pub struct Anchor {
+    pub at: At,
+    pub rect: Rect,
+    pub rows: Vec<f32>,
+}
+
+/// Rows' middles of a table drawn in `r` with `n` rows.
+fn rows_in(r: Rect, n: usize) -> Vec<f32> {
+    (0..n.min(MAX_ROWS)).map(|i| r.top() + HEAD_H + ROW_H * (i as f32 + 0.5)).collect()
+}
+
+/// The tables of a statement's scheme drawn in `r` (board units): which
+/// (0: where from, 1: into which), where, how many rows.
+pub fn part_tables(part: &Part, r: Rect) -> Vec<(u8, Rect, usize)> {
+    let top = r.top() + SUB_HEAD + PAD;
+    match &part.what {
+        What::Insert { cols, source, .. } => {
+            let (from_h, from_n) = source.as_ref().map_or((HEAD_H + ROW_H + 6.0, 1), |(_, c)| (table_h(c.len()), c.len()));
+            let from = Rect::from_min_size(Pos2::new(r.left() + PAD, top), Vec2::new(PART_W, from_h));
+            let into = Rect::from_min_size(Pos2::new(from.right() + ARROW_W, top), Vec2::new(PART_W, table_h(cols.len())));
+            vec![(0, from, from_n), (1, into, cols.len())]
+        }
+        What::Change { cols, .. } => {
+            let bx = Rect::from_min_size(Pos2::new(r.left() + PAD, top), Vec2::new(PART_W * 0.6, 56.0));
+            let into = Rect::from_min_size(Pos2::new(bx.right() + ARROW_W, top), Vec2::new(PART_W, table_h(cols.len())));
+            vec![(0, bx, 0), (1, into, cols.len())]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Heights of an item's parts (board units).
@@ -270,12 +320,34 @@ pub fn flow(sizes: &[Vec2], width: f32) -> (Vec<Pos2>, f32) {
     (out, y + row_h)
 }
 
+/// The width to lay boxes of these sizes in so that they come out about
+/// square (a bit wider than tall), not a long ribbon nor a tall column.
+pub fn squarish(sizes: &[Vec2]) -> f32 {
+    let widest = sizes.iter().map(|s| s.x).fold(PART_W, f32::max);
+    // Each count of boxes in the first row gives a width to try.
+    let mut tries = vec![widest];
+    let mut x = 0.0;
+    for s in sizes {
+        x += s.x;
+        tries.push(x.max(widest));
+        x += GAP;
+    }
+    let mut best = (f32::INFINITY, widest);
+    for w in tries {
+        let (pos, h) = flow(sizes, w);
+        let used = pos.iter().zip(sizes).map(|(p, s)| p.x + s.x).fold(0.0, f32::max).max(1.0);
+        let score = ((used / h.max(1.0)) / 1.4).ln().abs();
+        if score < best.0 - 1e-3 {
+            best = (score, used);
+        }
+    }
+    best.1
+}
+
 /// How wide a frame round these parts likes to be (inside).
 pub fn parts_width(parts: &[Part]) -> f32 {
     let sizes: Vec<Vec2> = parts.iter().map(Part::size).collect();
-    let widest = sizes.iter().map(|s| s.x).fold(0.0, f32::max);
-    let all = sizes.iter().map(|s| s.x).sum::<f32>() + GAP * sizes.len().saturating_sub(1) as f32;
-    all.min(760.0f32.max(widest)).max(widest).max(PART_W)
+    squarish(&sizes)
 }
 
 impl Snap {
@@ -352,9 +424,7 @@ impl Item {
             Kind::Notebook { snap, .. } => parts_width(&snap.parts) + PAD * 2.0,
             Kind::Workspace { tabs, .. } => {
                 let sizes: Vec<Vec2> = tabs.iter().map(Snap::sub_size).collect();
-                let widest = sizes.iter().map(|s| s.x).fold(PART_W, f32::max);
-                let all = sizes.iter().map(|s| s.x).sum::<f32>() + GAP * sizes.len().saturating_sub(1) as f32;
-                all.min(1500.0f32.max(widest)).max(widest) + PAD * 2.0
+                squarish(&sizes) + PAD * 2.0
             }
             _ => self.rect[2],
         }
@@ -417,15 +487,60 @@ impl Item {
         out
     }
 
+    /// Every place a link can end at, the item itself first, the deeper
+    /// ones after the ones round them.
+    pub fn anchors(&self) -> Vec<Anchor> {
+        let mut out = vec![Anchor { at: At::default(), rect: self.rect(), rows: (0..self.row_count()).map(|i| self.row_y(i)).collect() }];
+        let parts: Option<Vec<&Part>> = match &self.kind {
+            Kind::Notebook { snap, .. } if !snap.alone() => Some(snap.parts.iter().collect()),
+            Kind::Workspace { .. } => Some(Vec::new()),
+            _ => None,
+        };
+        if parts.is_none() {
+            return out;
+        }
+        let ws = matches!(self.kind, Kind::Workspace { .. });
+        let inside = self.inside();
+        for (k, r) in &inside.subs {
+            out.push(Anchor { at: At { tab: Some(*k), ..Default::default() }, rect: *r, rows: Vec::new() });
+        }
+        for (k, j, r) in &inside.parts {
+            let part = match &self.kind {
+                Kind::Notebook { snap, .. } => &snap.parts[*j],
+                Kind::Workspace { tabs, .. } => &tabs[*k].parts[*j],
+                _ => continue,
+            };
+            let tab = ws.then_some(*k);
+            let rows = match &part.what {
+                What::Query { cols, .. } => rows_in(*r, cols.len()),
+                _ => Vec::new(),
+            };
+            out.push(Anchor { at: At { tab, part: Some(*j), table: None }, rect: *r, rows });
+            for (t, tr, n) in part_tables(part, *r) {
+                out.push(Anchor { at: At { tab, part: Some(*j), table: Some(t) }, rect: tr, rows: rows_in(tr, n) });
+            }
+        }
+        out
+    }
+
+    /// The deepest place at `p` (and the row there, if on one).
+    pub fn anchor_at(&self, p: Pos2) -> (At, Option<usize>) {
+        let all = self.anchors();
+        let a = all.iter().rev().find(|a| a.rect.contains(p)).unwrap_or(&all[0]);
+        let row = a.rows.iter().position(|y| (p.y - y).abs() <= ROW_H / 2.0);
+        (a.at, row)
+    }
+
+    /// A place's rect and its row's middle (None: no such place now).
+    pub fn anchor(&self, at: At, row: Option<usize>) -> Option<(Rect, Option<f32>)> {
+        let a = self.anchors().into_iter().find(|a| a.at == at)?;
+        let y = row.and_then(|r| a.rows.get(r).copied());
+        Some((a.rect, y))
+    }
+
     /// A field row's centre height (board units), for links.
     pub fn row_y(&self, i: usize) -> f32 {
         self.rect[1] + HEAD_H + ROW_H * (i as f32 + 0.5)
-    }
-
-    /// The field row at height `y`, if it's on one.
-    pub fn row_at(&self, y: f32) -> Option<usize> {
-        let k = ((y - self.rect[1] - HEAD_H) / ROW_H).floor();
-        (k >= 0.0 && (k as usize) < self.row_count()).then_some(k as usize)
     }
 
     /// Hit by a point (strokes: near their line).
@@ -593,24 +708,24 @@ impl Board {
     pub fn link_path(&self, l: &Link) -> Option<Vec<Pos2>> {
         let a = self.item(l.from)?;
         let b = self.item(l.to)?;
-        let (ra, rb) = (a.rect(), b.rect());
+        // (A place gone — a statement no longer there: the item itself.)
+        let (ra, ya) = a.anchor(l.from_at, l.from_field).or_else(|| a.anchor(At::default(), None))?;
+        let (rb, yb) = b.anchor(l.to_at, l.to_field).or_else(|| b.anchor(At::default(), None))?;
         let stacked = (ra.center().x - rb.center().x).abs() < (ra.width() + rb.width()) / 4.0;
         // Out to the right (+1) or the left (-1).
         let side = |r: Rect, other: Rect| if stacked || other.center().x >= r.center().x { 1.0 } else { -1.0 };
-        let fa = l.from_field.filter(|&f| f < a.row_count());
-        let fb = l.to_field.filter(|&f| f < b.row_count());
-        let end = |it: &Item, r: Rect, f: Option<usize>, other: Rect, toward: Pos2| -> (Pos2, Option<f32>) {
-            match f {
-                Some(f) => {
+        let end = |r: Rect, y: Option<f32>, other: Rect, toward: Pos2| -> (Pos2, Option<f32>) {
+            match y {
+                Some(y) => {
                     let s = side(r, other);
-                    (Pos2::new(if s > 0.0 { r.right() } else { r.left() }, it.row_y(f)), Some(s))
+                    (Pos2::new(if s > 0.0 { r.right() } else { r.left() }, y), Some(s))
                 }
                 None => (edge_point(r, toward), None),
             }
         };
-        let (pa, sa) = end(a, ra, fa, rb, rb.center());
-        let (pb, sb) = end(b, rb, fb, ra, pa);
-        let (pa, sa) = if fa.is_none() { end(a, ra, None, rb, pb) } else { (pa, sa) };
+        let (pa, sa) = end(ra, ya, rb, rb.center());
+        let (pb, sb) = end(rb, yb, ra, pa);
+        let (pa, sa) = if ya.is_none() { end(ra, None, rb, pb) } else { (pa, sa) };
         let mut v = vec![pa];
         if let Some(s) = sa {
             v.push(pa + Vec2::new(LINK_STUB * s, 0.0));
@@ -871,6 +986,8 @@ pub enum Lib {
 /// A tab's cells (a script's: one, its text): markdown or not, text.
 pub fn parts_of(cells: &[(bool, String)], d: Dialect, rels: &[Relation]) -> Vec<Part> {
     let mut out = Vec::new();
+    // Tables the script makes itself: known to the statements after.
+    let mut made: Vec<Relation> = Vec::new();
     for (k, (md, text)) in cells.iter().enumerate() {
         if *md {
             if !text.trim().is_empty() {
@@ -883,7 +1000,15 @@ pub fn parts_of(cells: &[(bool, String)], d: Dialect, rels: &[Relation]) -> Vec<
             if sql.is_empty() {
                 continue;
             }
-            out.push(Part { cell: k, sql: sql.to_string(), what: what_of(sql, d, rels), compact: false });
+            let what = what_of_in(sql, d, &[&made, rels]);
+            if let What::Change { verb, target, cols } | What::Insert { verb, target, cols, .. } = &what {
+                if verb == "CREATE TABLE" || verb == "CREATE VIEW" {
+                    let name = target.rsplit('.').next().unwrap_or(target);
+                    made.retain(|r| !r.name.eq_ignore_ascii_case(&unq(name)));
+                    made.push(Relation { name: unq(name), cols: cols.clone(), ..Default::default() });
+                }
+            }
+            out.push(Part { cell: k, sql: sql.to_string(), what, compact: false });
         }
     }
     out
@@ -896,7 +1021,12 @@ fn unq(s: &str) -> String {
 
 /// What a statement is, for drawing.
 pub fn what_of(sql: &str, d: Dialect, rels: &[Relation]) -> What {
-    use crate::sql::complete::{query_columns, scope};
+    what_of_in(sql, d, &[rels])
+}
+
+/// The same, its tables looked for in these lists (the first first).
+pub fn what_of_in(sql: &str, d: Dialect, rels: &[&[Relation]]) -> What {
+    use crate::sql::complete::{query_columns_in, scope};
     use crate::sql::lex::{self, Tk};
     let toks: Vec<lex::Tok> = lex::lex(sql, d).into_iter().filter(|t| !t.trivia()).collect();
     let up = |k: usize| toks.get(k).map_or(String::new(), |t| t.text(sql).to_ascii_uppercase());
@@ -955,7 +1085,8 @@ pub fn what_of(sql: &str, d: Dialect, rels: &[Relation]) -> What {
         let bare = unq(name.rsplit('.').next().unwrap_or(name));
         let schema = name.rsplit_once('.').map(|(s, _)| unq(s.rsplit('.').next().unwrap_or(s)));
         rels.iter()
-            .find(|r| r.name.eq_ignore_ascii_case(&bare) && schema.as_deref().is_none_or(|s| r.schema.eq_ignore_ascii_case(s)))
+            .flat_map(|l| l.iter())
+            .find(|r| r.name.eq_ignore_ascii_case(&bare) && (r.schema.is_empty() || schema.as_deref().is_none_or(|s| r.schema.eq_ignore_ascii_case(s))))
             .map(|r| r.cols.clone())
             .unwrap_or_default()
     };
@@ -979,7 +1110,7 @@ pub fn what_of(sql: &str, d: Dialect, rels: &[Relation]) -> What {
     let main = top_word(&["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]).map(|k| up(k));
     match up(0).as_str() {
         "SELECT" | "WITH" | "(" | "VALUES" | "TABLE" if !matches!(main.as_deref(), Some("INSERT" | "UPDATE" | "DELETE" | "MERGE")) => {
-            What::Query { title: tables_of(sql), cols: query_columns(sql, d, rels) }
+            What::Query { title: tables_of(sql), cols: query_columns_in(sql, d, rels) }
         }
         _ => {
             let verb = main.clone().filter(|_| up(0) == "WITH").unwrap_or_else(|| up(0));
@@ -1013,7 +1144,7 @@ pub fn what_of(sql: &str, d: Dialect, rels: &[Relation]) -> What {
                     let rest = toks.get(k).map_or("", |t| &sql[t.start..]);
                     let rest_up = up(k);
                     if matches!(rest_up.as_str(), "SELECT" | "WITH" | "(") {
-                        What::Insert { verb: "INSERT".into(), target, cols, source: Some((tables_of(rest), query_columns(rest, d, rels))), values: 0 }
+                        What::Insert { verb: "INSERT".into(), target, cols, source: Some((tables_of(rest), query_columns_in(rest, d, rels))), values: 0 }
                     } else {
                         // VALUES (…), (…): its rows.
                         let mut n = 0;
@@ -1041,11 +1172,15 @@ pub fn what_of(sql: &str, d: Dialect, rels: &[Relation]) -> What {
                     if up(k) == "IF" {
                         k += 3;
                     }
-                    let (target, k) = name_at(k);
+                    let (target, mut k) = name_at(k);
+                    // (ClickHouse: ON CLUSTER c before the columns.)
+                    if up(k) == "ON" && up(k + 1) == "CLUSTER" {
+                        k += 3;
+                    }
                     let kind = format!("CREATE {}", up(w));
                     if let Some(a) = top_word(&["AS"]).filter(|&a| a >= k) {
                         let q = toks.get(a + 1).map_or("", |t| &sql[t.start..]);
-                        let src = query_columns(q, d, rels);
+                        let src = query_columns_in(q, d, rels);
                         return What::Insert { verb: kind, target, cols: src.clone(), source: Some((tables_of(q), src)), values: 0 };
                     }
                     // Its columns as defined.
@@ -1138,10 +1273,10 @@ mod tests {
         assert_eq!(b.item(a).unwrap().rect[3], HEAD_H + 2.0 * ROW_H + 6.0);
         // A field's row by its height; a link from it leaves at the side facing the other.
         let it = b.item(c).unwrap();
-        assert_eq!(it.row_at(it.row_y(1)), Some(1));
-        assert_eq!(it.row_at(it.rect[1] + 2.0), None);
+        assert_eq!(it.anchor_at(Pos2::new(it.rect[0] + 5.0, it.row_y(1))), (At::default(), Some(1)));
+        assert_eq!(it.anchor_at(Pos2::new(it.rect[0] + 5.0, it.rect[1] + 2.0)), (At::default(), None));
         let id = b.take_id();
-        b.links.push(Link { id, from: c, to: a, from_field: Some(1), to_field: Some(0), label: String::new(), color: [0, 0, 0], style: LineStyle::default() });
+        b.links.push(Link { id, from: c, to: a, from_field: Some(1), to_field: Some(0), label: String::new(), color: [0, 0, 0], style: LineStyle::default(), from_at: At::default(), to_at: At::default() });
         let v = b.link_path(&b.links[0]).unwrap();
         let (p, q) = (v[0], *v.last().unwrap());
         assert_eq!(p.x, 400.0);
@@ -1205,6 +1340,12 @@ mod tests {
         assert!(matches!(what("delete from orders where id = 1", pg), What::Change { verb, .. } if verb == "DELETE"));
         assert!(matches!(what("declare\n  n number;\nbegin\n  null;\nend;", Dialect::Oracle), What::Code { .. }));
         assert!(matches!(what("do $$ begin perform 1; end $$", pg), What::Code { .. }));
+        assert!(matches!(what("CREATE TABLE db.t ON CLUSTER c (id UInt64, d Date) ENGINE = MergeTree ORDER BY id", Dialect::ClickHouse), What::Change { cols, .. } if cols.len() == 2));
+        // A table the script makes: its columns known further on.
+        let parts = parts_of(&[(false, "create table t (id int, name text);\ninsert into t select 1, 'a';\nupdate t set name = 'b';\nselect * from t;".into())], pg, &[]);
+        assert!(matches!(&parts[1].what, What::Insert { cols, .. } if cols.len() == 2), "{:?}", parts[1].what);
+        assert!(matches!(&parts[2].what, What::Change { cols, .. } if cols == &vec![("name".to_string(), "text".to_string())]), "{:?}", parts[2].what);
+        assert!(matches!(&parts[3].what, What::Query { cols, .. } if cols.len() == 2), "{:?}", parts[3].what);
         // A notebook's cells: markdown as notes, statements split.
         let parts = parts_of(&[(true, "# Hi".into()), (false, "select 1 a;\nselect 2 b;".into())], pg, &[]);
         assert_eq!(parts.len(), 3);
@@ -1260,6 +1401,18 @@ mod tests {
                 assert!(matches!(&snap.parts[1].what, What::Query { cols, .. } if cols.len() == 2));
             }
             k => panic!("{k:?}"),
+        }
+    }
+
+    #[test]
+    fn many_things_laid_out_squarish() {
+        let sql: String = (0..12).map(|i| format!("select {i} a, 2 b, 3 c;\n")).collect();
+        let snap = Snap { tab: "t".into(), title: "s".into(), cell: None, parts: parts_of(&[(false, sql)], Dialect::Postgres, &[]) };
+        for kind in [Kind::Notebook { snap: snap.clone(), note: String::new() }, Kind::Workspace { ws: "w".into(), name: "W".into(), tabs: vec![snap; 9], note: String::new() }] {
+            let mut it = Item { id: 0, rect: [0.0, 0.0, 10.0, 10.0], color: [0, 0, 0], kind };
+            it.rect[2] = it.natural_w();
+            let (w, h) = (it.rect[2], it.natural_h().unwrap());
+            assert!((0.7..2.4).contains(&(w / h)), "{w} × {h}");
         }
     }
 

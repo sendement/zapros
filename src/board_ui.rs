@@ -7,7 +7,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::app::App;
-use crate::board::{self, Backdrop, Board, Dash, Field, Item, Kind, LineStyle, Link, Part, Pattern, Shape, Snap, What, ARROW_W, CODE_LINE_H, HEAD_H, MAX_ROWS, NOTE_LINE_H, PAD, PART_W, ROW_H, SUB_HEAD};
+use crate::board::{self, At, Backdrop, Board, Dash, Field, Item, Kind, LineStyle, Link, Part, Pattern, Shape, Snap, What, CODE_LINE_H, HEAD_H, MAX_ROWS, NOTE_LINE_H, PAD, ROW_H, SUB_HEAD};
 use crate::config::Rgb;
 use crate::db::ObjKind;
 use crate::editor::rgb;
@@ -105,8 +105,8 @@ enum Gesture {
     Draw(Vec<[f32; 2]>),
     /// A frame or an entity being drawn: from, to.
     Make(Pos2, Pos2),
-    /// A link being drawn: from the item (and its field), to the pointer.
-    Link(u64, Option<usize>, Pos2),
+    /// A link being drawn: from the item (a place in it, its row), to the pointer.
+    Link(u64, board::At, Option<usize>, Pos2),
     /// Picking by a box.
     Band(Pos2, Pos2),
 }
@@ -130,16 +130,27 @@ pub struct State {
     edit_fresh: u8,
     gesture: Gesture,
     /// The main field of the properties gets the keys (next frame).
-    focus_prop: bool,
+    focus_prop: u8,
     /// The search in "Add → database object".
     pub find: String,
     /// The library on the left shown.
     pub lib: bool,
+    /// The properties' window: of what.
+    pub win: Option<Win>,
+    /// What the right-click menu is about.
+    menu: Option<Win>,
+}
+
+/// What the properties' window (or the right-click menu) is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Win {
+    Item(u64),
+    Link(u64),
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { tool: Tool::Select, color: crate::config::COLORS[0], width: 3.0, line: LineStyle::default(), sel: Vec::new(), sel_link: None, sub: None, edit: None, edit_fresh: 0, gesture: Gesture::None, focus_prop: false, find: String::new(), lib: true }
+        Self { tool: Tool::Select, color: crate::config::COLORS[0], width: 3.0, line: LineStyle::default(), sel: Vec::new(), sel_link: None, sub: None, edit: None, edit_fresh: 0, gesture: Gesture::None, focus_prop: 0, find: String::new(), lib: true, win: None, menu: None }
     }
 }
 
@@ -189,19 +200,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         ui.painter().vline(r.response.rect.right() - 3.0, r.response.rect.y_range(), stroke);
     }
-    if !app.board_ui.sel.is_empty() || app.board_ui.sel_link.is_some() {
-        let r = egui::Panel::right("board-props")
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 10, right: 0, top: 0, bottom: 0 }))
-            .show_separator_line(false)
-            .resizable(false)
-            .exact_size(300.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().id_salt("board-props").auto_shrink([false, false]).show(ui, |ui| props(app, ui, &mut open.board));
-            });
-        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-        ui.painter().vline(r.response.rect.left() + 3.0, r.response.rect.y_range(), stroke);
-    }
     canvas(app, ui, &mut open);
+    props_window(app, ui, &mut open.board);
     open.board.fit_heights();
     // A step when nothing's held or typed.
     let busy = !matches!(app.board_ui.gesture, Gesture::None) || ui.ctx().memory(|m| m.focused()).is_some_and(|f| ui.ctx().read_response(f).is_some_and(|r| r.changed()) || ui.input(|i| i.pointer.any_down()));
@@ -767,6 +767,7 @@ fn add_snap(app: &mut App, b: &mut Board, tab: &str, cell: Option<usize>, at: Po
 }
 
 /// A workspace put on the board at `at`.
+#[cfg(test)]
 pub fn put_ws(app: &mut App, b: &mut Board, ws: &str, at: Pos2) -> Option<u64> {
     add_workspace(app, b, ws, at, true)
 }
@@ -820,7 +821,8 @@ fn add_lib(app: &mut App, b: &mut Board, lib: &board::Lib, at: Pos2, exact: bool
         board::Lib::Entity => {
             let n = b.items.iter().filter(|i| matches!(i.kind, Kind::Entity { .. })).count() + 1;
             let id = b.add(Rect::from_center_size(at, Vec2::new(200.0, 80.0)), color, Kind::Entity { name: format!("{}{n}", t("таблица_", "table_")), fields: vec![Field { name: "id".into(), ty: "bigint".into(), key: true, note: String::new() }], note: String::new() });
-            st.focus_prop = true;
+            st.focus_prop = 3;
+            st.win = Some(Win::Item(id));
             Some(id)
         }
         board::Lib::Line(style) => {
@@ -1044,6 +1046,7 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
             st.sel.clear();
             st.sel_link = None;
             st.tool = Tool::Select;
+            st.win = None;
         }
         if all {
             st.sel = b.items.iter().map(|i| i.id).collect();
@@ -1112,8 +1115,11 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                 }
                 Tool::Rect | Tool::Ellipse | Tool::Diamond | Tool::Entity => Gesture::Make(w, w),
                 Tool::Brush => Gesture::Draw(vec![[w.x, w.y]]),
-                Tool::Arrow => match on {
-                    Some(id) => Gesture::Link(id, b.item(id).and_then(|it| it.row_at(w.y)), w),
+                Tool::Arrow => match on.and_then(|id| b.item(id)) {
+                    Some(it) => {
+                        let (at, row) = it.anchor_at(w);
+                        Gesture::Link(it.id, at, row, w)
+                    }
                     None => Gesture::Pan,
                 },
                 Tool::Text => Gesture::Pan,
@@ -1148,7 +1154,7 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                     }
                 }
             }
-            Gesture::Make(_, to) | Gesture::Link(_, _, to) | Gesture::Band(_, to) => {
+            Gesture::Make(_, to) | Gesture::Link(_, _, _, to) | Gesture::Band(_, to) => {
                 if let Some(w) = wp {
                     *to = w;
                 }
@@ -1170,10 +1176,15 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                     b.add(bb, st.color, Kind::Stroke { points: pts, width: st.width });
                 }
             }
-            Gesture::Link(from, field, to) => {
-                if let Some(target) = b.items.iter().rev().find(|i| i.id != from && i.hit(to, slack)).map(|i| (i.id, i.row_at(to.y))) {
+            Gesture::Link(from, from_at, field, to) => {
+                // To any place of any item (another place of the same one too).
+                let target = b.items.iter().rev().find(|i| i.hit(to, slack)).map(|i| {
+                    let (at, row) = i.anchor_at(to);
+                    (i.id, at, row)
+                });
+                if let Some((tid, to_at, to_field)) = target.filter(|t| *t != (from, from_at, field)) {
                     let id = b.take_id();
-                    b.links.push(Link { id, from, to: target.0, from_field: field, to_field: target.1, label: String::new(), color: st.color, style: st.line });
+                    b.links.push(Link { id, from, to: tid, from_field: field, to_field, label: String::new(), color: st.color, style: st.line, from_at, to_at });
                     st.sel.clear();
                     st.sel_link = Some(id);
                 }
@@ -1229,6 +1240,11 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                             st.sel_link = b.links.iter().find(|l| b.link_dist(l, w) <= slack + 2.0 / view.zoom).map(|l| l.id);
                         }
                     }
+                    // Something else picked: the window goes.
+                    let now = st.sel.first().map(|id| Win::Item(*id)).or(st.sel_link.map(Win::Link));
+                    if st.win.is_some() && st.win != now {
+                        st.win = None;
+                    }
                 }
                 Tool::Text => {
                     let id = b.add(Rect::from_min_size(w, Vec2::new(60.0, 20.0)), st.color, Kind::Text { text: String::new(), size: 18.0 });
@@ -1245,6 +1261,30 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
             }
         }
     }
+    // A right click: what's under the pointer picked, the menu about it.
+    if resp.secondary_clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let w = view.w(p);
+            st.menu = match b.hit(w, slack) {
+                Some(id) => {
+                    if !st.sel.contains(&id) {
+                        st.sel = vec![id];
+                    }
+                    st.sel_link = None;
+                    if let Some(it) = b.item(id) {
+                        st.sub = it.inside().parts.into_iter().find(|(_, _, r)| r.contains(w)).map(|(k, j, _)| (k, j));
+                    }
+                    Some(Win::Item(id))
+                }
+                None => {
+                    let l = b.links.iter().find(|l| b.link_dist(l, w) <= slack + 3.0 / view.zoom).map(|l| l.id);
+                    st.sel.clear();
+                    st.sel_link = l;
+                    l.map(Win::Link)
+                }
+            };
+        }
+    }
     if resp.double_clicked() && st.tool == Tool::Select {
         if let Some(p) = resp.interact_pointer_pos() {
             let w = view.w(p);
@@ -1253,15 +1293,12 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                     st.edit = Some(id);
                     st.edit_fresh = 3;
                 }
-                Some((_, Kind::Entity { .. } | Kind::Zone { .. } | Kind::Line { .. }, _)) => st.focus_prop = true,
-                Some((_, Kind::Object { conn, path, obj, name, .. }, _)) => open_object(app, &conn, &path, obj, &name),
-                Some((_, Kind::Notebook { snap, .. }, _)) => go_to_tab(app, &snap.tab),
-                Some((_, Kind::Workspace { tabs, .. }, inside)) => {
-                    if let Some((k, _)) = inside.subs.iter().find(|(_, r)| r.contains(w)) {
-                        go_to_tab(app, &tabs[*k].tab);
-                    }
+                // The rest: its window (the statement clicked in it shown).
+                Some((id, _, _)) => {
+                    st.win = Some(Win::Item(id));
+                    st.focus_prop = 3;
                 }
-                Some(_) => {}
+                None if st.sel_link.is_some() => st.win = st.sel_link.map(Win::Link),
                 None => {
                     // Writing right where it was double-clicked.
                     let id = b.add(Rect::from_min_size(w, Vec2::new(60.0, 20.0)), st.color, Kind::Text { text: String::new(), size: 18.0 });
@@ -1351,14 +1388,11 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
         Gesture::Draw(pts) => {
             painter.add(egui::Shape::line(pts.iter().map(|p| view.s(Pos2::new(p[0], p[1]))).collect(), Stroke::new(st.width * view.zoom, c)));
         }
-        Gesture::Link(from, field, to) => {
-            if let Some(it) = b.item(*from) {
-                let start = match field {
-                    Some(f) => {
-                        let r = it.rect();
-                        Pos2::new(if to.x >= r.center().x { r.right() } else { r.left() }, it.row_y(*f))
-                    }
-                    None => board::edge_point(it.rect(), *to),
+        Gesture::Link(from, at, field, to) => {
+            if let Some((r, y)) = b.item(*from).and_then(|it| it.anchor(*at, *field)) {
+                let start = match y {
+                    Some(y) => Pos2::new(if to.x >= r.center().x { r.right() } else { r.left() }, y),
+                    None => board::edge_point(r, *to),
                 };
                 styled_line(&painter, &[view.s(start), view.s(*to)], Stroke::new(st.line.width, c), &st.line, view.zoom);
             }
@@ -1374,11 +1408,15 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
     if st.tool == Tool::Arrow {
         if let Some(w) = wp {
             if let Some(it) = b.hit(w, slack).and_then(|id| b.item(id)) {
-                let r = match it.row_at(w.y) {
-                    Some(k) => Rect::from_min_size(Pos2::new(it.rect[0], it.row_y(k) - ROW_H / 2.0), Vec2::new(it.rect[2], ROW_H)),
-                    None => it.rect(),
-                };
-                painter.rect_filled(view.rect(r), 3.0, accent.gamma_multiply(0.15));
+                let (at, row) = it.anchor_at(w);
+                if let Some((r, y)) = it.anchor(at, row) {
+                    let r = match y {
+                        Some(y) => Rect::from_min_size(Pos2::new(r.left(), y - ROW_H / 2.0), Vec2::new(r.width(), ROW_H)),
+                        None => r,
+                    };
+                    painter.rect_filled(view.rect(r), 3.0, accent.gamma_multiply(0.15));
+                    painter.rect_stroke(view.rect(r), 3.0, Stroke::new(1.0, accent.gamma_multiply(0.6)), egui::StrokeKind::Middle);
+                }
             }
         }
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -1423,6 +1461,172 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
         }
     }
     finish(open, view);
+    resp.context_menu(|ui| canvas_menu(app, ui, open));
+}
+
+/// The right-click menu: about what was under the pointer (or the board).
+fn canvas_menu(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
+    let b = &mut open.board;
+    let st = &mut app.board_ui;
+    let menu = st.menu;
+    let multi = st.sel.len() > 1;
+    let mut act = None;
+    match menu {
+        Some(Win::Item(id)) => {
+            let kind = b.item(id).map(|i| i.kind.clone());
+            if !multi && ui.button(t("Свойства…", "Properties…")).clicked() {
+                act = Some("props");
+            }
+            match &kind {
+                Some(Kind::Object { .. }) if ui.button(t("Открыть объект", "Open the object")).clicked() => act = Some("open"),
+                Some(Kind::Notebook { .. } | Kind::Workspace { .. }) => {
+                    if ui.button(t("Перейти к вкладке", "Go to the tab")).clicked() {
+                        act = Some("open");
+                    }
+                    if ui.button(t("Обновить из вкладок", "Refresh from the tabs")).clicked() {
+                        act = Some("refresh");
+                    }
+                }
+                Some(Kind::Frame { .. } | Kind::Text { .. }) if !multi && ui.button(t("Править текст", "Edit the text")).clicked() => act = Some("edit"),
+                _ => {}
+            }
+            ui.separator();
+            if ui.button(t("Копия (Ctrl+D)", "Duplicate (Ctrl+D)")).clicked() {
+                act = Some("dup");
+            }
+            if ui.button(t("Наверх", "To front")).clicked() {
+                act = Some("front");
+            }
+            if ui.button(t("Вниз", "To back")).clicked() {
+                act = Some("back");
+            }
+            if ui.button(t("Удалить (Delete)", "Delete (Delete)")).clicked() {
+                act = Some("del");
+            }
+        }
+        Some(Win::Link(_)) => {
+            if ui.button(t("Свойства…", "Properties…")).clicked() {
+                act = Some("props");
+            }
+            if ui.button(t("Развернуть", "Reverse")).clicked() {
+                act = Some("reverse");
+            }
+            if ui.button(t("Удалить", "Delete")).clicked() {
+                act = Some("del");
+            }
+        }
+        None => {
+            if ui.button(t("Показать всё", "Show everything")).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("board-fit"), true));
+                ui.close();
+            }
+            if ui.button(if st.lib { t("Скрыть библиотеку", "Hide the library") } else { t("Показать библиотеку", "Show the library") }).clicked() {
+                st.lib = !st.lib;
+                ui.close();
+            }
+        }
+    }
+    let Some(act) = act else { return };
+    ui.close();
+    match (act, menu) {
+        ("props", Some(w)) => {
+            st.win = Some(w);
+            st.focus_prop = 3;
+        }
+        ("edit", Some(Win::Item(id))) => {
+            st.edit = Some(id);
+            st.edit_fresh = 3;
+        }
+        ("open", Some(Win::Item(id))) => match b.item(id).map(|i| i.kind.clone()) {
+            Some(Kind::Object { conn, path, obj, name, .. }) => open_object(app, &conn, &path, obj, &name),
+            Some(Kind::Notebook { snap, .. }) => go_to_tab(app, &snap.tab),
+            Some(Kind::Workspace { tabs, .. }) => {
+                let k = st.sub.map_or(0, |s| s.0);
+                if let Some(s) = tabs.get(k) {
+                    go_to_tab(app, &s.tab);
+                }
+            }
+            _ => {}
+        },
+        ("refresh", Some(Win::Item(id))) => refresh_item(app, b, id),
+        ("dup", _) => {
+            let copies: Vec<Item> = b.items.iter().filter(|i| st.sel.contains(&i.id)).cloned().collect();
+            st.sel.clear();
+            for mut c in copies {
+                c.id = b.take_id();
+                c.shift(Vec2::splat(24.0));
+                st.sel.push(c.id);
+                b.items.push(c);
+            }
+        }
+        ("front", Some(Win::Item(_))) => {
+            let (top, rest): (Vec<Item>, Vec<Item>) = b.items.drain(..).partition(|i| st.sel.contains(&i.id));
+            b.items = rest;
+            b.items.extend(top);
+        }
+        ("back", Some(Win::Item(_))) => {
+            let (low, rest): (Vec<Item>, Vec<Item>) = b.items.drain(..).partition(|i| st.sel.contains(&i.id));
+            b.items = low;
+            b.items.extend(rest);
+        }
+        ("del", Some(Win::Item(_))) => {
+            b.remove(&st.sel.clone());
+            st.sel.clear();
+            st.win = None;
+        }
+        ("del", Some(Win::Link(id))) => {
+            b.links.retain(|l| l.id != id);
+            st.sel_link = None;
+            st.win = None;
+        }
+        ("reverse", Some(Win::Link(id))) => {
+            if let Some(l) = b.links.iter_mut().find(|l| l.id == id) {
+                std::mem::swap(&mut l.from, &mut l.to);
+                std::mem::swap(&mut l.from_field, &mut l.to_field);
+                std::mem::swap(&mut l.from_at, &mut l.to_at);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The properties' window: in the canvas' middle, over it, till closed.
+fn props_window(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
+    let Some(win) = app.board_ui.win else { return };
+    let gone = match win {
+        Win::Item(id) => b.item(id).is_none(),
+        Win::Link(id) => !b.links.iter().any(|l| l.id == id),
+    };
+    if gone {
+        app.board_ui.win = None;
+        return;
+    }
+    let canvas: Rect = ui.ctx().data(|d| d.get_temp(egui::Id::new("board-canvas"))).unwrap_or(ui.max_rect());
+    let mut shown = true;
+    let mut done = false;
+    egui::Window::new(t("Свойства", "Properties"))
+        .id(egui::Id::new("board-props-win"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(420.0)
+        .default_height(canvas.height() * 0.7)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(canvas.center())
+        .open(&mut shown)
+        .show(ui.ctx(), |ui| {
+            egui::ScrollArea::vertical().id_salt("board-props").max_height(canvas.height() * 0.75).show(ui, |ui| props(app, ui, b, win));
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(t("Готово", "Done")).clicked() {
+                    done = true;
+                }
+                ui.label(RichText::new(t("Esc — закрыть", "Esc: close")).small().weak());
+            });
+        });
+    let esc = ui.ctx().memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if !shown || done || esc {
+        app.board_ui.win = None;
+    }
 }
 
 fn part_mut(it: &mut Item, k: usize, j: usize) -> Option<&mut Part> {
@@ -1460,7 +1664,10 @@ fn make(b: &mut Board, st: &mut State, r: Rect, at: Pos2) -> u64 {
             id
         }
     };
-    st.focus_prop = st.tool == Tool::Entity;
+    if st.tool == Tool::Entity {
+        st.focus_prop = 3;
+        st.win = Some(Win::Item(id));
+    }
     st.tool = Tool::Select;
     id
 }
@@ -1627,10 +1834,9 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
             if legible {
                 p.text(r.min + Vec2::new(10.0 * z, SUB_HEAD * z / 2.0), Align2::LEFT_CENTER, format!("{verb} → {target}"), FontId::monospace(11.5 * z), col.strong);
             }
-            let top = r.top() + (SUB_HEAD + PAD) * z;
-            let from_h = source.as_ref().map_or(HEAD_H + ROW_H + 6.0, |(_, c)| board::table_h(c.len()));
-            let from = Rect::from_min_size(Pos2::new(r.left() + PAD * z, top), Vec2::new(PART_W, from_h) * z);
-            let into = Rect::from_min_size(Pos2::new(from.right() + ARROW_W * z, top), Vec2::new(PART_W, board::table_h(cols.len())) * z);
+            let tables = scheme_tables(part, r, z);
+            let (from, into) = (tables[0], tables[1]);
+            let top = from.top();
             match source {
                 Some((st, sc)) => table_card(p, ui, from, z, c, st, None, &rows_of(sc), "", col),
                 None => {
@@ -1652,14 +1858,13 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
             if legible {
                 p.text(r.min + Vec2::new(10.0 * z, SUB_HEAD * z / 2.0), Align2::LEFT_CENTER, format!("{verb} {target}"), FontId::monospace(11.5 * z), col.strong);
             }
-            let top = r.top() + (SUB_HEAD + PAD) * z;
-            let bx = Rect::from_min_size(Pos2::new(r.left() + PAD * z, top), Vec2::new(PART_W * 0.6, 56.0) * z);
+            let tables = scheme_tables(part, r, z);
+            let (bx, into) = (tables[0], tables[1]);
             p.rect_filled(bx, 6.0 * z, c.gamma_multiply(0.22));
             p.rect_stroke(bx, 6.0 * z, Stroke::new(1.2, c), egui::StrokeKind::Middle);
             if legible {
                 p.text(bx.center(), Align2::CENTER_CENTER, verb, FontId::proportional(12.5 * z), col.strong);
             }
-            let into = Rect::from_min_size(Pos2::new(bx.right() + ARROW_W * z, top), Vec2::new(PART_W, board::table_h(cols.len())) * z);
             table_card(p, ui, into, z, c, target, Some(ObjKind::Table), &rows_of(cols), "", col);
             arrow(p, Pos2::new(bx.right() + 4.0 * z, bx.center().y), Pos2::new(into.left() - 4.0 * z, bx.center().y), Stroke::new((1.8 * z).clamp(1.0, 3.0), c), (5.0 * z).clamp(3.0, 8.0));
         }
@@ -1691,6 +1896,11 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
     if picked {
         p.rect_stroke(r.expand(2.0), 6.0, Stroke::new(1.5, accent.gamma_multiply(0.8)), egui::StrokeKind::Middle);
     }
+}
+
+/// A scheme's tables on screen (the same places links end at).
+fn scheme_tables(part: &Part, r: Rect, z: f32) -> Vec<Rect> {
+    board::part_tables(part, Rect::from_min_size(Pos2::ZERO, r.size() / z)).into_iter().map(|(_, t, _)| Rect::from_min_size(r.min + t.min.to_vec2() * z, t.size() * z)).collect()
 }
 
 fn fold_button_screen(r: Rect, z: f32) -> Rect {
@@ -1846,11 +2056,11 @@ fn parts_props(ui: &mut egui::Ui, parts: &mut [Part], picked: Option<usize>, sal
 }
 
 /// What's picked, set up: its text, colour, fields, note…
-fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
+fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board, win: Win) {
     let st = &mut app.board_ui;
-    if let Some(lid) = st.sel_link {
+    if let Win::Link(lid) = win {
         let Some(l) = b.links.iter_mut().find(|l| l.id == lid) else {
-            st.sel_link = None;
+            st.win = None;
             return;
         };
         ui.label(RichText::new(t("Связь", "Link")).strong());
@@ -1860,6 +2070,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
         if ui.button(t("Развернуть", "Reverse")).clicked() {
             std::mem::swap(&mut l.from, &mut l.to);
             std::mem::swap(&mut l.from_field, &mut l.to_field);
+            std::mem::swap(&mut l.from_at, &mut l.to_at);
         }
         ui.add_space(6.0);
         if ui.add(crate::ui::tinted(t("Удалить связь", "Delete the link").into(), crate::ui::RED)).clicked() {
@@ -1868,21 +2079,14 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
         }
         return;
     }
-    if st.sel.len() > 1 {
-        ui.label(RichText::new(format!("{}: {}", t("Выбрано", "Picked"), st.sel.len())).strong());
-        ui.label(RichText::new(t("Цвет — кружками сверху, Ctrl+D — копия, Delete — удалить", "Colour: the dots above; Ctrl+D: a copy; Delete: delete")).weak().small());
-        if ui.add(crate::ui::tinted(t("Удалить", "Delete").into(), crate::ui::RED)).clicked() {
-            b.remove(&st.sel.clone());
-            st.sel.clear();
-        }
-        return;
-    }
-    let Some(&id) = st.sel.first() else { return };
+    let Win::Item(id) = win else { return };
     let Some(pos) = b.items.iter().position(|i| i.id == id) else {
-        st.sel.clear();
+        st.win = None;
         return;
     };
-    let focus = std::mem::take(&mut st.focus_prop);
+    // (Asked for a few frames: the click that opened it lets go meanwhile.)
+    let focus = st.focus_prop > 0;
+    st.focus_prop = st.focus_prop.saturating_sub(1);
     let sub = st.sub;
     let mut open_obj = None;
     let mut go_tab = None;
@@ -1901,14 +2105,14 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 ui.checkbox(fill, t("С заливкой", "Filled"));
                 ui.label(t("Текст", "Text"));
                 let r = ui.add(egui::TextEdit::multiline(text).desired_rows(4).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
             }
             Kind::Text { text, size } => {
                 ui.label(RichText::new(t("Текст", "Text")).strong());
                 let r = ui.add(egui::TextEdit::multiline(text).desired_rows(4).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 ui.horizontal(|ui| {
@@ -1928,7 +2132,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 ui.label(RichText::new(t("Концы тянутся мышью", "Drag its ends with the mouse")).small().weak());
                 ui.label(t("Подпись", "Label"));
                 let r = ui.add(egui::TextEdit::singleline(label).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 style_props(ui, style);
@@ -1937,7 +2141,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 ui.label(RichText::new(t("Зона", "Zone")).strong());
                 ui.label(RichText::new(t("Фон под остальным: берётся за заголовок или край", "A background under the rest: grab it by its title or edge")).small().weak());
                 let r = ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 egui::ComboBox::from_id_salt("board-pattern").selected_text(pattern_name(*pat)).show_ui(ui, |ui| {
@@ -1949,7 +2153,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
             Kind::Entity { name, fields, note } => {
                 ui.label(RichText::new(t("Таблица-сущность", "Table entity")).strong());
                 let r = ui.add(egui::TextEdit::singleline(name).hint_text(t("имя", "name")).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 ui.add_space(4.0);
@@ -1986,8 +2190,8 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 // Links to fields follow their rows.
                 if let Some(k) = drop {
                     for l in b.links.iter_mut() {
-                        for (end, f) in [(l.from, &mut l.from_field), (l.to, &mut l.to_field)] {
-                            if end == id {
+                        for (end, at, f) in [(l.from, l.from_at, &mut l.from_field), (l.to, l.to_at, &mut l.to_field)] {
+                            if end == id && at == At::default() {
                                 *f = match *f {
                                     Some(x) if x == k => None,
                                     Some(x) if x > k => Some(x - 1),
@@ -1998,8 +2202,8 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                     }
                 } else if let Some(k) = up {
                     for l in b.links.iter_mut() {
-                        for (end, f) in [(l.from, &mut l.from_field), (l.to, &mut l.to_field)] {
-                            if end == id {
+                        for (end, at, f) in [(l.from, l.from_at, &mut l.from_field), (l.to, l.to_at, &mut l.to_field)] {
+                            if end == id && at == At::default() {
                                 *f = match *f {
                                     Some(x) if x == k => Some(k - 1),
                                     Some(x) if x == k - 1 => Some(k),
@@ -2032,7 +2236,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 ui.add_space(4.0);
                 ui.label(t("Заметка", "Note"));
                 let r = ui.add(egui::TextEdit::multiline(note).desired_rows(4).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
             }
@@ -2048,7 +2252,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 });
                 ui.label(t("Заметка", "Note"));
                 let r = ui.add(egui::TextEdit::multiline(note).desired_rows(3).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 ui.add_space(6.0);
@@ -2061,7 +2265,7 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board) {
                 }
                 ui.label(t("Заметка", "Note"));
                 let r = ui.add(egui::TextEdit::multiline(note).desired_rows(3).desired_width(f32::INFINITY));
-                if focus {
+                if focus && !r.has_focus() {
                     r.request_focus();
                 }
                 ui.add_space(6.0);

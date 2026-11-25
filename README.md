@@ -321,12 +321,19 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   CREATE TABLE as an arrow to the table (the columns set or defined), a
   DECLARE / BEGIN block or a routine's code in full, folded to its first
   line by its ▾; several statements: a frame of them. A workspace is a
-  frame round its tabs' frames. Click a statement: its script shows on
-  the right; "Refresh" takes the tabs as they are now.
+  frame round its tabs' frames; frames are laid out about square, not in
+  a long ribbon. A table the script creates is known to the statements
+  after it (their INSERT / UPDATE / SELECT show its columns).
+  A click picks; a double click (or "Properties…" in the right-click
+  menu) opens a window in the middle with what it holds — a statement's
+  script, a table's fields, a link's look — and "Refresh" to take the
+  tabs as they are now. The right-click menu also opens the object or
+  goes to the tab, duplicates, moves to front / back, deletes.
   Frames with text typed right in them, free text, a brush; table
-  entities with their fields (keys, types) and a note; arrows between
-  items and between fields (a query's columns too), with a label and
-  their own look. Drag empty space or the middle button to pan,
+  entities with their fields (keys, types) and a note; arrows from and
+  to anything at any depth: an item, a workspace's tab, a statement in
+  it, a table of a statement's scheme, any of their fields — with a
+  label and their own look. Drag empty space or the middle button to pan,
   Ctrl+wheel to zoom, Shift+drag to pick by a box, Ctrl+Z /
   Ctrl+Shift+Z, Ctrl+D a copy, Delete; tools by keys V R O D T B E A.
 - **SQLite triggers** (`CREATE TRIGGER … BEGIN …; END;`) run and split

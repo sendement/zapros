@@ -3389,6 +3389,9 @@ fn boards_drawn_linked_and_filled() {
     key(&mut h, egui::Key::A, egui::Modifiers::COMMAND);
     type_text(&mut h, "customers");
     settle(&mut h);
+    // (Its window, opened as it was made, closed.)
+    h.get_by_label("Готово").click();
+    settle(&mut h);
     h.get_by_label_contains("Таблица-сущность (E)").click();
     settle(&mut h);
     click_at(&mut h, canvas.min + egui::vec2(340.0, 260.0), egui::PointerButton::Primary);
@@ -3396,6 +3399,8 @@ fn boards_drawn_linked_and_filled() {
     h.get_by_label_contains("Поле").click();
     settle(&mut h);
     shot(&mut h, "board-entity");
+    h.get_by_label("Готово").click();
+    settle(&mut h);
     let b = board(&h);
     let (a, c) = (b.items[1].clone(), b.items[2].clone());
     assert!(matches!(&a.kind, B::Entity { name, .. } if name == "customers"), "{:?}", a.kind);
@@ -3444,8 +3449,37 @@ fn boards_drawn_linked_and_filled() {
     click_at(&mut h, p, egui::PointerButton::Primary);
     settle(&mut h);
     assert_eq!(h.state().board_ui.sub, Some((0, 2)));
+    assert!(h.state().board_ui.win.is_none(), "a click only picks");
+    // A double click: the window, the statement's script in it.
+    // (Past the earlier clicks' time: else a triple click.)
+    for _ in 0..50 {
+        h.step();
+    }
+    click_at(&mut h, p, egui::PointerButton::Primary);
+    click_at(&mut h, p, egui::PointerButton::Primary);
+    settle(&mut h);
+    assert!(h.state().board_ui.win.is_some());
     // (Its name on top, its script open under it, then the list.)
     assert!(h.query_all_by_label("UPDATE orders").count() >= 2, "the statement picked in the properties");
+    h.get_by_label("Готово").click();
+    settle(&mut h);
+    // A link from a field of a table inside the UPDATE's scheme to the
+    // orders table on the board.
+    let nb = board(&h).items.iter().find(|i| i.id == nb.id).unwrap().clone();
+    let obj_id = board(&h).items.iter().find(|i| matches!(i.kind, B::Object { .. })).unwrap().id;
+    let deep = nb.anchors().into_iter().find(|a| a.at == crate::board::At { tab: None, part: Some(2), table: Some(1) }).expect("the UPDATE's table");
+    let from = at(&h, egui::pos2(deep.rect.center().x, deep.rows[0]));
+    let obj = board(&h).item(obj_id).unwrap().clone();
+    let to = at(&h, egui::pos2(obj.rect[0] + 20.0, obj.row_y(0)));
+    h.get_by_label_contains("Связь (A)").click();
+    settle(&mut h);
+    drag_to(&mut h, from, to, 10);
+    settle(&mut h);
+    let l = board(&h).links.last().unwrap().clone();
+    assert_eq!((l.from, l.from_at, l.from_field, l.to, l.to_at, l.to_field), (nb.id, deep.at, Some(0), obj_id, crate::board::At::default(), Some(0)), "{l:?}");
+    assert!(board(&h).link_path(&l).is_some());
+    h.get_by_label_contains("Выбор и перемещение").click();
+    settle(&mut h);
     // From the library: a whole workspace, a sticky note, a dashed line.
     let ws = h.query_all_by_label("Отчёты").map(|n| n.rect()).find(|r| r.right() < canvas.min.x && r.top() > canvas.top()).expect("the workspace in the library").center();
     drag_to(&mut h, ws, canvas.min + egui::vec2(200.0, 520.0), 12);
