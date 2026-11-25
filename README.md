@@ -284,6 +284,10 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   OUT and defaults (PostgreSQL functions and procedures, Oracle's with
   packages'). What the place suggests goes first in the list. A subquery's
   or CTE's columns go in as they're written there (no quotes added).
+  Names get quotes only where the database needs them (`system.query_log`,
+  a `type` or `comment` column go in bare). Without a connection (not
+  connected yet, offline, after a restart) hints go on with the tables and
+  routines last loaded, kept on disk per connection.
 - **The likely next words, dimmed** after the cursor until you type
   something else; Tab takes them: after `GROUP BY` the SELECT's
   expressions not grouped yet, after `ORDER BY` its next alias, after
@@ -320,7 +324,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   selected ones.
 - **Formatted as pasted** (a setting, off at first): pasted code, or a
   selection put in brackets, and the statements it lands in are laid out
-  at once.
+  at once. Brackets a paste leaves open (`count(`) are closed after it,
+  unless the statement closes them further on. Ctrl+Z first takes back
+  the tidying, the next one the paste itself.
 - The text **follows the caret** moved by the keys (in notebook cells
   too), and the wheel while selecting scrolls at its full speed.
 - **Parameters**: a statement with `:name` or `&name` (`&&name`) asks for
@@ -389,7 +395,10 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   columns; typing, Backspace / Delete, paste (a line each when the counts
   match) act on every line of it, Ctrl+C / Ctrl+X take its columns; Esc,
   a move or a plain click end it. The wheel scrolls while a selection is
-  being dragged.
+  being dragged. A block past the lines' ends sticks to them as you type:
+  the text goes right after each line's own (its trailing spaces gone,
+  blank lines left alone), handy for closing quotes or brackets on many
+  lines; the first Ctrl+Z gives the column back as it was padded.
 - **Right-click menu** in the editor: run, explain, cut / copy / paste,
   select all, format, comment, duplicate, upper / lower case.
 - **Charts**: a result switches between Table and Chart. One column goes

@@ -1191,8 +1191,7 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         let conn = app.tab_conn(&ws, app.tab());
         let dialect = app.dialect_of(conn.as_deref());
         let dark = ui.visuals().dark_mode;
-        let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
-        let routines = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.routines.clone()).unwrap_or_default();
+        let crate::app::Hints { rels, routines } = app.hints_of(conn.as_deref());
         // Being typed in another window: shown as it goes, not changed here.
         let held = app.sync.held_elsewhere(&tab_id);
         if held && held_bar(ui) {

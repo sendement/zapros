@@ -751,19 +751,34 @@ fn reserved(name: &str, d: Dialect) -> bool {
         "ONLY", "OR", "ORDER", "OUTER", "OVERLAPS", "PLACING", "PRIMARY", "REFERENCES", "RETURNING", "RIGHT", "SELECT", "SESSION_USER", "SIMILAR", "SOME", "SYMMETRIC", "SYSTEM_USER", "TABLE", "TABLESAMPLE", "THEN", "TO", "TRAILING", "TRUE", "UNION",
         "UNIQUE", "USER", "USING", "VARIADIC", "VERBOSE", "WHEN", "WHERE", "WINDOW", "WITH",
     ];
+    // ClickHouse takes nearly any word as a name; not these, where a
+    // clause or an expression would be read instead.
+    const CH: &[&str] = &[
+        "ALL", "AND", "ANY", "AS", "ASC", "BETWEEN", "BY", "CASE", "CAST", "DESC", "DISTINCT", "ELSE", "END", "EXCEPT", "FALSE", "FINAL", "FROM", "GLOBAL", "GROUP", "HAVING", "IN", "INDEX", "INTERSECT", "INTO", "IS", "JOIN", "LIKE",
+        "ILIKE", "LIMIT", "NOT", "NULL", "OFFSET", "ON", "OR", "ORDER", "PREWHERE", "PRIMARY", "PROJECTION", "CONSTRAINT", "SAMPLE", "SELECT", "SETTINGS", "THEN", "TRUE", "UNION", "USING", "WHEN", "WHERE", "WITH",
+    ];
+    // SQLite's words, so far as they'd clash as names.
+    const LITE: &[&str] = &[
+        "ADD", "ALL", "ALTER", "AND", "AS", "AUTOINCREMENT", "BETWEEN", "CASE", "CHECK", "COLLATE", "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "DEFAULT", "DEFERRABLE", "DELETE", "DISTINCT", "DROP", "ELSE", "ESCAPE", "EXCEPT", "EXISTS",
+        "FOREIGN", "FROM", "GROUP", "HAVING", "IN", "INDEX", "INNER", "INSERT", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "LEFT", "LIMIT", "NATURAL", "NOT", "NOTNULL", "NULL", "ON", "OR", "ORDER", "OUTER", "PRIMARY", "REFERENCES",
+        "RIGHT", "SELECT", "SET", "TABLE", "THEN", "TO", "TRANSACTION", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "WHEN", "WHERE",
+    ];
     let up = name.to_ascii_uppercase();
     match d {
         Dialect::Oracle => ORA.contains(&up.as_str()),
         Dialect::Postgres => PG.contains(&up.as_str()),
-        Dialect::Sqlite | Dialect::Generic => PG.contains(&up.as_str()) || ORA.contains(&up.as_str()),
-        Dialect::ClickHouse => false,
+        Dialect::Sqlite => LITE.contains(&up.as_str()),
+        Dialect::Generic => PG.contains(&up.as_str()) || ORA.contains(&up.as_str()),
+        Dialect::ClickHouse => CH.contains(&up.as_str()),
     }
 }
 
 /// A name as it must be written (quoted when it'd fold or clash).
 pub fn quote(name: &str, d: Dialect) -> String {
-    // (ClickHouse's own database `default` reads fine bare.)
-    let keyword = (super::is_keyword(name, d) || reserved(name, d)) && !(d == Dialect::ClickHouse && name == "default");
+    // (Only words the database won't take bare: the highlighter's
+    // keywords — TYPE, COMMENT, KEY, ClickHouse's SYSTEM, QUERY… — make
+    // fine names.)
+    let keyword = reserved(name, d);
     // `$` (and Oracle's `#`) go bare after the first letter where the
     // database takes them so.
     let also = |c: char| match d {
@@ -1241,6 +1256,13 @@ mod bare_tests {
         assert_eq!(bare_names("CREATE TABLE default.t (`id` UInt64, `my col` String, `default` Int8)", Dialect::ClickHouse), "CREATE TABLE default.t (id UInt64, `my col` String, `default` Int8)");
         assert_eq!(bare_names("select \"order_id\", \"Total\", 'a \"b\"' from \"x$y\"", Dialect::Postgres), "select order_id, \"Total\", 'a \"b\"' from x$y");
         assert_eq!(quote("x$", Dialect::ClickHouse), "`x$`");
+        // The highlighter's words that make fine names stay bare.
+        for (n, d) in [("system", Dialect::ClickHouse), ("query", Dialect::ClickHouse), ("type", Dialect::ClickHouse), ("default", Dialect::ClickHouse), ("type", Dialect::Postgres), ("comment", Dialect::Postgres), ("key", Dialect::Postgres), ("date", Dialect::Sqlite), ("TYPE", Dialect::Oracle), ("NAME", Dialect::Oracle)] {
+            assert_eq!(quote(n, d), n, "{d:?}");
+        }
+        for (n, d, q) in [("order", Dialect::ClickHouse, "`order`"), ("user", Dialect::Postgres, "\"user\""), ("LEVEL", Dialect::Oracle, "\"LEVEL\""), ("group", Dialect::Sqlite, "\"group\"")] {
+            assert_eq!(quote(n, d), q);
+        }
         assert_eq!(quote("$x", Dialect::Postgres), "\"$x\"");
     }
 }

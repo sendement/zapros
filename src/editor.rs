@@ -648,8 +648,7 @@ fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text:
     let (l0, l1) = b.lines();
     let (c0, c1) = b.cols();
     // The text's caret at the block's head (no selection of its own).
-    let hl = b.head.0.min(sp.len() - 1);
-    let at = sp[hl].0 + block::byte_at(&text[sp[hl].0..sp[hl].1], b.head.1);
+    let at = block::caret(text, &b);
     if output.cursor_range.is_none_or(|r| r.primary != r.secondary || byte_of(text, r.primary.index.0) != at) {
         set_cursor(ctx, id, text, at, at);
         ctx.request_repaint();
@@ -670,9 +669,20 @@ fn block_mouse_and_paint(ui: &egui::Ui, ctx: &egui::Context, id: egui::Id, text:
         }
     }
     ui.painter().set(under, egui::Shape::Vec(shapes));
+    let stroke = ui.visuals().text_cursor.stroke;
+    // Stuck to the lines' ends: a caret at each.
+    if b.tail {
+        for (l, c) in block::tail_spots(text, &b) {
+            let r = row(l);
+            if r.height() > 0.5 {
+                ui.painter().line_segment([egui::pos2(x(c), r.top()), egui::pos2(x(c), r.bottom())], egui::Stroke::new(stroke.width.max(1.5), stroke.color));
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        return;
+    }
     // A caret as tall as the block, where typing goes.
     let (top, bottom) = (row(l0).top(), row(l1).bottom());
-    let stroke = ui.visuals().text_cursor.stroke;
     let cx = if b.head.1 == c1 { x(c1) } else { x(c0) };
     ui.painter().line_segment([egui::pos2(cx, top), egui::pos2(cx, bottom)], egui::Stroke::new(stroke.width.max(1.5), stroke.color));
     ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -927,6 +937,57 @@ fn set_cursor(ctx: &egui::Context, id: egui::Id, text: &str, a: usize, b: usize)
     st.store(ctx, id);
 }
 
+/// An undo point of the editor's own (egui's undo keeps one only once
+/// the text stood still a second): `text` with this selection (anchor,
+/// caret; None: the one egui has).
+fn undo_point(ctx: &egui::Context, id: egui::Id, text: &str, sel: Option<(usize, usize)>) {
+    let mut s = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    let r = match sel {
+        Some((a, b)) => CCursorRange::two(CCursor::new(char_of(text, b)), CCursor::new(char_of(text, a))),
+        None => s.cursor.char_range().unwrap_or_else(|| CCursorRange::one(CCursor::new(text.chars().count()))),
+    };
+    let mut u = s.undoer();
+    u.add_undo(&(r, text.to_string()));
+    s.set_undoer(u);
+    s.store(ctx, id);
+}
+
+/// What closes the brackets a paste (`r` in `text`) left open, those the
+/// rest of its statement doesn't close already.
+fn closers(text: &str, r: Range<usize>, d: Dialect) -> Option<String> {
+    use crate::sql::lex::{self, Tk};
+    let part = &text[r.clone()];
+    let mut open: Vec<char> = Vec::new();
+    for t in lex::lex(part, d) {
+        match (t.kind, t.text(part)) {
+            (Tk::Open, "(") => open.push(')'),
+            (Tk::Open, "[") => open.push(']'),
+            (Tk::Close, _) => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    if open.is_empty() {
+        return None;
+    }
+    // Closed further on (before the statement's end) by brackets of no
+    // pair there: the outer ones.
+    let rest = &text[r.end..];
+    let (mut depth, mut spare) = (0usize, 0usize);
+    for t in lex::lex(rest, d) {
+        match t.kind {
+            Tk::Open => depth += 1,
+            Tk::Close if depth == 0 => spare += 1,
+            Tk::Close => depth -= 1,
+            Tk::Semi | Tk::Slash if depth == 0 => break,
+            _ => {}
+        }
+    }
+    let need = open.len().saturating_sub(spare);
+    (need > 0).then(|| open[open.len() - need..].iter().rev().collect())
+}
+
 fn accept(text: &mut String, p: &Popup, sel: usize) -> usize {
     let it = &p.hints.items[sel];
     edit(text, p.hints.range.clone(), &it.insert)
@@ -1035,9 +1096,13 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     let focused = ctx.memory(|m| m.has_focus(id));
     // Pasted (or a bracket typed, maybe round a selection): laid out after,
     // when that's on (the text as it was, to see what changed).
-    let pasting = focused && !cx.read_only && cx.settings.format.on_paste && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+    // (Pasted with brackets left open: they're closed; each fix-up an
+    // undo step of its own, after the paste's.)
+    let fo = cx.settings.format;
+    let pasting = focused && !cx.read_only && (fo.on_paste || cx.settings.auto_pairs) && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+    let bracket = focused && !cx.read_only && fo.on_paste && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "(" || t == "[")));
     let mut wrapped: Option<Range<usize>> = None;
-    let was = pasting.then(|| text.clone());
+    let was = (pasting || bracket).then(|| (text.clone(), egui::text_edit::TextEditState::load(&ctx, id).and_then(|s| s.cursor.char_range())));
     let tab = cx.settings.tab_width.max(1);
     // Put in from outside ("* → the columns").
     if let Some((r, with)) = ctx.data_mut(|d| d.remove_temp::<(Range<usize>, String)>(id.with("replace-later"))) {
@@ -1125,12 +1190,29 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             }
             // (Cut of a caret-thin block deletes nothing.)
             let thin = b.cols().0 == b.cols().1;
+            let mut stuck = false;
             for op in &ops {
                 if copy && thin && *op == Op::Delete {
                     continue;
                 }
+                // Typed past the lines' ends: stuck to them, spaces gone
+                // (the first Ctrl+Z gives back the padded column).
+                if matches!(op, Op::Insert(_)) && block::past_ends(text, b) {
+                    undo_point(&ctx, id, text, None);
+                    let (mut padded, mut pb) = (text.clone(), *b);
+                    block::edit(&mut padded, &mut pb, op);
+                    let c = block::caret(&padded, &pb);
+                    undo_point(&ctx, id, &padded, Some((c, c)));
+                    b.tail = true;
+                    stuck = true;
+                }
                 block::edit(text, b, op);
                 out.changed = true;
+            }
+            if stuck {
+                let c = block::caret(text, b);
+                set_cursor(&ctx, id, text, c, c);
+                undo_point(&ctx, id, text, Some((c, c)));
             }
         }
         st.popup = None;
@@ -1452,23 +1534,47 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         }
         st.folds.retain(|&f| f <= text.len() && (f == 0 || text.as_bytes().get(f - 1) == Some(&b'\n')));
     }
-    // Laid out: the statements the paste (or the brackets) touched.
-    if cx.settings.format.on_paste && st.block.is_none() && !cx.read_only {
-        let changed = match (&was, wrapped) {
-            (Some(w), _) if w != text => {
+    // The paste's brackets closed, then the statements the paste (or the
+    // brackets) touched laid out: an undo step after the paste's own.
+    if let (Some((w, w_cur)), true) = (&was, st.block.is_none()) {
+        let changed = match wrapped.clone() {
+            None if pasting && w != text => {
                 let p = w.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
                 let tail = w.bytes().rev().zip(text.bytes().rev()).take_while(|(a, b)| a == b).count().min(w.len() - p).min(text.len() - p);
                 Some(p..text.len() - tail)
             }
-            (None, Some(r)) if r.end <= text.len() => Some(r),
+            Some(r) if r.end <= text.len() => Some(r),
             _ => None,
         };
         let caret = output.cursor_range.map_or(text.len(), |r| byte_of(text, r.primary.index.0));
-        if let Some((new, c)) = changed.and_then(|r| crate::sql::fmt::reformat(text, cx.dialect, cx.settings.format, r, caret)) {
-            *text = new;
-            set_cursor(&ctx, id, text, c, c);
-            out.changed = true;
-            ctx.request_repaint();
+        if let Some(mut r) = changed {
+            let mut new = text.clone();
+            let mut c = caret;
+            if pasting && wrapped.is_none() && cx.settings.auto_pairs {
+                if let Some(close) = closers(&new, r.clone(), cx.dialect) {
+                    new.insert_str(r.end, &close);
+                    if c > r.end {
+                        c += close.len();
+                    }
+                    r.end += close.len();
+                }
+            }
+            if fo.on_paste {
+                if let Some((f, fc)) = crate::sql::fmt::reformat(&new, cx.dialect, fo, r, c) {
+                    (new, c) = (f, fc);
+                }
+            }
+            if new != *text {
+                let first = w_cur.map(|r| (byte_of(w, r.secondary.index.0), byte_of(w, r.primary.index.0))).unwrap_or((w.len(), w.len()));
+                undo_point(&ctx, id, w, Some(first));
+                let now = output.cursor_range.map(|r| (byte_of(text, r.secondary.index.0), byte_of(text, r.primary.index.0))).unwrap_or((caret, caret));
+                undo_point(&ctx, id, text, Some(now));
+                *text = new;
+                set_cursor(&ctx, id, text, c, c);
+                undo_point(&ctx, id, text, Some((c, c)));
+                out.changed = true;
+                ctx.request_repaint();
+            }
         }
     }
     st.text_rect = Some(output.response.rect);

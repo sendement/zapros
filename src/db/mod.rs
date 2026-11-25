@@ -285,7 +285,8 @@ pub fn obj(name: impl Into<String>, kind: ObjKind, note: impl Into<String>, leaf
 }
 
 /// A table (or view) known for hints: its columns.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Relation {
     pub schema: String,
     pub name: String,
@@ -299,7 +300,8 @@ pub struct Relation {
 }
 
 /// A function or procedure, with its parameters (for hints in its call).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Routine {
     pub schema: String,
     /// Oracle: its package ("" — standalone).
@@ -308,7 +310,8 @@ pub struct Routine {
     pub args: Vec<Arg>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Arg {
     pub name: String,
     pub ty: String,

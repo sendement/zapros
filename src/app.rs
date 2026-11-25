@@ -43,6 +43,26 @@ pub struct Live {
     pub pending: bool,
 }
 
+/// Tables and routines for hints, as last loaded.
+#[derive(Clone, Default)]
+pub struct Hints {
+    pub rels: Arc<Vec<Relation>>,
+    pub routines: Arc<Vec<crate::db::Routine>>,
+}
+
+/// `Hints` on the disk.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct HintsFile {
+    rels: Vec<Relation>,
+    routines: Vec<crate::db::Routine>,
+}
+
+fn hints_file(conn: &str) -> std::path::PathBuf {
+    let safe: String = conn.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    config::data_dir().join("hints").join(format!("{safe}.json"))
+}
+
 /// After the user says what becomes of uncommitted changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxThen {
@@ -267,6 +287,9 @@ pub struct App {
     pub cursors: HashMap<u64, String>,
     next_run: u64,
     pub tree: HashMap<(String, Vec<String>), Node>,
+    /// What hints last knew of each connection's database (kept on disk):
+    /// hints go on with it while it's not connected, or still loading.
+    pub hint_cache: HashMap<String, Hints>,
     /// Nodes shown from before (the cache, a refresh asked for): asked for
     /// again when drawn, what they had shown meanwhile.
     pub tree_stale: HashSet<(String, Vec<String>)>,
@@ -446,8 +469,10 @@ impl App {
             about: false,
             ctx: cc.egui_ctx.clone(),
             auto_tried: HashSet::new(),
+            hint_cache: HashMap::new(),
         };
         app.load_tree();
+        app.load_hints();
         if let Some(p) = app.session.project.clone() {
             app.open_dirs.insert(p);
         }
@@ -724,6 +749,51 @@ impl App {
                 self.tree.insert((c, p), Node::Ready(items));
             }
         }
+    }
+
+    /// The hints' cache of every connection, from the disk.
+    pub fn load_hints(&mut self) {
+        let ids: Vec<String> = self.conns.list.iter().map(|c| c.id.clone()).collect();
+        for id in ids {
+            let Ok(s) = std::fs::read_to_string(hints_file(&id)) else { continue };
+            if let Ok(h) = serde_json::from_str::<HintsFile>(&s) {
+                self.hint_cache.insert(id, Hints { rels: Arc::new(h.rels), routines: Arc::new(h.routines) });
+            }
+        }
+    }
+
+    /// Kept for later (written off the UI's thread).
+    fn keep_hints(&mut self, conn: &str, rels: Option<Arc<Vec<Relation>>>, routines: Option<Arc<Vec<crate::db::Routine>>>) {
+        let h = self.hint_cache.entry(conn.to_string()).or_default();
+        if let Some(r) = rels {
+            h.rels = r;
+        }
+        if let Some(r) = routines {
+            h.routines = r;
+        }
+        let h = h.clone();
+        let path = hints_file(conn);
+        std::thread::spawn(move || {
+            let f = HintsFile { rels: (*h.rels).clone(), routines: (*h.routines).clone() };
+            if let Ok(s) = serde_json::to_string(&f) {
+                std::fs::create_dir_all(path.parent().unwrap()).ok();
+                let tmp = path.with_extension("tmp");
+                if std::fs::write(&tmp, s).is_ok() {
+                    std::fs::rename(tmp, path).ok();
+                }
+            }
+        });
+    }
+
+    /// What hints know of `conn`'s database: the live connection's, else
+    /// (not connected, still loading) the last seen.
+    pub fn hints_of(&self, conn: Option<&str>) -> Hints {
+        let Some(c) = conn else { return Hints::default() };
+        let live = self.live.get(c);
+        let cached = self.hint_cache.get(c);
+        let rels = live.map(|l| l.rels.clone()).filter(|r| !r.is_empty()).or_else(|| cached.map(|h| h.rels.clone())).unwrap_or_default();
+        let routines = live.map(|l| l.routines.clone()).filter(|r| !r.is_empty()).or_else(|| cached.map(|h| h.routines.clone())).unwrap_or_default();
+        Hints { rels, routines }
     }
 
     fn save_tree(&mut self) {
@@ -1726,7 +1796,11 @@ impl App {
                     }
                     Err(e) => self.toast(e),
                 },
-                What::Routines(r) => l.routines = Arc::new(r),
+                What::Routines(r) => {
+                    l.routines = Arc::new(r);
+                    let r = l.routines.clone();
+                    self.keep_hints(&ev.conn, None, Some(r));
+                }
                 What::Relations(r) => {
                     l.rels_loading = false;
                     match r {
@@ -1734,6 +1808,8 @@ impl App {
                             l.known = Arc::new(Known::new(&v));
                             l.rels = Arc::new(v);
                             l.rels_version += 1;
+                            let r = l.rels.clone();
+                            self.keep_hints(&ev.conn, Some(r), None);
                         }
                         Err(e) => {
                             let m = format!("{}: {e}", t("Не загрузить список таблиц", "Can't load the tables"));

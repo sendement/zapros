@@ -392,7 +392,8 @@ fn columns_of(app: &App, d: &board::Drop) -> Vec<(String, String)> {
     }
     let schema = if d.path.len() > 2 { d.path[0].clone() } else { String::new() };
     let bare = d.name.split('(').next().unwrap_or(&d.name).to_string();
-    if let Some(l) = app.live.get(&d.conn) {
+    {
+        let l = app.hints_of(Some(&d.conn));
         if let Some(r) = l.rels.iter().find(|r| r.name.eq_ignore_ascii_case(&bare) && (schema.is_empty() || r.schema.eq_ignore_ascii_case(&schema))) {
             return r.cols.clone();
         }

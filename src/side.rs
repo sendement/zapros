@@ -660,7 +660,7 @@ fn children(app: &mut App, ui: &mut egui::Ui, conn: &str, kind: Kind, path: Vec<
             }
             if o.kind.is_relation() {
                 // Columns from the hints' cache when there, else the tree's.
-                let cols: Vec<String> = app.live.get(conn).and_then(|l| l.rels.iter().find(|r| r.name == o.name).map(|r| r.cols.iter().map(|c| quote(&c.0, kind.dialect())).collect())).unwrap_or_default();
+                let cols: Vec<String> = Some(app.hints_of(Some(conn))).and_then(|l| l.rels.iter().find(|r| r.name == o.name).map(|r| r.cols.iter().map(|c| quote(&c.0, kind.dialect())).collect())).unwrap_or_default();
                 if !cols.is_empty() && ui.button(t("Вставить SELECT со всеми колонками", "Insert SELECT with all columns")).clicked() {
                     insert_at_cursor(app, &format!("SELECT {}\n  FROM {q}", cols.join("\n     , ")));
                     ui.close();

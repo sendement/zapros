@@ -327,8 +327,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let labels = app.settings.labels.clone();
     let conn = app.tab_conn(app.ws(), &tab);
     let dialect = app.dialect_of(conn.as_deref());
-    let rels = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.rels.clone()).unwrap_or_default();
-    let routines = conn.as_deref().and_then(|c| app.live.get(c)).map(|l| l.routines.clone()).unwrap_or_default();
+    let crate::app::Hints { rels, routines } = app.hints_of(conn.as_deref());
     let settings = app.settings.clone();
     let accent = crate::editor::rgb(app.ws().color);
     let dark = ui.visuals().dark_mode;

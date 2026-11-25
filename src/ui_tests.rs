@@ -198,6 +198,20 @@ fn hints_while_typing() {
     h.step();
     assert!(h.state().tab().text.ends_with("on c.id = o.customer_id"), "{}", h.state().tab().text);
     shot(&mut h, "hints-join");
+    // Not connected (after a restart too): the hints go on with what was
+    // last loaded, kept on the disk.
+    h.state_mut().disconnect("lite");
+    settle(&mut h);
+    assert!(!h.state().live.contains_key("lite"));
+    h.state_mut().hint_cache.clear();
+    h.state_mut().load_hints();
+    h.state_mut().tab_mut().text = text.into();
+    h.step();
+    focus_editor(&mut h, 9);
+    key(&mut h, egui::Key::Space, egui::Modifiers::COMMAND);
+    h.step();
+    let labels: Vec<String> = h.state().rt[&id].ed.popup.as_ref().map(|p| p.hints.items.iter().map(|i| i.label.clone()).collect()).unwrap_or_default();
+    assert!(labels.contains(&"total".to_string()), "offline: {labels:?}");
 }
 
 #[test]
@@ -3089,6 +3103,74 @@ fn formatted_on_paste_and_brackets() {
     h.input_mut().events.push(egui::Event::Paste("select a from b".into()));
     h.step();
     assert_eq!(h.state().tab().text, "select a from b");
+}
+
+#[test]
+fn paste_closes_brackets_undone_in_steps() {
+    let (mut h, _g) = harness("paste-close", "", false);
+    h.state_mut().settings.format.on_paste = true;
+    focus_editor(&mut h, 0);
+    h.input_mut().events.push(egui::Event::Paste("select count(".into()));
+    h.step();
+    h.step();
+    let t = h.state().tab().text.clone();
+    assert!(t.to_ascii_lowercase().starts_with("select count()"), "{t:?}");
+    let id = h.state().tab().id.clone();
+    let caret = t.find('(').unwrap() + 1;
+    assert_eq!(h.state().rt[&id].ed.cursor, Some((caret, caret)), "the caret inside the brackets");
+    // Ctrl+Z: first the fix-up (the paste as it was), then the paste.
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().tab().text, "select count(");
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().tab().text, "");
+    // And again forward.
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    assert_eq!(h.state().tab().text, "select count(");
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    assert_eq!(h.state().tab().text, t);
+    // Closed later on in the statement: nothing added.
+    h.state_mut().settings.format.on_paste = false;
+    h.state_mut().tab_mut().text = "select ) from t".into();
+    focus_editor(&mut h, 7);
+    h.input_mut().events.push(egui::Event::Paste("f(".into()));
+    h.step();
+    assert_eq!(h.state().tab().text, "select f() from t");
+}
+
+#[test]
+fn block_past_line_ends_sticks() {
+    let text = "select a,\n       bb,\n       c\n  from orders;\n";
+    let (mut h, _g) = harness("block-stick", text, false);
+    focus_editor(&mut h, 0);
+    let id = h.state().tab().id.clone();
+    let r = h.state().rt[&id].ed.text_rect.unwrap();
+    let font = egui::FontId::monospace(h.state().settings.font_size);
+    let (cw, rh) = h.ctx.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+    let at = |line: f32, col: f32| egui::pos2(r.left() + col * cw, r.top() + 4.0 + (line + 0.5) * rh);
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+    h.input_mut().events.push(egui::Event::PointerMoved(at(0.0, 14.0)));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(0.0, 14.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::ALT });
+    h.step();
+    for l in [0.7, 1.4, 2.0] {
+        h.input_mut().events.push(egui::Event::PointerMoved(at(l, 14.0)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(2.0, 14.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::ALT });
+    h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+    h.step();
+    type_text(&mut h, "')");
+    assert_eq!(h.state().tab().text, "select a,')\n       bb,')\n       c')\n  from orders;\n");
+    shot(&mut h, "block-stick");
+    key(&mut h, egui::Key::Backspace, egui::Modifiers::NONE);
+    assert_eq!(h.state().tab().text, "select a,'\n       bb,'\n       c'\n  from orders;\n");
+    // Ctrl+Z: the sticking undone (the column as padded), then the typing.
+    // (Back to as it was after the first char: the sticking is next.)
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().tab().text, "select a,     '\n       bb,    '\n       c      '\n  from orders;\n");
+    key(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().tab().text, text);
 }
 
 #[test]
