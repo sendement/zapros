@@ -684,8 +684,39 @@ pub fn save(b: &Board) -> std::io::Result<()> {
 }
 
 pub fn load(id: &str) -> Option<Board> {
-    let s = std::fs::read_to_string(path_of(id)).ok()?;
-    serde_json::from_str(&s).ok()
+    parse(&std::fs::read_to_string(path_of(id)).ok()?)
+}
+
+/// A board from its JSON (an older one's notebooks — their cells as they
+/// were — taken as statements).
+fn parse(s: &str) -> Option<Board> {
+    if let Ok(b) = serde_json::from_str(s) {
+        return Some(b);
+    }
+    let mut v: serde_json::Value = serde_json::from_str(s).ok()?;
+    for it in v.get_mut("items")?.as_array_mut()? {
+        let Some(nb) = it.get_mut("kind").and_then(|k| k.get_mut("Notebook")) else { continue };
+        let Some(cells) = nb.get("cells").and_then(|c| c.as_array()).cloned() else { continue };
+        let mut parts = Vec::new();
+        for (k, c) in cells.iter().enumerate() {
+            let text = c.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let md = c.get("md").and_then(|x| x.as_bool()).unwrap_or(false);
+            let what = if md { What::Note } else { what_of(&text, Dialect::Generic, &[]) };
+            parts.push(Part { cell: k, sql: text, what, compact: false });
+        }
+        let snap = Snap {
+            tab: nb.get("tab").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            title: nb.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            cell: None,
+            parts,
+        };
+        let note = nb.get("note").cloned().unwrap_or(serde_json::Value::String(String::new()));
+        *nb = serde_json::json!({ "snap": serde_json::to_value(&snap).ok()?, "note": note });
+    }
+    serde_json::from_value(v).ok()
 }
 
 /// The boards there are: (id, name), by name.
@@ -697,7 +728,7 @@ pub fn list() -> Vec<(String, String)> {
         .filter_map(|e| {
             let p = e.path();
             (p.extension()? == "json").then_some(())?;
-            let b: Board = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+            let b: Board = parse(&std::fs::read_to_string(&p).ok()?)?;
             Some((b.id, b.name))
         })
         .collect();
@@ -1216,6 +1247,20 @@ mod tests {
         let it = Item { id: 0, rect: [0.0, 0.0, PART_W, 10.0], color: [0, 0, 0], kind: Kind::Notebook { snap: one, note: String::new() } };
         assert_eq!(it.row_count(), 2);
         assert_eq!(it.natural_h(), Some(table_h(2)));
+    }
+
+    #[test]
+    fn older_boards_read() {
+        let old = r#"{"id":"x","name":"b","items":[{"id":1,"rect":[0,0,340,100],"color":[1,2,3],"kind":{"Notebook":{"tab":"t1","title":"Скрипт 1","cells":[{"md":false,"text":"DECLARE\n  n NUMBER;\nBEGIN\n  NULL;\nEND;"},{"md":false,"text":"select a, b from t"}],"flow":false,"note":"n"}}}],"links":[],"pan":[0,0],"zoom":1,"next":2}"#;
+        let b = parse(old).expect("read");
+        match &b.items[0].kind {
+            Kind::Notebook { snap, note } => {
+                assert_eq!((snap.tab.as_str(), snap.title.as_str(), note.as_str()), ("t1", "Скрипт 1", "n"));
+                assert!(matches!(snap.parts[0].what, What::Code { .. }));
+                assert!(matches!(&snap.parts[1].what, What::Query { cols, .. } if cols.len() == 2));
+            }
+            k => panic!("{k:?}"),
+        }
     }
 
     #[test]
