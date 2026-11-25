@@ -1171,16 +1171,29 @@ pub fn center(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             app.touch();
         }
         if app.session.outline {
-            let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+            // On the code's own ground, rounded as it is; no line at its
+            // edge, none under the pointer (hidden as for the results).
+            let v = ui.visuals();
+            let ground = crate::themes::mix(v.panel_fill, v.text_color(), if v.dark_mode { 0.045 } else { 0.035 });
+            let own = ui.style().clone();
+            {
+                let w = &mut ui.style_mut().visuals.widgets;
+                w.hovered.fg_stroke = Stroke::NONE;
+                w.active.fg_stroke = Stroke::NONE;
+            }
+            let inner = own.clone();
             let r = egui::Panel::right("outline")
-                .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 10, right: 0, top: 4, bottom: 4 }))
+                .frame(egui::Frame::NONE.fill(ground).corner_radius(6).inner_margin(egui::Margin { left: 8, right: 6, top: 4, bottom: 4 }).outer_margin(egui::Margin { left: 6, right: 0, top: 0, bottom: 6 }))
                 .show_separator_line(false)
                 .resizable(true)
                 .default_size(app.session.outline_width)
                 .size_range(170.0..=520.0)
-                .show(ui, |ui| crate::outline_ui::panel(app, ui));
+                .show(ui, |ui| {
+                    ui.set_style(inner);
+                    crate::outline_ui::panel(app, ui)
+                });
+            ui.set_style(own);
             let rect = r.response.rect;
-            ui.painter().vline(rect.left() + 2.0, rect.y_range(), stroke);
             if (rect.width() - app.session.outline_width).abs() > 1.0 {
                 app.session.outline_width = rect.width();
                 app.touch();

@@ -3516,6 +3516,9 @@ fn boards_drawn_linked_and_filled() {
     drag_to(&mut h, note, canvas.min + egui::vec2(80.0, 440.0), 10);
     key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
     settle(&mut h);
+    // (The databases' section folded: the lines in sight.)
+    h.get_by_label("Базы данных").click();
+    settle(&mut h);
     let line = h.get_by_label("Пунктирная стрелка").rect().center();
     drag_to(&mut h, line, canvas.min + egui::vec2(300.0, 440.0), 10);
     settle(&mut h);

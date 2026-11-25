@@ -188,17 +188,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
     toolbar(app, ui, &mut open);
     ui.add_space(4.0);
     if app.board_ui.lib {
-        let r = egui::Panel::left("board-lib")
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }))
+        // A rounded ground a shade darker, as the side panel's; no line at
+        // its edge, none under the pointer either (egui takes that from the
+        // parent's hovered / active strokes, hidden meanwhile).
+        let own = ui.style().clone();
+        {
+            let w = &mut ui.style_mut().visuals.widgets;
+            w.hovered.fg_stroke = Stroke::NONE;
+            w.active.fg_stroke = Stroke::NONE;
+        }
+        let inner = own.clone();
+        let fill = crate::ui::chrome(ui.visuals());
+        egui::Panel::left("board-lib")
+            .frame(egui::Frame::NONE.fill(fill).corner_radius(8).inner_margin(egui::Margin { left: 6, right: 4, top: 6, bottom: 6 }).outer_margin(egui::Margin { left: 0, right: 6, top: 0, bottom: 0 }))
             .show_separator_line(false)
             .resizable(true)
             .default_size(240.0)
             .size_range(180.0..=420.0)
             .show(ui, |ui| {
+                ui.set_style(inner);
                 egui::ScrollArea::vertical().id_salt("board-lib").auto_shrink([false, false]).show(ui, |ui| library(app, ui, &mut open));
             });
-        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-        ui.painter().vline(r.response.rect.right() - 3.0, r.response.rect.y_range(), stroke);
+        ui.set_style(own);
     }
     canvas(app, ui, &mut open);
     props_window(app, ui, &mut open.board);
@@ -991,6 +1002,8 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
     let painter = ui.painter_at(rect);
     let dark = ui.visuals().dark_mode;
     painter.rect_filled(rect, 8.0, if dark { Color32::from_gray(24) } else { Color32::from_gray(250) });
+    // Framed in the tab's (its workspace's) colour, as the active tab is.
+    let frame_c = rgb(app.ws().color);
     fill_columns(app, &mut open.board);
     let b = &mut open.board;
     // Show everything.
@@ -1474,6 +1487,7 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
             st.sel.retain(|x| *x != id);
         }
     }
+    painter.rect_stroke(rect.shrink(0.5), 8.0, Stroke::new(1.0, frame_c), egui::StrokeKind::Inside);
     finish(open, view);
     resp.context_menu(|ui| canvas_menu(app, ui, open));
 }
