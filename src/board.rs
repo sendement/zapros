@@ -344,10 +344,77 @@ pub fn squarish(sizes: &[Vec2]) -> f32 {
     best.1
 }
 
-/// How wide a frame round these parts likes to be (inside).
+/// A markdown note's height when `w` wide.
+pub fn note_h(text: &str, w: f32) -> f32 {
+    let per_line = ((w - 16.0) / 6.6).max(8.0) as usize;
+    let n: usize = text.lines().map(|l| 1 + l.chars().count().saturating_sub(1) / per_line).sum::<usize>().max(1);
+    10.0 + NOTE_LINE_H * n as f32
+}
+
+/// Parts laid in `width`: a markdown note across the top of what follows
+/// it (a header with its description), the statements under it side by
+/// side; a section each, one under another. Their rects (from 0, 0) and
+/// the height they take.
+pub fn lay_parts(parts: &[Part], width: f32) -> (Vec<Rect>, f32) {
+    let mut out = vec![Rect::NOTHING; parts.len()];
+    let mut y = 0.0;
+    let mut k = 0;
+    while k < parts.len() {
+        if y > 0.0 {
+            y += GAP;
+        }
+        if matches!(parts[k].what, What::Note) {
+            let h = note_h(&parts[k].sql, width);
+            out[k] = Rect::from_min_size(Pos2::new(0.0, y), Vec2::new(width, h));
+            y += h;
+            k += 1;
+        }
+        let from = k;
+        while k < parts.len() && !matches!(parts[k].what, What::Note) {
+            k += 1;
+        }
+        if k > from {
+            if from > 0 && matches!(parts[from - 1].what, What::Note) {
+                y += GAP / 2.0;
+            }
+            let sizes: Vec<Vec2> = parts[from..k].iter().map(Part::size).collect();
+            let (pos, h) = flow(&sizes, width);
+            for (j, (p, s)) in pos.iter().zip(&sizes).enumerate() {
+                out[from + j] = Rect::from_min_size(Pos2::new(p.x, y + p.y), *s);
+            }
+            y += h;
+        }
+    }
+    (out, y)
+}
+
+/// How wide a frame round these parts likes to be (inside): about square
+/// as laid out (notes on top of their sections).
 pub fn parts_width(parts: &[Part]) -> f32 {
-    let sizes: Vec<Vec2> = parts.iter().map(Part::size).collect();
-    squarish(&sizes)
+    let code: Vec<&Part> = parts.iter().filter(|p| !matches!(p.what, What::Note)).collect();
+    let widest = code.iter().map(|p| p.size().x).fold(if code.len() < parts.len() { 320.0 } else { PART_W }, f32::max);
+    // Widths to try: each section's first row holding 1, 2, … statements.
+    let mut tries = vec![widest];
+    let mut x = 0.0;
+    for p in parts {
+        if matches!(p.what, What::Note) {
+            x = 0.0;
+            continue;
+        }
+        x += p.size().x;
+        tries.push(x.max(widest));
+        x += GAP;
+    }
+    let mut best = (f32::INFINITY, widest);
+    for w in tries {
+        let (rects, h) = lay_parts(parts, w);
+        let used = rects.iter().map(|r| r.right()).fold(widest, f32::max).min(w);
+        let score = ((used / h.max(1.0)) / 1.4).ln().abs();
+        if score < best.0 - 1e-3 {
+            best = (score, w);
+        }
+    }
+    best.1
 }
 
 impl Snap {
@@ -359,8 +426,7 @@ impl Snap {
     /// Its frame's size in a workspace (its title strip and all).
     pub fn sub_size(&self) -> Vec2 {
         let w = parts_width(&self.parts);
-        let sizes: Vec<Vec2> = self.parts.iter().map(Part::size).collect();
-        let (_, h) = flow(&sizes, w);
+        let (_, h) = lay_parts(&self.parts, w);
         Vec2::new(w + PAD * 2.0, SUB_HEAD + PAD + h.max(ROW_H) + PAD)
     }
 }
@@ -437,10 +503,9 @@ impl Item {
         let top = Pos2::new(r.left() + PAD, r.top() + HEAD_H + PAD);
         let width = (r.width() - PAD * 2.0).max(PART_W);
         let place = |snap: &Snap, k: usize, at: Pos2, width: f32, out: &mut Inside| {
-            let sizes: Vec<Vec2> = snap.parts.iter().map(Part::size).collect();
-            let (pos, _) = flow(&sizes, width);
-            for (j, (p, s)) in pos.iter().zip(&sizes).enumerate() {
-                out.parts.push((k, j, Rect::from_min_size(at + p.to_vec2(), *s)));
+            let (rects, _) = lay_parts(&snap.parts, width);
+            for (j, r) in rects.into_iter().enumerate() {
+                out.parts.push((k, j, r.translate(at.to_vec2())));
             }
         };
         match &self.kind {
@@ -456,12 +521,11 @@ impl Item {
                     let sub = Rect::from_min_size(top + p.to_vec2(), *s);
                     // (Narrowed to the workspace: its parts laid anew.)
                     let at = sub.min + Vec2::new(PAD, SUB_HEAD + PAD);
-                    let sizes: Vec<Vec2> = tabs[k].parts.iter().map(Part::size).collect();
-                    let (pp, h) = flow(&sizes, sub.width() - PAD * 2.0);
+                    let (rects, h) = lay_parts(&tabs[k].parts, sub.width() - PAD * 2.0);
                     let sub = Rect::from_min_size(sub.min, Vec2::new(sub.width(), SUB_HEAD + PAD + h.max(ROW_H) + PAD));
                     out.subs.push((k, sub));
-                    for (j, (q, sz)) in pp.iter().zip(&sizes).enumerate() {
-                        out.parts.push((k, j, Rect::from_min_size(at + q.to_vec2(), *sz)));
+                    for (j, r) in rects.into_iter().enumerate() {
+                        out.parts.push((k, j, r.translate(at.to_vec2())));
                     }
                 }
                 // (Rows of tab frames grown as their parts were laid: the
@@ -1144,7 +1208,10 @@ pub fn what_of_in(sql: &str, d: Dialect, rels: &[&[Relation]]) -> What {
                     let rest = toks.get(k).map_or("", |t| &sql[t.start..]);
                     let rest_up = up(k);
                     if matches!(rest_up.as_str(), "SELECT" | "WITH" | "(") {
-                        What::Insert { verb: "INSERT".into(), target, cols, source: Some((tables_of(rest), query_columns_in(rest, d, rels))), values: 0 }
+                        let src = query_columns_in(rest, d, rels);
+                        // (A table not known, no list: its columns are the query's, in order.)
+                        let cols = if cols.is_empty() { src.clone() } else { cols };
+                        What::Insert { verb: "INSERT".into(), target, cols, source: Some((tables_of(rest), src)), values: 0 }
                     } else {
                         // VALUES (…), (…): its rows.
                         let mut n = 0;
@@ -1414,6 +1481,23 @@ mod tests {
             let (w, h) = (it.rect[2], it.natural_h().unwrap());
             assert!((0.7..2.4).contains(&(w / h)), "{w} × {h}");
         }
+    }
+
+    #[test]
+    fn notes_head_their_statements() {
+        let cells = vec![(true, "# Sales\nWhat was sold, by month".to_string()), (false, "select 1 a;\nselect 2 b;\nselect 3 c;".to_string()), (true, "## Returns".to_string()), (false, "select 4 d;".to_string())];
+        let parts = parts_of(&cells, Dialect::Postgres, &[]);
+        let w = parts_width(&parts);
+        let (r, _) = lay_parts(&parts, w);
+        // Each note across the top of its section, its statements under it.
+        assert_eq!(r[0].width(), w);
+        for k in 1..4 {
+            assert!(r[k].top() >= r[0].bottom(), "{:?} under {:?}", r[k], r[0]);
+            assert!(r[k].bottom() <= r[4].top(), "{:?} above {:?}", r[k], r[4]);
+        }
+        assert!(r[5].top() >= r[4].bottom());
+        // The three side by side (about square), not in a column.
+        assert_eq!(r[1].top(), r[2].top());
     }
 
     #[test]

@@ -3349,6 +3349,31 @@ fn board_scripts_as_schemes() {
     }
     settle(&mut h);
     shot(&mut h, "board-ws");
+    // A notebook: its markdown notes over the statements after them.
+    {
+        use crate::config::{Cell, CellKind, Notebook};
+        let app = h.state_mut();
+        let cell = |kind, text: &str| Cell { kind, text: text.into(), ..Default::default() };
+        let tb = app.ws_mut().tabs.iter_mut().find(|t| t.title == "Черновик").unwrap();
+        tb.notebook = Some(Notebook { on: true, cells: vec![
+            cell(CellKind::Markdown, "# Заказы\nКрупные заказы и их клиенты за месяц"),
+            cell(CellKind::Sql, "select id, total from orders where total > 100;"),
+            cell(CellKind::Sql, "select c.name, count(*) n from customers c join orders o on o.customer_id = c.id group by c.name;"),
+            cell(CellKind::Markdown, "## Архив\nСтарые заказы переносим в архив"),
+            cell(CellKind::Sql, "insert into orders_archive select * from orders where id < 10;"),
+        ] });
+        let tid = tb.id.clone();
+        let mut open = std::mem::take(app.boards.open.get_mut(&id).unwrap());
+        let nid = crate::board_ui::add_notebook(app, &mut open.board, &tid, egui::pos2(5000.0, 0.0)).unwrap();
+        open.board.fit_heights();
+        let n = open.board.item(nid).unwrap().clone();
+        open.board.pan = [n.rect[0] - 20.0, n.rect[1] - 20.0];
+        open.board.zoom = 1.0;
+        app.boards.open.insert(id.clone(), open);
+        app.board_ui.sel.clear();
+    }
+    settle(&mut h);
+    shot(&mut h, "board-md");
 }
 
 #[test]

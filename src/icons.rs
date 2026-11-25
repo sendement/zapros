@@ -136,6 +136,17 @@ pub fn paint(ui: &egui::Ui, rect: egui::Rect, ic: Ic, size: f32, tint: Color32) 
     }
 }
 
+/// Painted into `rect` by `p` (so clipped as it clips: a board's canvas).
+pub fn paint_on(p: &egui::Painter, rect: egui::Rect, ic: Ic, size: f32, tint: Color32) -> bool {
+    let Some(img) = image(ic, size, tint) else { return false };
+    let r = egui::Rect::from_center_size(rect.center(), Vec2::splat(size));
+    // (Still loading: nothing this frame, the loader asks for another.)
+    if let Ok(egui::load::TexturePoll::Ready { texture }) = img.load_for_size(p.ctx(), r.size()) {
+        p.image(texture.id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+    }
+    true
+}
+
 /// An object kind's colour in the tree, from the editor's palette.
 pub fn kind_color(k: ObjKind, p: &crate::config::Palette, weak: Color32) -> Color32 {
     let c = |x: crate::config::Rgb| Color32::from_rgb(x[0], x[1], x[2]);

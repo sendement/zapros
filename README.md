@@ -322,7 +322,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   DECLARE / BEGIN block or a routine's code in full, folded to its first
   line by its ▾; several statements: a frame of them. A workspace is a
   frame round its tabs' frames; frames are laid out about square, not in
-  a long ribbon. A table the script creates is known to the statements
+  a long ribbon, a notebook's markdown notes across the top of the
+  statements after them (a header with its description). A table the script creates is known to the statements
   after it (their INSERT / UPDATE / SELECT show its columns).
   A click picks; a double click (or "Properties…" in the right-click
   menu) opens a window in the middle with what it holds — a statement's

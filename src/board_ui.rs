@@ -843,10 +843,16 @@ fn add_lib(app: &mut App, b: &mut Board, lib: &board::Lib, at: Pos2, exact: bool
 /// An object's columns (a table's, a view's) or parameters (a routine's)
 /// as the tree or the hints last saw them.
 fn columns_of(app: &App, d: &board::Drop) -> Vec<(String, String)> {
-    let mut p = d.path.clone();
-    p.push("columns".into());
-    if let Some(crate::app::Node::Ready(v)) = app.tree.get(&(d.conn.clone(), p)) {
-        return v.iter().map(|o| (o.name.clone(), o.note.clone())).collect();
+    // (PostgreSQL and Oracle keep them in a "columns" folder; ClickHouse
+    // and SQLite right under the table. An empty list: not an answer.)
+    let mut folder = d.path.clone();
+    folder.push("columns".into());
+    for p in [folder, d.path.clone()] {
+        if let Some(crate::app::Node::Ready(v)) = app.tree.get(&(d.conn.clone(), p)) {
+            if !v.is_empty() && v.iter().all(|o| o.kind == ObjKind::Column) {
+                return v.iter().map(|o| (o.name.clone(), o.note.clone())).collect();
+            }
+        }
     }
     let schema = if d.path.len() > 2 { d.path[0].clone() } else { String::new() };
     let bare = d.name.split('(').next().unwrap_or(&d.name).to_string();
@@ -860,10 +866,18 @@ fn columns_of(app: &App, d: &board::Drop) -> Vec<(String, String)> {
     Vec::new()
 }
 
+/// Where the tree keeps a table's columns.
+fn columns_path(app: &App, conn: &str, path: &[String]) -> Vec<String> {
+    let mut p = path.to_vec();
+    if app.spec(conn).is_some_and(|s| matches!(s.kind, crate::db::Kind::Postgres | crate::db::Kind::Oracle)) {
+        p.push("columns".into());
+    }
+    p
+}
+
 pub fn add_object(app: &mut App, b: &mut Board, d: &board::Drop, at: Pos2, exact: bool) -> u64 {
     // (Its columns: asked for when not seen yet.)
-    let mut p = d.path.clone();
-    p.push("columns".into());
+    let p = columns_path(app, &d.conn, &d.path);
     if matches!(d.obj, ObjKind::Table | ObjKind::View | ObjKind::MatView) && !app.tree.contains_key(&(d.conn.clone(), p.clone())) && app.live.contains_key(&d.conn) {
         app.request_children(&d.conn, p);
     }
@@ -1738,12 +1752,12 @@ fn draw_item(p: &egui::Painter, ui: &egui::Ui, it: &mut Item, view: View, col: &
         }
         Kind::Entity { name, fields, note } => {
             let rows: Vec<(String, String, bool)> = fields.iter().map(|f| (f.name.clone(), f.ty.clone(), f.key)).collect();
-            table_card(p, ui, r, z, c, name, None, &rows, note, col);
+            table_card(p, r, z, c, name, None, &rows, note, col);
         }
         Kind::Object { name, obj, cols, note, .. } => {
             let rows: Vec<(String, String, bool)> = cols.iter().map(|(n, ty)| (n.clone(), ty.clone(), false)).collect();
             let rows = if rows.is_empty() { vec![(t("колонки — после подключения", "columns: once connected").to_string(), String::new(), false)] } else { rows };
-            table_card(p, ui, r, z, c, name, Some(*obj), &rows, note, col);
+            table_card(p, r, z, c, name, Some(*obj), &rows, note, col);
         }
         Kind::Notebook { snap, note } => {
             if snap.alone() {
@@ -1751,7 +1765,7 @@ fn draw_item(p: &egui::Painter, ui: &egui::Ui, it: &mut Item, view: View, col: &
                 note_text(p, r, z, note, col.weak);
                 return;
             }
-            frame_head(p, ui, r, z, c, &snap.title, if snap.parts.iter().any(|x| x.cell > 0) { crate::icons::Ic::Notebook } else { crate::icons::Ic::File }, col);
+            frame_head(p, r, z, c, &snap.title, if snap.parts.iter().any(|x| x.cell > 0) { crate::icons::Ic::Notebook } else { crate::icons::Ic::File }, col);
             let clip = p.with_clip_rect(r.intersect(p.clip_rect()));
             for (_, j, pr) in &inside.parts {
                 draw_part(&clip, ui, view.rect(*pr), z, c, &snap.parts[*j], None, col, sub == Some((0, *j)));
@@ -1793,7 +1807,7 @@ fn draw_item(p: &egui::Painter, ui: &egui::Ui, it: &mut Item, view: View, col: &
 
 /// A notebook's frame: a card with a coloured head (an icon, the title).
 #[allow(clippy::too_many_arguments)]
-fn frame_head(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, title: &str, icon: crate::icons::Ic, col: &Colors) {
+fn frame_head(p: &egui::Painter, r: Rect, z: f32, c: Color32, title: &str, icon: crate::icons::Ic, col: &Colors) {
     p.rect_filled(r, 8.0 * z, col.card);
     p.rect_stroke(r, 8.0 * z, Stroke::new((1.5 * z).clamp(1.0, 3.0), c), egui::StrokeKind::Middle);
     let head = Rect::from_min_size(r.min, Vec2::new(r.width(), HEAD_H * z));
@@ -1801,7 +1815,7 @@ fn frame_head(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, tit
     p.rect_filled(head, egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, c.gamma_multiply(0.85));
     if 12.0 * z >= 5.0 {
         let ic = Rect::from_center_size(Pos2::new(head.left() + 14.0 * z, head.center().y), Vec2::splat(16.0 * z));
-        if !crate::icons::paint(ui, ic, icon, 15.0 * z, Color32::WHITE) {
+        if !crate::icons::paint_on(p, ic, icon, 15.0 * z, Color32::WHITE) {
             p.text(ic.center(), Align2::CENTER_CENTER, "📓", FontId::proportional(13.0 * z), Color32::WHITE);
         }
         p.with_clip_rect(head.intersect(p.clip_rect())).text(Pos2::new(head.left() + 26.0 * z, head.center().y), Align2::LEFT_CENTER, title, FontId::proportional(13.5 * z), Color32::WHITE);
@@ -1826,7 +1840,7 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
     let accent = ui.visuals().selection.stroke.color;
     match &part.what {
         What::Query { title: t0, cols } => {
-            table_card(p, ui, r, z, c, title.unwrap_or(t0), None, &rows_of(cols), "", col);
+            table_card(p, r, z, c, title.unwrap_or(t0), None, &rows_of(cols), "", col);
         }
         What::Insert { verb, target, cols, source, values } => {
             p.rect_filled(r, 8.0 * z, c.gamma_multiply(0.05));
@@ -1838,13 +1852,13 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
             let (from, into) = (tables[0], tables[1]);
             let top = from.top();
             match source {
-                Some((st, sc)) => table_card(p, ui, from, z, c, st, None, &rows_of(sc), "", col),
+                Some((st, sc)) => table_card(p, from, z, c, st, None, &rows_of(sc), "", col),
                 None => {
                     let n = format!("{values} {}", t("строк(и)", "row(s)"));
-                    table_card(p, ui, from, z, c, "VALUES", None, &[(n, String::new(), false)], "", col);
+                    table_card(p, from, z, c, "VALUES", None, &[(n, String::new(), false)], "", col);
                 }
             }
-            table_card(p, ui, into, z, c, target, Some(ObjKind::Table), &rows_of(cols), "", col);
+            table_card(p, into, z, c, target, Some(ObjKind::Table), &rows_of(cols), "", col);
             let y = top + (HEAD_H / 2.0) * z;
             let (a, b) = (Pos2::new(from.right() + 4.0 * z, y), Pos2::new(into.left() - 4.0 * z, y));
             arrow(p, a, b, Stroke::new((1.8 * z).clamp(1.0, 3.0), c), (5.0 * z).clamp(3.0, 8.0));
@@ -1865,7 +1879,7 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
             if legible {
                 p.text(bx.center(), Align2::CENTER_CENTER, verb, FontId::proportional(12.5 * z), col.strong);
             }
-            table_card(p, ui, into, z, c, target, Some(ObjKind::Table), &rows_of(cols), "", col);
+            table_card(p, into, z, c, target, Some(ObjKind::Table), &rows_of(cols), "", col);
             arrow(p, Pos2::new(bx.right() + 4.0 * z, bx.center().y), Pos2::new(into.left() - 4.0 * z, bx.center().y), Stroke::new((1.8 * z).clamp(1.0, 3.0), c), (5.0 * z).clamp(3.0, 8.0));
         }
         What::Code { title: t0 } => {
@@ -1888,8 +1902,22 @@ fn draw_part(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, part
         What::Note => {
             p.vline(r.left(), r.y_range(), Stroke::new(2.0 * z.min(1.0), c.gamma_multiply(0.5)));
             if legible {
-                let g = p.layout(part.sql.clone(), FontId::proportional(12.5 * z), col.text, r.width() - 12.0 * z);
-                p.with_clip_rect(r.intersect(p.clip_rect())).galley(r.min + Vec2::new(8.0 * z, 4.0 * z), g, col.text);
+                // Headings (# …) bigger and brighter, the rest as text.
+                let clip = p.with_clip_rect(r.intersect(p.clip_rect()));
+                let mut y = r.top() + 4.0 * z;
+                for line in part.sql.lines() {
+                    let t = line.trim_start();
+                    let level = t.chars().take_while(|c| *c == '#').count();
+                    let (text, font, color) = if level > 0 && t[level..].starts_with(' ') {
+                        (t[level..].trim().to_string(), FontId::proportional((15.5 - level as f32) * z), col.strong)
+                    } else {
+                        (line.to_string(), FontId::proportional(12.5 * z), col.text)
+                    };
+                    let g = clip.layout(text, font, color, r.width() - 12.0 * z);
+                    let h = g.size().y.max(board::NOTE_LINE_H * z * 0.8);
+                    clip.galley(Pos2::new(r.left() + 8.0 * z, y), g, color);
+                    y += h;
+                }
             }
         }
     }
@@ -1928,7 +1956,7 @@ fn code_text(p: &egui::Painter, r: Rect, z: f32, txt: &str, col: &Colors) {
 /// A table's card: a coloured head (its icon and name), a row per field
 /// (a key's dot, the name, the type), the note below.
 #[allow(clippy::too_many_arguments)]
-fn table_card(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, name: &str, obj: Option<ObjKind>, rows: &[(String, String, bool)], note: &str, col: &Colors) {
+fn table_card(p: &egui::Painter, r: Rect, z: f32, c: Color32, name: &str, obj: Option<ObjKind>, rows: &[(String, String, bool)], note: &str, col: &Colors) {
     p.rect_filled(r, 6.0 * z, col.card);
     p.rect_stroke(r, 6.0 * z, Stroke::new((1.4 * z).clamp(1.0, 2.5), c), egui::StrokeKind::Middle);
     let head = Rect::from_min_size(r.min, Vec2::new(r.width(), HEAD_H * z));
@@ -1940,7 +1968,7 @@ fn table_card(p: &egui::Painter, ui: &egui::Ui, r: Rect, z: f32, c: Color32, nam
     let mut x = head.left() + 9.0 * z;
     if let Some(k) = obj {
         let ic = Rect::from_center_size(Pos2::new(x + 6.0 * z, head.center().y), Vec2::splat(15.0 * z));
-        if !crate::icons::paint(ui, ic, crate::icons::Ic::of(k), 14.0 * z, Color32::WHITE) {
+        if !crate::icons::paint_on(&p.with_clip_rect(r.intersect(p.clip_rect())), ic, crate::icons::Ic::of(k), 14.0 * z, Color32::WHITE) {
             p.text(ic.center(), Align2::CENTER_CENTER, k.icon(), FontId::proportional(12.0 * z), Color32::WHITE);
         }
         x += 18.0 * z;
@@ -2308,9 +2336,8 @@ fn props(app: &mut App, ui: &mut egui::Ui, b: &mut Board, win: Win) {
     }
     if refresh_obj {
         if let Some(Kind::Object { conn, path, .. }) = b.item(id).map(|i| &i.kind) {
-            let mut p = path.clone();
-            p.push("columns".into());
             let conn = conn.clone();
+            let p = columns_path(app, &conn, path);
             app.tree.remove(&(conn.clone(), p.clone()));
             let ctx = app.ctx.clone();
             if app.ensure_live(&ctx, &conn, None) {
