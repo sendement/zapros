@@ -10,6 +10,123 @@ use super::*;
 
 /// How long a busy session is waited for before going on in a new one.
 const SESSION_WAIT: Duration = Duration::from_secs(4);
+/// How often a query whose answer is awaited is looked for on the server.
+const WATCH_EVERY: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(20) };
+/// How long a query of our own (the tree, hints…) may take to answer.
+const OWN_WAIT: Duration = Duration::from_secs(120);
+
+/// An agent of its own for asking aside (a stop, a look at a query):
+/// fresh connections, never one stuck under a long answer.
+fn side_agent() -> ureq::Agent {
+    ureq::Agent::config_builder().timeout_global(Some(PING_WAIT)).http_status_as_error(false).build().into()
+}
+
+/// Looks at a query from aside while its answer is awaited. HTTP has no
+/// heartbeat: a link a firewall or a VPN dropped leaves the wait hanging
+/// forever. The server done with the query (or not answering) and still
+/// no answer here, the link's dead: the wait is cut (the agent shut) and
+/// how the query ended on the server is told.
+struct Watch {
+    over: Arc<std::sync::atomic::AtomicBool>,
+    /// Not reading (rows wait for the window to ask for more): not judged.
+    idle: Arc<std::sync::atomic::AtomicBool>,
+    why: Arc<Mutex<Option<String>>>,
+}
+
+impl Watch {
+    fn start(ch: &Ch, qid: &str) -> Self {
+        let w = Watch { over: Arc::default(), idle: Arc::default(), why: Arc::default() };
+        let (over, idle, why) = (w.over.clone(), w.idle.clone(), w.why.clone());
+        let (agent, base, user, key, qid) = (ch.agent.clone(), ch.base.clone(), ch.user.clone(), ch.password.clone(), qid.to_string());
+        std::thread::spawn(move || {
+            let side = side_agent();
+            let ask = |sql: String| -> Option<String> {
+                let mut r = side.post(&base).header("X-ClickHouse-User", &user).header("X-ClickHouse-Key", &key).send(sql).ok()?;
+                if !r.status().is_success() {
+                    return None;
+                }
+                r.body_mut().read_to_string().ok()
+            };
+            let (mut gone, mut silent, mut last) = (0, 0, std::time::Instant::now());
+            let text = loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if over.load(Ordering::Relaxed) {
+                    return;
+                }
+                if idle.load(Ordering::Relaxed) {
+                    (gone, silent, last) = (0, 0, std::time::Instant::now());
+                    continue;
+                }
+                if last.elapsed() < WATCH_EVERY {
+                    continue;
+                }
+                last = std::time::Instant::now();
+                match ask(format!("SELECT count() FROM system.processes WHERE query_id = {}", literal(&qid))).map(|b| b.trim() != "0") {
+                    Some(true) => (gone, silent) = (0, 0),
+                    Some(false) => {
+                        (gone, silent) = (gone + 1, 0);
+                        // Over there twice running, and no answer here.
+                        if gone >= 2 {
+                            // Its log line (written there every few seconds).
+                            let sql = format!(
+                                "SELECT type, written_rows, replaceRegexpAll(exception, '[[:space:]]+', ' ') FROM system.query_log WHERE query_id = {} AND type != 'QueryStart' ORDER BY event_time_microseconds DESC LIMIT 1 FORMAT TSV",
+                                literal(&qid)
+                            );
+                            ask("SYSTEM FLUSH LOGS".into());
+                            let mut line = None;
+                            for _ in 0..6 {
+                                line = ask(sql.clone()).filter(|l| !l.trim().is_empty());
+                                if line.is_some() || over.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_secs(2));
+                            }
+                            break ended(line);
+                        }
+                    }
+                    None => {
+                        (gone, silent) = (0, silent + 1);
+                        if silent >= 4 {
+                            break crate::i18n::t(
+                                "Сервер не отвечает больше минуты — ожидание ответа прервано. Запрос на сервере мог продолжиться.",
+                                "The server hasn't answered for over a minute — the wait is cut. The query may still run on the server.",
+                            )
+                            .to_string();
+                        }
+                    }
+                }
+            };
+            if over.load(Ordering::Relaxed) {
+                return;
+            }
+            *why.lock().unwrap() = Some(text);
+            agent.shutdown();
+        });
+        w
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.over.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How a query ended on the server, from its query_log line (TSV: type,
+/// rows written, exception), told after the link to it broke.
+fn ended(line: Option<String>) -> String {
+    use crate::i18n::t;
+    let head = t("Связь с сервером оборвалась, ответ не дошёл.", "The link to the server broke; the answer didn't come.");
+    let line = line.unwrap_or_default();
+    let f: Vec<&str> = line.trim_end_matches('\n').splitn(3, '\t').collect();
+    let tail = match f.as_slice() {
+        ["QueryFinish", rows, ..] if *rows != "0" => format!("{} ({} {rows})", t("На сервере запрос завершился успешно", "On the server the query finished fine"), t("записано строк:", "rows written:")),
+        ["QueryFinish", ..] => t("На сервере запрос завершился успешно.", "On the server the query finished fine.").to_string(),
+        [_, _, e] if !e.is_empty() => format!("{}: {e}", t("На сервере запрос завершился ошибкой", "On the server the query failed")),
+        _ => t("Чем запрос кончился на сервере, неизвестно (его нет среди идущих).", "How the query ended on the server is unknown (it's no longer running).").to_string(),
+    };
+    format!("{head} {tail}")
+}
 
 pub struct Ch {
     agent: ureq::Agent,
@@ -115,8 +232,10 @@ impl Ch {
         if session {
             r = r.query("session_id", &self.session).query("session_timeout", "3600");
         }
-        if let Some(id) = query_id {
-            r = r.query("query_id", id);
+        match query_id {
+            Some(id) => r = r.query("query_id", id),
+            // Ours (the tree, hints…): not waited on forever.
+            None => r = r.config().timeout_global(Some(OWN_WAIT)).build(),
         }
         if self.readonly {
             r = r.query("readonly", "2");
@@ -177,6 +296,8 @@ impl Session for Ch {
         let ours = returns_rows(sql) && !has_format(sql);
         let text = if ours { format!("{sql}\nFORMAT JSONCompactEachRowWithNamesAndTypes") } else { sql.to_string() };
         *self.running.lock().unwrap() = Some(qid.clone());
+        let watch = Watch::start(self, &qid);
+        let watch_why = watch.why.clone();
         let resp = self.post_retry(&text, Some(&qid), notes).map_err(|f| if f.lost || f.at.is_some() { f } else { fail_in(&f.message, sql) });
         let result = (|| {
             let mut resp = resp?;
@@ -214,13 +335,23 @@ impl Session for Ch {
                 ..Default::default()
             };
             while let Some(r) = next()? {
-                if !fetch.room(&mut t) {
+                watch.idle.store(true, Ordering::Relaxed);
+                let room = fetch.room(&mut t);
+                watch.idle.store(false, Ordering::Relaxed);
+                if !room {
                     break;
                 }
                 t.rows.push(r.iter().map(value).collect());
             }
             Ok(Outcome::Rows(t))
         })();
+        drop(watch);
+        let why = watch_why.lock().unwrap().take();
+        // The link broke (seen from aside): said so, and how it ended there.
+        // (What came is cut off, whatever the read made of the shut link.)
+        if let Some(why) = why {
+            return Err(Failure::lost(why));
+        }
         // Cut short: the server stops it too.
         if matches!(&result, Ok(Outcome::Rows(t)) if t.more) {
             self.canceller()();
@@ -387,11 +518,16 @@ impl Session for Ch {
     }
 
     fn canceller(&self) -> Canceller {
-        let (agent, base, user, key, running) = (self.agent.clone(), self.base.clone(), self.user.clone(), self.password.clone(), self.running.clone());
+        let (agent, base, user, key, running) = (side_agent(), self.base.clone(), self.user.clone(), self.password.clone(), self.running.clone());
         Arc::new(move || {
             let Some(id) = running.lock().unwrap().take() else { return };
             agent.post(&base).header("X-ClickHouse-User", &user).header("X-ClickHouse-Key", &key).send(format!("KILL QUERY WHERE query_id = {} ASYNC", literal(&id))).ok();
         })
+    }
+
+    fn ping(&mut self) -> bool {
+        let r = self.agent.post(&self.base).config().timeout_global(Some(PING_WAIT)).build().header("X-ClickHouse-User", &self.user).header("X-ClickHouse-Key", &self.password).send("SELECT 1");
+        r.is_ok_and(|r| r.status().is_success())
     }
 
     fn version(&mut self) -> String {

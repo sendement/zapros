@@ -3606,3 +3606,64 @@ fn boards_drawn_linked_and_filled() {
     assert_eq!(saved.items, board(&h).items);
     assert_eq!(saved.links, board(&h).links);
 }
+
+/// Two notebooks on one connection share its session: a stop in one ends
+/// its own run only — the other's goes on.
+#[test]
+fn stop_in_one_notebook_spares_another() {
+    let forever = "-- %%\nwith recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n;\n";
+    let (mut h, _g) = harness("nb-stop-one", forever, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let tab_of = |h: &Harness<'static, App>| {
+        let t = h.state().tab();
+        crate::app::App::cell_key(&t.id, &t.notebook.as_ref().unwrap().cells[0].id)
+    };
+    let a = tab_of(&h);
+    h.state_mut().run_cells(&ctx, None);
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(h.state().rt[&a].run.is_some());
+    // The second notebook: its run waits its turn behind the first.
+    h.state_mut().ws_mut().active = 1;
+    h.state_mut().tab_mut().text = "-- %%\nselect 42;\n".into();
+    h.state_mut().toggle_notebook();
+    for _ in 0..10 {
+        h.step();
+    }
+    let b = tab_of(&h);
+    h.state_mut().run_cells(&ctx, None);
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(h.state().rt[&b].run.is_some(), "waits its turn");
+    // Stopped there: only its own run ends.
+    h.state_mut().cancel();
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let rb = &h.state().rt[&b];
+    assert!(rb.run.is_none() && rb.last_run.is_some_and(|l| l.1), "{:?}", rb.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    let ra = &h.state().rt[&a];
+    assert!(ra.run.is_some() && ra.run.as_ref().unwrap().stop_asked.is_none(), "the first goes on: {:?}", ra.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    // Run again there, then stopped in the first: the second's goes on.
+    h.state_mut().run_cells(&ctx, None);
+    h.step();
+    h.state_mut().ws_mut().active = 0;
+    h.state_mut().cancel();
+    for _ in 0..50 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    settle(&mut h);
+    let ra = &h.state().rt[&a];
+    assert!(ra.run.is_none() && ra.last_run.is_some_and(|l| l.1), "{:?}", ra.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    let rb = &h.state().rt[&b];
+    assert!(rb.run.is_none() && rb.last_run.is_some_and(|l| !l.1), "{:?}", rb.log.iter().map(|l| &l.text).collect::<Vec<_>>());
+    assert!(rb.results.first().is_some_and(|v| v.table.rows.first().and_then(|r| r[0].as_deref()) == Some("42")), "the second ran");
+}

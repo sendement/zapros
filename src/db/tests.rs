@@ -896,3 +896,157 @@ fn oracle_nls_lang_of_a_connection() {
     let e = open(&sp, &pw).err().expect("a language Oracle doesn't know");
     assert!(e.message.starts_with("NLS_LANG «KLINGON_QONOS.AL32UTF8»") && e.message.contains("ORA-"), "{}", e.message);
 }
+
+/// Several tabs share a session: a stop is for one run. One waiting its
+/// turn is skipped, the one running goes on; and what waited survives the
+/// session being made anew.
+#[test]
+fn stop_is_for_one_run() {
+    let dir = std::env::temp_dir().join(format!("zapros-test-{}", new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sp = Spec { kind: Kind::Sqlite, database: dir.join("t.db").to_string_lossy().into_owned(), ..Default::default() };
+    let slow = "with recursive c(x) as (select 1 union all select x + 1 from c where x < 2000000000) select count(*) from c";
+    let stmt = |s: &str| vec![Stmt { sql: s.into(), at: 0 }];
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let w = Worker::spawn(sp.clone(), String::new(), tx.clone(), egui::Context::default());
+    w.send(Req::Run { run: 1, stmts: stmt(slow), limit: 500, go_on: false });
+    wait_for(&rx, |w| matches!(w, What::Started { run: 1, .. }).then_some(()));
+    w.send(Req::Run { run: 2, stmts: stmt("select 2"), limit: 500, go_on: false });
+    w.send(Req::Run { run: 3, stmts: stmt("select 3"), limit: 500, go_on: false });
+    // The second waits its turn: skipped, the first not touched.
+    assert!(!w.cancel_run(2));
+    assert_eq!(w.current(), 1);
+    std::thread::sleep(Duration::from_millis(500));
+    let early: Vec<What> = rx.try_iter().map(|e| e.what).collect();
+    assert!(!early.iter().any(|w| matches!(w, What::Finished { run: 1, .. })), "{early:?}");
+    // The first stopped: the third goes on, the second never starts.
+    assert!(w.cancel_run(1));
+    let mut seen = Vec::new();
+    let three = wait_for(&rx, |w| {
+        let r = if let What::Result { run: 3, outcome, .. } = &w { Some(rows(outcome.clone().unwrap()).rows[0][0].clone()) } else { None };
+        seen.push(w);
+        r
+    });
+    assert_eq!(three.as_deref(), Some("3"));
+    assert!(seen.iter().any(|w| matches!(w, What::Finished { run: 1, cancelled: true })), "{seen:?}");
+    assert!(!seen.iter().any(|w| matches!(w, What::Started { run: 2, .. } | What::Finished { run: 2, .. })), "{seen:?}");
+    // Ended by force: what waited goes on in the new one (bar what was stopped).
+    w.send(Req::Run { run: 4, stmts: stmt(slow), limit: 500, go_on: false });
+    wait_for(&rx, |w| matches!(w, What::Started { run: 4, .. }).then_some(()));
+    w.send(Req::Run { run: 5, stmts: stmt("select 5"), limit: 500, go_on: false });
+    w.send(Req::Run { run: 6, stmts: stmt("select 6"), limit: 500, go_on: false });
+    assert!(!w.cancel_run(5));
+    w.abandon();
+    let fresh = Worker::spawn(sp, String::new(), tx, egui::Context::default());
+    fresh.take_over(&w);
+    let six = wait_for(&rx, |w| match w {
+        What::Started { run: 5, .. } => panic!("a stopped run started"),
+        What::Result { run: 6, outcome, .. } => Some(rows(outcome.unwrap()).rows[0][0].clone()),
+        _ => None,
+    });
+    assert_eq!(six.as_deref(), Some("6"));
+    drop((w, fresh));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A TCP relay whose links so far can be frozen: nothing more passes,
+/// nothing is closed (a link a firewall dropped without a word).
+fn freezing_relay(to: String) -> (u16, Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let links: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> = Arc::default();
+    let list = links.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let Ok(up) = std::net::TcpStream::connect(&to) else { continue };
+            let frozen: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+            list.lock().unwrap().push(frozen.clone());
+            for (mut a, mut b) in [(c.try_clone().unwrap(), up.try_clone().unwrap()), (up, c)] {
+                let frozen = frozen.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16384];
+                    loop {
+                        let n = match a.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        while frozen.load(Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                        if b.write_all(&buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        }
+    });
+    (port, links)
+}
+
+/// ClickHouse over a link that dies silently under a running query: the
+/// wait doesn't hang forever, and how the query ended there is told.
+#[test]
+fn clickhouse_dead_link_told() {
+    let Some((mut sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) else { return };
+    let (port, links) = freezing_relay(format!("{}:{}", sp.host, sp.port));
+    (sp.host, sp.port) = ("127.0.0.1".into(), port);
+    let mut s = open(&sp, &pw).unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        for f in links.lock().unwrap().iter() {
+            f.store(true, Ordering::Relaxed);
+        }
+    });
+    let t0 = Instant::now();
+    let e = s.run_limit("select sleepEachRow(0.5) from numbers(8) settings max_block_size = 1", 100, &mut |_| {}).unwrap_err();
+    assert!(e.lost, "{e:?}");
+    assert!(e.message.contains("оборвалась") || e.message.contains("broke"), "{e:?}");
+    assert!(e.message.contains("успешно") || e.message.contains("fine"), "{e:?}");
+    assert!(t0.elapsed() < Duration::from_secs(40), "{:?}", t0.elapsed());
+    eprintln!("told: {} (after {:?})", e.message, t0.elapsed());
+}
+
+/// A session dropped silently while idle: the next run doesn't hang on it,
+/// the session's made anew.
+fn idle_drop(var: &str, kind: Kind) {
+    let Some((mut sp, pw)) = spec(var, kind) else { return };
+    let (port, links) = freezing_relay(format!("{}:{}", sp.host, sp.port));
+    (sp.host, sp.port) = ("127.0.0.1".into(), port);
+    let stmt = |s: &str| vec![Stmt { sql: s.into(), at: 0 }];
+    let one = if kind == Kind::Oracle { "select 1 from dual" } else { "select 1" };
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let w = Worker::spawn(sp, pw, tx, egui::Context::default());
+    w.send(Req::Run { run: 1, stmts: stmt(one), limit: 500, go_on: false });
+    wait_for(&rx, |w| matches!(w, What::Finished { run: 1, .. }).then_some(()));
+    for f in links.lock().unwrap().iter() {
+        f.store(true, Ordering::Relaxed);
+    }
+    std::thread::sleep(IDLE_CHECK + Duration::from_millis(500));
+    let t0 = Instant::now();
+    w.send(Req::Run { run: 2, stmts: stmt(one), limit: 500, go_on: false });
+    let mut connecting = false;
+    let r = wait_for(&rx, |w| match w {
+        What::Connecting => {
+            connecting = true;
+            None
+        }
+        What::Result { run: 2, outcome, .. } => Some(outcome),
+        _ => None,
+    });
+    assert!(r.is_ok(), "{r:?}");
+    assert!(connecting, "made anew");
+    assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn postgres_idle_drop() {
+    idle_drop("ZAPROS_TEST_PG", Kind::Postgres);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+fn oracle_idle_drop() {
+    idle_drop("ZAPROS_TEST_ORA", Kind::Oracle);
+}

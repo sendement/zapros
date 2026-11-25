@@ -29,7 +29,15 @@ fn connect_string(spec: &Spec) -> String {
     if spec.host.trim().is_empty() {
         spec.database.clone()
     } else {
-        format!("//{}:{}/{}", spec.host.trim(), if spec.port == 0 { 1521 } else { spec.port }, spec.database.trim())
+        let (host, port, service) = (spec.host.trim(), if spec.port == 0 { 1521 } else { spec.port }, spec.database.trim());
+        // A plain service name: a descriptor with EXPIRE_TIME — the client
+        // probes the link each minute (a firewall or a VPN won't drop it
+        // idle under a long query, and a dead one is told, not waited on).
+        if !service.is_empty() && service.chars().all(|c| c.is_alphanumeric() || "._-$#".contains(c)) {
+            format!("(DESCRIPTION=(EXPIRE_TIME=1)(ADDRESS=(PROTOCOL=TCP)(HOST={host})(PORT={port}))(CONNECT_DATA=(SERVICE_NAME={service})))")
+        } else {
+            format!("//{host}:{port}/{service}")
+        }
     }
 }
 
@@ -676,6 +684,14 @@ impl Session for Ora {
 
     fn alive(&mut self) -> bool {
         self.conn.status().is_ok_and(|s| s == oracle::ConnStatus::Normal)
+    }
+
+    fn ping(&mut self) -> bool {
+        // (Timed out, the client waits as long again on its break: half.)
+        self.conn.set_call_timeout(Some(super::PING_WAIT / 2)).ok();
+        let ok = self.conn.ping().is_ok();
+        self.conn.set_call_timeout(None).ok();
+        ok
     }
 }
 

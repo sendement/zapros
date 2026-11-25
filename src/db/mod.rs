@@ -406,6 +406,11 @@ pub trait Session: Send {
     fn alive(&mut self) -> bool {
         true
     }
+    /// Answers within a few seconds (a session left idle a while may be
+    /// gone without a word: a firewall or a VPN dropped it).
+    fn ping(&mut self) -> bool {
+        true
+    }
     /// By-hand transactions: called before each statement (opens the
     /// transaction, a savepoint…) and after it.
     fn tx_before(&mut self, _sql: &str) -> Res<()> {
@@ -643,6 +648,11 @@ pub enum What {
     TxDone { op: TxOp, result: Result<(), String> },
 }
 
+/// Idle longer than this, a session is pinged before it's used.
+const IDLE_CHECK: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(60) };
+/// How long a ping may take.
+pub const PING_WAIT: Duration = Duration::from_secs(10);
+
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// A thread holding one session.
@@ -656,6 +666,13 @@ pub struct Worker {
     server: Arc<Mutex<Option<String>>>,
     /// Given up on: once free, it runs nothing more and closes.
     gone: Arc<std::sync::atomic::AtomicBool>,
+    /// The run it's on (0: none); runs stopped while they waited their
+    /// turn, skipped when it comes. (Several tabs and notebooks share the
+    /// session: a stop is for one run, not for whatever runs at the time.)
+    current: Arc<Mutex<u64>>,
+    dropped: Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// What waits in its queue (for a worker taking over from it).
+    queue: Receiver<Req>,
 }
 
 impl Worker {
@@ -667,10 +684,12 @@ impl Worker {
         let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let server: Arc<Mutex<Option<String>>> = Arc::default();
         let gone: Arc<std::sync::atomic::AtomicBool> = Arc::default();
-        let w = Worker { tx, generation, cancel: cancel.clone(), busy: busy.clone(), stop: stop.clone(), server: server.clone(), gone: gone.clone() };
+        let current: Arc<Mutex<u64>> = Arc::default();
+        let dropped: Arc<Mutex<std::collections::HashSet<u64>>> = Arc::default();
+        let w = Worker { tx, generation, cancel: cancel.clone(), busy: busy.clone(), stop: stop.clone(), server: server.clone(), gone: gone.clone(), current: current.clone(), dropped: dropped.clone(), queue: rx.clone() };
         std::thread::Builder::new()
             .name(format!("zapros-db-{}", spec.kind.name()))
-            .spawn(move || work(spec, password, rx, events, ctx, generation, Shared { cancel, busy, stop, server, gone }))
+            .spawn(move || work(spec, password, rx, events, ctx, generation, Shared { cancel, busy, stop, server, gone, current, dropped }))
             .expect("thread");
         w
     }
@@ -691,7 +710,37 @@ impl Worker {
         self.tx.send(r).ok();
     }
 
-    /// Stops the running statement (when the server lets one stop).
+    /// What waited in `old`'s queue goes on here (the runs of other tabs
+    /// survive one being ended by force).
+    pub fn take_over(&self, old: &Worker) {
+        self.dropped.lock().unwrap().extend(old.dropped.lock().unwrap().iter().copied());
+        for r in old.queue.try_iter() {
+            self.tx.send(r).ok();
+        }
+    }
+
+    /// The run it's on now (0: none).
+    pub fn current(&self) -> u64 {
+        *self.current.lock().unwrap()
+    }
+
+    /// Stops `run`: its statement, when it's the one running (true), or
+    /// else its turn, skipped when it comes (false: it's over already).
+    pub fn cancel_run(&self, run: u64) -> bool {
+        let cur = self.current.lock().unwrap();
+        if *cur != run {
+            self.dropped.lock().unwrap().insert(run);
+            return false;
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(c) = self.cancel.lock().unwrap().clone() {
+            std::thread::spawn(move || c());
+        }
+        true
+    }
+
+    /// Stops the running statement (when the server lets one stop),
+    /// whoever's it is.
     pub fn cancel(&self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(c) = self.cancel.lock().unwrap().clone() {
@@ -718,10 +767,12 @@ struct Shared {
     stop: Arc<std::sync::atomic::AtomicBool>,
     server: Arc<Mutex<Option<String>>>,
     gone: Arc<std::sync::atomic::AtomicBool>,
+    current: Arc<Mutex<u64>>,
+    dropped: Arc<Mutex<std::collections::HashSet<u64>>>,
 }
 
 fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, ctx: egui::Context, generation: u64, sh: Shared) {
-    let Shared { cancel, busy, stop, server, gone } = sh;
+    let Shared { cancel, busy, stop, server, gone, current, dropped } = sh;
     let conn = spec.id.clone();
     // The saved password, read here: the secret store may take a while.
     let password = if password.is_empty() && spec.save_password && spec.kind != Kind::Sqlite { crate::secrets::get(&spec.id).unwrap_or_default() } else { password };
@@ -731,10 +782,25 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
     };
     let mut session: Option<Box<dyn Session>> = None;
     let auto = std::cell::Cell::new(spec.auto_commit || !spec.kind.transactions());
+    // When the session was last used: idle a while, it's asked first.
+    let used = std::cell::Cell::new(Instant::now());
     // Makes the session when there's none; tells when it can't.
     let ensure = |session: &mut Option<Box<dyn Session>>| -> bool {
-        if session.as_mut().is_some_and(|s| s.alive()) {
-            return true;
+        if let Some(s) = session.as_mut()
+            && s.alive()
+        {
+            let idle = used.replace(Instant::now()).elapsed();
+            if idle < IDLE_CHECK || s.ping() {
+                return true;
+            }
+            // Dropped while idle: made anew (an open transaction is lost).
+            if !auto.get() {
+                tell(What::Lost(crate::i18n::t("сессия оборвалась, пока простаивала", "the session dropped while idle").into()));
+            }
+            // (Let go aside: closing it may wait on the dead link too.)
+            if let Some(dead) = session.take() {
+                std::thread::spawn(move || drop(dead));
+            }
         }
         tell(What::Connecting);
         match open(&spec, &password) {
@@ -744,6 +810,7 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 *server.lock().unwrap() = s.server_id();
                 tell(What::Connected { version: s.version() });
                 *session = Some(s);
+                used.set(Instant::now());
                 true
             }
             Err(e) => {
@@ -760,6 +827,15 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
         if gone.load(Ordering::Relaxed) {
             break;
         }
+        // Its turn: on, unless it was stopped while it waited.
+        if let Req::Run { run, .. } = &req {
+            let mut cur = current.lock().unwrap();
+            if dropped.lock().unwrap().remove(run) {
+                continue;
+            }
+            *cur = *run;
+            stop.store(false, Ordering::Relaxed);
+        }
         *busy.lock().unwrap() = Some(Instant::now());
         match req {
             Req::Close => break,
@@ -773,7 +849,6 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             Req::Run { run, stmts, limit, go_on } => {
                 let mut cancelled = false;
                 let mut paged = false;
-                stop.store(false, Ordering::Relaxed);
                 if ensure(&mut session) {
                     let last = stmts.len().saturating_sub(1);
                     for (index, st) in stmts.into_iter().enumerate() {
@@ -914,8 +989,12 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 if !paged {
                     tell(What::Finished { run, cancelled });
                 }
+                *current.lock().unwrap() = 0;
             }
-            Req::More { .. } | Req::StopFetch => {}
+            // (No cursor open any more — the session was made anew: what's
+            // loaded stays, the rest can't come.)
+            Req::More { run, .. } => tell(What::Rows { run, rows: Vec::new(), more: true, open: false, error: None }),
+            Req::StopFetch => {}
             // (No cursor open any more: what's in it so far, saved.)
             Req::Drain { run, sink } => {
                 tell(What::Exported { run, msg: sink.finish() });

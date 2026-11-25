@@ -67,6 +67,10 @@ impl Pg {
             .application_name("zapros")
             .keepalives(true)
             .keepalives_idle(std::time::Duration::from_secs(30))
+            // A dead link (a firewall or a VPN dropped it) is told within
+            // about a minute, not after the system's two hours.
+            .keepalives_interval(std::time::Duration::from_secs(10))
+            .keepalives_retries(3)
             .connect_timeout(std::time::Duration::from_secs(spec.connect_timeout.max(1)));
         if !password.is_empty() {
             cfg.password(password);
@@ -634,6 +638,11 @@ impl Session for Pg {
 
     fn alive(&mut self) -> bool {
         !self.client.is_closed()
+    }
+
+    fn ping(&mut self) -> bool {
+        let q = self.client.simple_query("");
+        self.rt.block_on(async { tokio::time::timeout(super::PING_WAIT, q).await }).is_ok_and(|r| r.is_ok())
     }
 
     fn tx_before(&mut self, sql: &str) -> Res<()> {

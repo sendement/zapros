@@ -909,7 +909,7 @@ impl App {
         if let Some(rt) = self.rt.remove(&tab.id) {
             if let Some(r) = rt.run {
                 if let Some(l) = self.live.get(&r.conn) {
-                    l.query.cancel();
+                    l.query.cancel_run(r.run);
                 }
             }
         }
@@ -1312,23 +1312,9 @@ impl App {
         if self.tab().is_notebook() {
             let prefix = format!("{id}#");
             let running: Vec<String> = self.rt.iter().filter(|(k, r)| k.starts_with(&prefix) && r.run.is_some()).map(|(k, _)| k.clone()).collect();
-            // Asked again once it hangs: ended by force.
-            if running.iter().any(|k| self.rt[k].run.as_ref().is_some_and(Running::hung)) {
-                for k in running {
-                    self.force_key(&k);
-                }
-                return;
-            }
+            // Each of its own: the others' runs in the same session go on.
             for k in &running {
-                if let Some(r) = self.rt.get_mut(k).and_then(|r| r.run.as_mut()) {
-                    r.stop_asked.get_or_insert_with(Instant::now);
-                }
-            }
-            let conns: Vec<String> = running.iter().filter_map(|k| self.rt[k].run.as_ref().map(|r| r.conn.clone())).collect();
-            for c in conns {
-                if let Some(l) = self.live.get(&c) {
-                    l.query.cancel();
-                }
+                self.cancel_key(k);
             }
             if running.is_empty() {
                 let loading: Vec<(String, usize)> = self.rt.iter().filter(|(k, _)| k.starts_with(&prefix)).flat_map(|(k, r)| r.results.iter().enumerate().filter(|(_, v)| v.loading.is_some()).map(|(i, _)| (k.clone(), i)).collect::<Vec<_>>()).collect();
@@ -1358,11 +1344,14 @@ impl App {
             self.force_key(&id);
             return;
         }
-        if let Some(r) = self.rt.get_mut(&id).and_then(|r| r.run.as_mut()) {
-            r.stop_asked.get_or_insert_with(Instant::now);
-            if let Some(l) = self.live.get(&r.conn) {
-                l.query.cancel();
-            }
+        let Some(r) = self.rt.get_mut(&id).and_then(|r| r.run.as_mut()) else { return };
+        r.stop_asked.get_or_insert_with(Instant::now);
+        let (run, conn) = (r.run, r.conn.clone());
+        let Some(l) = self.live.get(&conn) else { return };
+        // Still waiting its turn (another tab's run is on): it's over now.
+        if !l.query.cancel_run(run) {
+            self.tx.send(crate::db::Event { conn, generation: l.query.generation, what: What::Finished { run, cancelled: true } }).ok();
+            self.ctx.request_repaint();
         }
     }
 
@@ -1370,21 +1359,29 @@ impl App {
     /// stop: the session's given up on and made anew (what else waited in
     /// it ends too), and the server's end of it ended from the other one.
     pub fn force_key(&mut self, id: &str) {
-        let Some(conn) = self.rt.get(id).and_then(|r| r.run.as_ref()).map(|r| r.conn.clone()) else { return };
+        let Some((run, conn)) = self.rt.get(id).and_then(|r| r.run.as_ref()).map(|r| (r.run, r.conn.clone())) else { return };
         let Some(l) = self.live.get_mut(&conn) else { return };
+        // Not the one that hangs (it waits its turn): only its turn ends.
+        if l.query.current() != run {
+            if !l.query.cancel_run(run) {
+                self.tx.send(crate::db::Event { conn, generation: l.query.generation, what: What::Finished { run, cancelled: true } }).ok();
+            }
+            return;
+        }
         let server = l.query.server_id();
         l.query.abandon();
-        l.query = Worker::spawn(l.spec.clone(), l.password.clone(), self.tx.clone(), self.ctx.clone());
+        let fresh = Worker::spawn(l.spec.clone(), l.password.clone(), self.tx.clone(), self.ctx.clone());
+        fresh.take_over(&l.query);
+        l.query = fresh;
         if let Some(sid) = &server {
             l.meta.send(Req::Kill { id: sid.clone() });
         }
         let lost_tx = std::mem::take(&mut l.pending);
-        // Every run on that session: this one and the ones queued behind it.
-        let keys: Vec<String> = self.rt.iter().filter(|(_, r)| r.run.as_ref().is_some_and(|r| r.conn == conn)).map(|(k, _)| k.clone()).collect();
+        // This run only: the ones queued behind it go on in the new session.
         let mut dropped = Vec::new();
-        for k in keys {
-            let rt = self.rt.get_mut(&k).unwrap();
-            let r = rt.run.take().unwrap();
+        for k in [id.to_string()] {
+            let Some(rt) = self.rt.get_mut(&k) else { continue };
+            let Some(r) = rt.run.take() else { continue };
             self.runs.remove(&r.run);
             dropped.push(r.run);
             rt.last_run = Some((r.since.elapsed(), true));
@@ -1396,11 +1393,7 @@ impl App {
                 v.cursor = None;
                 v.loading = None;
             }
-            let text = if k == id {
-                t("Запрос прерван принудительно: сервер не ответил на остановку, сессия закрыта и открыта заново", "Run ended by force: the server didn't answer the stop, the session was closed and opened anew")
-            } else {
-                t("Запрос снят: его сессия была прервана принудительно", "Run dropped: its session was ended by force")
-            };
+            let text = t("Запрос прерван принудительно: сервер не ответил на остановку, сессия закрыта и открыта заново", "Run ended by force: the server didn't answer the stop, the session was closed and opened anew");
             rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: text.into(), at: None });
             if lost_tx {
                 rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Note, text: t("Незафиксированные изменения той сессии потеряны", "That session's uncommitted changes are lost").into(), at: None });

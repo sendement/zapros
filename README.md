@@ -31,7 +31,19 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   request, ClickHouse `KILL QUERY`, Oracle break, SQLite interrupt), and one
   the server won't stop can be abandoned (its session is made anew). A
   ClickHouse session still busy a few seconds on (SESSION_IS_LOCKED) gives
-  way to a new one, with a note in Messages. A window the compositor
+  way to a new one, with a note in Messages.
+  Tabs and notebooks on one connection share its script session: their
+  runs take turns, and Stop is for one run — a run still waiting its turn
+  is just dropped, the one running in another notebook goes on.
+  Links a firewall or a VPN drops silently are caught: PostgreSQL TCP
+  keepalives (a dead link is told within about a minute), Oracle
+  `EXPIRE_TIME` probes each minute, and a session idle for over a minute
+  is pinged (10 s) before use, made anew when it doesn't answer. ClickHouse
+  over HTTP has no heartbeat, so a query whose answer is awaited is looked
+  for in `system.processes` from aside every 20 s: gone there and still no
+  answer, the wait is cut and how it ended on the server (from
+  `system.query_log`: finished, rows written, or its error) is told; the
+  server not answering for over a minute cuts the wait too. A window the compositor
   doesn't show (another workspace or screen) no longer turns "not
   responding": no vsync wait, frames paced by hand.
 - **Two rows of tabs.** Workspaces (named, coloured, each with its own
@@ -221,8 +233,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
 - **A hung run ended by force**: when the server doesn't answer Stop within
   3 seconds, Stop turns into ⚡ Kill (in the toolbar and on a notebook
   cell; or Shift+Esc again). The session is given up on and a new one
-  opened (its uncommitted changes are lost; runs queued behind on it are
-  dropped), and the hung session is ended on the server from the other
+  opened (its uncommitted changes are lost; runs of other tabs queued
+  behind it go on in the new one), and the hung session is ended on the server from the other
   one: PostgreSQL `pg_terminate_backend`, Oracle `ALTER SYSTEM KILL
   SESSION` (when the user may), ClickHouse `KILL QUERY`.
 - **Notebook cells** carry the time they were made and colour labels
