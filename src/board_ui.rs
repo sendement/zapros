@@ -1360,7 +1360,7 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
     if dropping {
         painter.rect_stroke(rect.shrink(2.0), 8.0, Stroke::new(2.0, ui.visuals().selection.stroke.color), egui::StrokeKind::Inside);
     }
-    // Drawing: zones, links under the items, then the items in their order.
+    // Drawing: zones, the items in their order, then the links.
     let colors = Colors { text: ui.visuals().text_color(), strong: ui.visuals().strong_text_color(), weak: ui.visuals().weak_text_color(), card: crate::ui::card(ui.visuals()) };
     let accent = ui.visuals().selection.stroke.color;
     let b = &mut open.board;
@@ -1369,6 +1369,12 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
     for it in b.items[..zones].iter_mut() {
         draw_item(&painter, ui, it, view, &colors, editing == Some(it.id), None);
     }
+    for it in b.items[zones..].iter_mut() {
+        let sub = if st.sel == [it.id] { st.sub } else { None };
+        draw_item(&painter, ui, it, view, &colors, editing == Some(it.id), sub);
+    }
+    // Links over everything (backgrounds, frames, tables): never hidden
+    // behind what they join or pass.
     for l in &b.links {
         let Some(path) = b.link_path(l) else { continue };
         let pts: Vec<Pos2> = path.iter().map(|p| view.s(*p)).collect();
@@ -1383,10 +1389,6 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
             let k = (n - 1) / 2;
             label_on(&painter, pts[k], pts[k + 1], &l.label, view.zoom, &colors);
         }
-    }
-    for it in b.items[zones..].iter_mut() {
-        let sub = if st.sel == [it.id] { st.sub } else { None };
-        draw_item(&painter, ui, it, view, &colors, editing == Some(it.id), sub);
     }
     // The picked: framed, with a corner to resize by (one picked; a line:
     // its two ends).
@@ -1421,7 +1423,15 @@ fn canvas(app: &mut App, ui: &mut egui::Ui, open: &mut board::Open) {
                     Some(y) => Pos2::new(if to.x >= r.center().x { r.right() } else { r.left() }, y),
                     None => board::edge_point(r, *to),
                 };
-                styled_line(&painter, &[view.s(start), view.s(*to)], Stroke::new(st.line.width, c), &st.line, view.zoom);
+                // Along x and y, like the link it makes.
+                let pts = if (start.x - to.x).abs() < 1.0 || (start.y - to.y).abs() < 1.0 {
+                    vec![start, *to]
+                } else if y.is_some() || (start.x - r.left()).abs() < 0.5 || (start.x - r.right()).abs() < 0.5 {
+                    vec![start, Pos2::new(to.x, start.y), *to]
+                } else {
+                    vec![start, Pos2::new(start.x, to.y), *to]
+                };
+                styled_line(&painter, &pts.iter().map(|p| view.s(*p)).collect::<Vec<_>>(), Stroke::new(st.line.width, c), &st.line, view.zoom);
             }
         }
         Gesture::Band(a, z) => {

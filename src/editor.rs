@@ -952,6 +952,21 @@ fn undo_point(ctx: &egui::Context, id: egui::Id, text: &str, sel: Option<(usize,
     s.store(ctx, id);
 }
 
+/// Where `new` differs from `old` (in `new`), on whole characters: the
+/// same bytes before and after, cut back to where characters start (two
+/// letters may share their first byte).
+fn changed_span(old: &str, new: &str) -> Range<usize> {
+    let mut p = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !new.is_char_boundary(p) || !old.is_char_boundary(p) {
+        p -= 1;
+    }
+    let mut tail = old.bytes().rev().zip(new.bytes().rev()).take_while(|(a, b)| a == b).count().min(old.len() - p).min(new.len() - p);
+    while !new.is_char_boundary(new.len() - tail) || !old.is_char_boundary(old.len() - tail) {
+        tail -= 1;
+    }
+    p..new.len() - tail
+}
+
 /// What closes the brackets a paste (`r` in `text`) left open, those the
 /// rest of its statement doesn't close already.
 fn closers(text: &str, r: Range<usize>, d: Dialect) -> Option<String> {
@@ -1539,9 +1554,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
     if let (Some((w, w_cur)), true) = (&was, st.block.is_none()) {
         let changed = match wrapped.clone() {
             None if pasting && w != text => {
-                let p = w.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
-                let tail = w.bytes().rev().zip(text.bytes().rev()).take_while(|(a, b)| a == b).count().min(w.len() - p).min(text.len() - p);
-                Some(p..text.len() - tail)
+                Some(changed_span(w, text))
             }
             Some(r) if r.end <= text.len() => Some(r),
             _ => None,
@@ -2178,6 +2191,21 @@ pub fn selection(st: &EditorState) -> Option<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_span_on_whole_letters() {
+        // «Н» and «М» share their first byte: the span starts at the letter.
+        let (old, new) = ("select 'Нет' from dual", "select 'Мир' from dual");
+        let r = changed_span(old, new);
+        assert_eq!(&new[r.clone()], "Мир");
+        // All replaced (Ctrl+A, Ctrl+V), shared bytes at both ends.
+        let (old, new) = ("-- Ната\nselect 1", "-- Маша\nselect 2");
+        let r = changed_span(old, new);
+        assert!(new.is_char_boundary(r.start) && new.is_char_boundary(r.end));
+        assert_eq!(&new[r], "Маша\nselect 2");
+        assert_eq!(changed_span("ab", "ab"), 2..2);
+        assert_eq!(&"жук"[changed_span("жар", "жук")], "ук");
+    }
 
     #[test]
     fn lines_moved() {

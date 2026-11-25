@@ -346,7 +346,10 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   entities with their fields (keys, types) and a note; arrows from and
   to anything at any depth: an item, a workspace's tab, a statement in
   it, a table of a statement's scheme, any of their fields — with a
-  label and their own look. Drag empty space or the middle button to pan,
+  label and their own look. Links run along x and y only, round what's
+  between (frames, tables, shapes — not backgrounds or a frame round an
+  end; a search with a price per turn, so few corners), and are drawn over
+  everything. Drag empty space or the middle button to pan,
   Ctrl+wheel to zoom, Shift+drag to pick by a box, Ctrl+Z /
   Ctrl+Shift+Z, Ctrl+D a copy, Delete; tools by keys V R O D T B E A.
 - **SQLite triggers** (`CREATE TRIGGER … BEGIN …; END;`) run and split

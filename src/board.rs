@@ -255,8 +255,6 @@ pub fn part_tables(part: &Part, r: Rect) -> Vec<(u8, Rect, usize)> {
 pub const HEAD_H: f32 = 28.0;
 pub const ROW_H: f32 = 20.0;
 pub const NOTE_LINE_H: f32 = 17.0;
-/// How far a field's link goes out sideways before it turns.
-pub const LINK_STUB: f32 = 24.0;
 /// A statement's table; the room round and between what a frame holds.
 pub const PART_W: f32 = 210.0;
 pub const PAD: f32 = 12.0;
@@ -775,40 +773,25 @@ impl Board {
         // (A place gone — a statement no longer there: the item itself.)
         let (ra, ya) = a.anchor(l.from_at, l.from_field).or_else(|| a.anchor(At::default(), None))?;
         let (rb, yb) = b.anchor(l.to_at, l.to_field).or_else(|| b.anchor(At::default(), None))?;
-        let stacked = (ra.center().x - rb.center().x).abs() < (ra.width() + rb.width()) / 4.0;
-        // Out to the right (+1) or the left (-1).
-        let side = |r: Rect, other: Rect| if stacked || other.center().x >= r.center().x { 1.0 } else { -1.0 };
-        let end = |r: Rect, y: Option<f32>, other: Rect, toward: Pos2| -> (Pos2, Option<f32>) {
-            match y {
-                Some(y) => {
-                    let s = side(r, other);
-                    (Pos2::new(if s > 0.0 { r.right() } else { r.left() }, y), Some(s))
-                }
-                None => (edge_point(r, toward), None),
+        // In the way: everything but backgrounds, drawn lines and what
+        // holds an end (a frame round it); inside the ends' own items, the
+        // other tables and tabs.
+        let holds = |r: Rect, x: Rect| r.expand(0.5).contains_rect(x);
+        let mut walls = vec![ra, rb];
+        for it in &self.items {
+            if matches!(it.kind, Kind::Zone { .. } | Kind::Line { .. } | Kind::Stroke { .. }) {
+                continue;
             }
-        };
-        let (pa, sa) = end(ra, ya, rb, rb.center());
-        let (pb, sb) = end(rb, yb, ra, pa);
-        let (pa, sa) = if ya.is_none() { end(ra, None, rb, pb) } else { (pa, sa) };
-        let mut v = vec![pa];
-        if let Some(s) = sa {
-            v.push(pa + Vec2::new(LINK_STUB * s, 0.0));
-        }
-        if let (Some(s1), Some(s2)) = (sa, sb) {
-            // Both at the same side: out to the farther edge.
-            if s1 == s2 {
-                let x = if s1 > 0.0 { pa.x.max(pb.x) + LINK_STUB } else { pa.x.min(pb.x) - LINK_STUB };
-                v[1].x = x;
-                v.push(Pos2::new(x, pb.y));
-                v.push(pb);
-                return Some(v);
+            if it.id == a.id || it.id == b.id {
+                walls.extend(it.anchors().into_iter().skip(1).map(|x| x.rect).filter(|r| !holds(*r, ra) && !holds(*r, rb)));
+                continue;
+            }
+            let r = it.rect();
+            if !holds(r, ra) && !holds(r, rb) {
+                walls.push(r);
             }
         }
-        if let Some(s) = sb {
-            v.push(pb + Vec2::new(LINK_STUB * s, 0.0));
-        }
-        v.push(pb);
-        Some(v)
+        Some(crate::route::route(&crate::route::ports(ra, ya), &crate::route::ports(rb, yb), &walls))
     }
 
     /// A point's distance from a link's way.
@@ -1349,15 +1332,15 @@ mod tests {
         assert_eq!(p.x, 400.0);
         assert_eq!(q.x, 160.0);
         assert_eq!(p.y, b.item(c).unwrap().row_y(1));
-        // Out sideways from each row first.
-        assert_eq!(v[1], p - Vec2::new(LINK_STUB, 0.0));
-        assert_eq!(v[2], q + Vec2::new(LINK_STUB, 0.0));
+        // Out sideways from each row, along x and y only: one step across.
+        assert_eq!(v.len(), 4, "{v:?}");
+        assert!(v[1].y == p.y && v[1].x < p.x && v[2].x == v[1].x && v[2].y == q.y, "{v:?}");
         // One under the other: both out at the right, round the farther edge.
         b.item_mut(c).unwrap().rect[0] = 0.0;
         b.item_mut(c).unwrap().rect[1] = 300.0;
         let v = b.link_path(&b.links[0]).unwrap();
         assert_eq!(v.len(), 4, "{v:?}");
-        assert!(v[1].x > 160.0 && v[1].x == v[2].x);
+        assert!((v[1].x > 160.0 || v[1].x < 0.0) && v[1].x == v[2].x, "{v:?}");
         assert_eq!(b.link_dist(&b.links[0], Pos2::new(v[1].x, 200.0)), 0.0);
         b.item_mut(c).unwrap().rect[0] = 400.0;
         b.item_mut(c).unwrap().rect[1] = 0.0;
@@ -1371,6 +1354,30 @@ mod tests {
         assert_eq!(b.hit(Pos2::new(90.0, 210.0), 2.0), None);
         b.item_mut(s).unwrap().shift(Vec2::new(10.0, 0.0));
         assert!(matches!(&b.item(s).unwrap().kind, Kind::Stroke { points, .. } if points[0] == [10.0, 200.0]));
+    }
+
+    /// Links go round what's between, along x and y only; backgrounds and
+    /// frames round an end don't count.
+    #[test]
+    fn links_routed_round_things() {
+        let mut b = Board::new("b");
+        let a = entity(&mut b, 0.0, &["id"]);
+        let c = entity(&mut b, 500.0, &["a_id"]);
+        let id = b.take_id();
+        b.links.push(Link { id, from: c, to: a, from_field: Some(0), to_field: Some(0), label: String::new(), color: [0, 0, 0], style: LineStyle::default(), from_at: At::default(), to_at: At::default() });
+        let flat = |v: &[Pos2]| v.windows(2).all(|w| w[0].x == w[1].x || w[0].y == w[1].y);
+        // Nothing between: straight across.
+        assert_eq!(b.link_path(&b.links[0]).unwrap().len(), 2);
+        // A background under both and a frame round the first: still straight.
+        b.add(Rect::from_min_size(Pos2::new(-100.0, -100.0), Vec2::new(900.0, 400.0)), [0, 0, 0], Kind::Zone { title: String::new(), pattern: Pattern::default() });
+        b.add(Rect::from_min_size(Pos2::new(-40.0, -40.0), Vec2::new(260.0, 200.0)), [0, 0, 0], Kind::Frame { shape: Shape::Rect, text: String::new(), fill: false });
+        assert_eq!(b.link_path(&b.links[0]).unwrap().len(), 2, "{:?}", b.link_path(&b.links[0]));
+        // A shape between: round it.
+        let wall = b.add(Rect::from_min_size(Pos2::new(300.0, -60.0), Vec2::new(80.0, 200.0)), [0, 0, 0], Kind::Frame { shape: Shape::Rect, text: String::new(), fill: true });
+        let v = b.link_path(&b.links[0]).unwrap();
+        let r = b.item(wall).unwrap().rect();
+        assert!(flat(&v) && v.len() > 2, "{v:?}");
+        assert!(v.windows(2).all(|w| !Rect::from_two_pos(w[0], w[1]).intersects(r.shrink(1.0))), "{v:?}");
     }
 
     fn what(sql: &str, d: Dialect) -> What {
