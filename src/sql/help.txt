@@ -1570,9 +1570,12 @@ title: @set, @var, x = … | @set, @var, x = …
 sig: -- @set x = значение | -- @x = значение | -- @x += 1 | -- @x++
 ru: Переменная: число, строка, `шаблон ${x}`, список [1, 2], диапазон, словарь {a: 1}, дата | date или запрос (select …). В SQL: :x — значение, &x — текст как есть.
 en: A variable: a number, a string, a `template ${x}`, a list [1, 2], a range, a dictionary {a: 1}, a date | date or a query (select …). In SQL: :x a value, &x text as it is.
+ru: Коллекции меняются пайпом: ls | push x, ls | pop (последний), ls | pop 0, ls | remove x, ls | map it * 2, ls | filter it > 3, ls | sort [by it.n] [desc], ls | unique, ls | join '-'; на месте: @ls |= pop.
+en: Collections change by a pipe: ls | push x, ls | pop (the last), ls | pop 0, ls | remove x, ls | map it * 2, ls | filter it > 3, ls | sort [by it.n] [desc], ls | unique, ls | join '-'; in place: @ls |= pop.
 ex: -- @set day = '20261101' | date yyyymmdd
 ex: -- @set tables = (select name from system.tables where database = 'logs')
 ex: select * from logs.&tables[0] where d = :day;
+ex: -- @tables |= filter it != 'tmp' | sort
 
 @ @print, @echo | * | k | directive
 title: @print | @print

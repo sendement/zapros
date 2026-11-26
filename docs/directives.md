@@ -91,6 +91,8 @@ strings, NULL as `null`.
 -- @x = x - 1            -- assignment to an existing variable
 -- @x += 2               -- also -=, *=, /=
 -- @x++                  -- and @x--
+-- @ls |= pop            -- ls = ls | pop (collections, §4)
+-- @set r = 1..5         -- a range: the list [1, 2, 3, 4, 5]
 ```
 
 Names are letters, digits and `_`, not starting with a digit, compared in
@@ -125,7 +127,7 @@ not
 +  -           (+ on strings joins them; a list + a list joins the lists)
 *  /  %
 -x             unary minus
-|              pipe (conversion), §4
+|              pipe (conversion, a collection's operation), §4
 a.b  a[i]  f(…)  (…)
 ```
 
@@ -153,6 +155,41 @@ quoted (`| date 'dd.mm.yyyy hh24:mi'`).
 
 A date remembers its precision: `202611 | date yyyymm` is the month
 2026-11; used without a format it prints as `2026-11-01`.
+
+### Collections: `| push`, `| pop`, `| map`…
+
+The same pipe changes a list (or a dictionary); each gives a new one, the
+variable keeps its own until it's given back (`@ls = ls | pop`, or in
+place: `@ls |= pop`).
+
+```
+ls | push x                x added at the end
+ls | push x at 0           … at a place (0 the first, -1 the last)
+ls | pop                   the last taken off
+ls | pop 0                 the first (-2: the one before the last)
+ls | remove x              all equal to x taken off
+ls | map it * 2            each item (it) worked out
+ls | map x => x * 2        the same, the item named
+ls | filter it > 3         those that fit kept
+ls | sort  /  sort desc    by the items
+ls | sort by it.total desc by what each gives (rows of a query)
+ls | reverse               in reverse
+ls | unique                repeats taken off
+ls | join  /  join '-'     the items as text, ", " or the given text between
+
+d | push {k: 1}            keys added (or set)
+d | pop 'k'  /  remove 'k' a key taken off (pop alone: the last)
+d | filter it.value > 1    a dictionary's item is {key, value}
+d | map it.key             … a list of what each gives
+d | sort  /  sort by it.value
+```
+
+They chain: `rows | filter it.n > 0 | sort by it.n desc | map it.name`.
+An operation's argument ends at the next `|`; a pipe inside it goes in
+brackets: `ls | map (it | string) + '!'`. A range is a list too, and an
+operation after it takes the whole list: `@for i in 01..16 | filter it % 2 = 0`
+(`it` is the item while filtering; the loop's own name is set after),
+`@set even = (1..10) | filter it % 2 == 0`.
 
 ## 5. Variables in SQL: `:` and `&`
 
@@ -306,7 +343,7 @@ elif       = ("elif" | "else" "if") expr
 match      = "match" expr
 case       = "case" ( range | expr { "," expr } )
 set        = ("set" | "var") name "=" expr
-assign     = name ( ("=" | "+=" | "-=" | "*=" | "/=") expr | "++" | "--" )
+assign     = name ( ("=" | "+=" | "-=" | "*=" | "/=") expr | "|=" conv { "|" conv } | "++" | "--" )
 for        = "for" name [ "," name ] "in" source
 source     = range | expr
 range      = expr ".." expr [ pipe ] [ "step" [ number ] [ unit ] ]
@@ -327,6 +364,11 @@ mul        = unary { ( "*" | "/" | "%" ) unary }
 unary      = [ "-" ] piped
 piped      = post { "|" conv }
 conv       = "number" | "string" | "list" | "date" [ format ]
+           | "push" arg [ "at" arg ] | "pop" [ arg ] | "remove" arg
+           | "map" fn | "filter" fn | "sort" [ "by" fn ] [ "desc" | "asc" ]
+           | "reverse" | "unique" | "join" [ arg ]
+arg        = expr                              (a "|" ends it, unless in brackets)
+fn         = [ name "=>" ] arg                 (without a name: "it")
 post       = atom { "." name | "[" expr "]" | "(" args ")" }
 atom       = number | string | template | "true" | "false" | "null"
            | name | list | dict | "(" query ")" | "(" expr ")" | "(" expr "," … ")"

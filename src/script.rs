@@ -354,6 +354,29 @@ pub enum Conv {
     Str,
     List,
     Date(Option<String>),
+    /// A collection's: an item added (at its place: 0 the first, -1 the
+    /// last), one taken off (the last; by its place; a dictionary's by its
+    /// key), ones equal to a value taken off.
+    Push(Box<Expr>, Option<Box<Expr>>),
+    Pop(Option<Box<Expr>>),
+    Remove(Box<Expr>),
+    /// Each item (as `it`, or the name before "=>") worked out; kept when
+    /// it holds.
+    Map(String, Box<Expr>),
+    Filter(String, Box<Expr>),
+    /// By the items, or by what each gives.
+    Sort { desc: bool, by: Option<(String, Box<Expr>)> },
+    Reverse,
+    Unique,
+    /// The items as text, between them ", " or the given text.
+    Join(Option<Box<Expr>>),
+}
+
+impl Conv {
+    /// One that reads a collection (not a value's kind).
+    fn on_items(&self) -> bool {
+        !matches!(self, Conv::Number | Conv::Str | Conv::List | Conv::Date(_))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +400,8 @@ pub enum Expr {
     Unary(&'static str, Box<Expr>),
     Bin(&'static str, Box<Expr>, Box<Expr>),
     Pipe(Box<Expr>, Conv),
+    /// a .. b [| conv] [step …] [| …]: a list.
+    Range(Box<Steps>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -389,7 +414,7 @@ enum T {
     Op(&'static str),
 }
 
-const OPS: [&str; 27] = ["..", "==", "!=", "<>", "<=", ">=", "+=", "-=", "*=", "/=", "++", "--", "=", "<", ">", "+", "-", "*", "/", "%", "|", "(", ")", "[", "]", ",", "."];
+const OPS: [&str; 29] = ["..", "=>", "|=", "==", "!=", "<>", "<=", ">=", "+=", "-=", "*=", "/=", "++", "--", "=", "<", ">", "+", "-", "*", "/", "%", "|", "(", ")", "[", "]", ",", "."];
 
 fn tokens(src: &str) -> Result<Vec<T>, String> {
     let mut out = Vec::new();
@@ -513,11 +538,14 @@ fn closing(src: &str, open: usize) -> Option<usize> {
 struct P {
     t: Vec<T>,
     i: usize,
+    /// Inside a collection operation's argument: "|" ends it (the next
+    /// operation's), unless in brackets.
+    no_pipe: u32,
 }
 
 impl P {
     fn new(src: &str) -> Result<P, String> {
-        Ok(P { t: tokens(src)?, i: 0 })
+        Ok(P { t: tokens(src)?, i: 0, no_pipe: 0 })
     }
 
     fn peek(&self) -> Option<&T> {
@@ -580,6 +608,9 @@ impl P {
     /// An expression, or bare items with commas: a list.
     fn list_or_expr(&mut self) -> Result<Expr, String> {
         let first = self.expr()?;
+        if self.eat_op("..") {
+            return Ok(Expr::Range(Box::new(steps(self, first)?)));
+        }
         if !self.is_op(",") {
             return Ok(first);
         }
@@ -668,10 +699,41 @@ impl P {
             return Ok(Expr::Unary("-", Box::new(self.unary()?)));
         }
         let mut e = self.post()?;
-        while self.eat_op("|") {
+        while self.no_pipe == 0 && self.eat_op("|") {
             e = Expr::Pipe(Box::new(e), self.conv()?);
         }
         Ok(e)
+    }
+
+    /// An operation's argument: up to the next "|".
+    fn arg(&mut self) -> Result<Expr, String> {
+        self.no_pipe += 1;
+        let e = self.expr();
+        self.no_pipe -= 1;
+        e
+    }
+
+    /// An optional argument is there.
+    fn arg_follows(&self) -> bool {
+        match self.peek() {
+            None => false,
+            Some(T::Op(o)) => matches!(*o, "(" | "[" | "{" | "-"),
+            Some(T::Name(n)) => !["and", "or", "step", "desc", "asc", "at", "by", "in"].contains(&n.to_ascii_lowercase().as_str()),
+            Some(_) => true,
+        }
+    }
+
+    /// "x => …" or "…" (with `it`).
+    fn lambda(&mut self) -> Result<(String, Box<Expr>), String> {
+        let name = match (self.peek(), self.t.get(self.i + 1)) {
+            (Some(T::Name(n)), Some(T::Op("=>"))) => {
+                let n = n.to_ascii_lowercase();
+                self.i += 2;
+                n
+            }
+            _ => "it".to_string(),
+        };
+        Ok((name, Box::new(self.arg()?)))
     }
 
     fn conv(&mut self) -> Result<Conv, String> {
@@ -708,7 +770,33 @@ impl P {
                 }
                 Conv::Date((!f.is_empty()).then_some(f))
             }
-            other => return Err(format!("no conversion \"{other}\" (number, string, list, date)")),
+            "push" | "append" | "add" => {
+                let x = self.arg()?;
+                let at = if self.eat_word("at") { Some(Box::new(self.arg()?)) } else { None };
+                Conv::Push(Box::new(x), at)
+            }
+            "pop" => Conv::Pop(if self.arg_follows() { Some(Box::new(self.arg()?)) } else { None }),
+            "remove" => Conv::Remove(Box::new(self.arg()?)),
+            "map" => {
+                let (n, e) = self.lambda()?;
+                Conv::Map(n, e)
+            }
+            "filter" | "where" => {
+                let (n, e) = self.lambda()?;
+                Conv::Filter(n, e)
+            }
+            "sort" => {
+                let by = if self.eat_word("by") { Some(self.lambda()?) } else { None };
+                let desc = self.eat_word("desc");
+                if !desc {
+                    self.eat_word("asc");
+                }
+                Conv::Sort { desc, by }
+            }
+            "reverse" => Conv::Reverse,
+            "unique" | "distinct" => Conv::Unique,
+            "join" => Conv::Join(if self.arg_follows() { Some(Box::new(self.arg()?)) } else { None }),
+            other => return Err(format!("no \"| {other}\" (number, string, list, date, push, pop, remove, map, filter, sort, reverse, unique, join)")),
         })
     }
 
@@ -735,6 +823,17 @@ impl P {
     }
 
     fn atom(&mut self) -> Result<Expr, String> {
+        // In brackets (a call's too) pipes are its own again.
+        let saved = self.no_pipe;
+        if matches!(self.peek(), Some(T::Op("(" | "[" | "{"))) || matches!((self.peek(), self.t.get(self.i + 1)), (Some(T::Name(_)), Some(T::Op("(")))) {
+            self.no_pipe = 0;
+        }
+        let r = self.atom_in();
+        self.no_pipe = saved;
+        r
+    }
+
+    fn atom_in(&mut self) -> Result<Expr, String> {
         let Some(t) = self.peek().cloned() else { return Err("a value expected at the end".into()) };
         self.i += 1;
         Ok(match t {
@@ -771,6 +870,11 @@ impl P {
             },
             T::Op("(") => {
                 let e = self.expr()?;
+                if self.eat_op("..") {
+                    let r = Expr::Range(Box::new(steps(self, e)?));
+                    self.want_op(")")?;
+                    return Ok(r);
+                }
                 if self.eat_op(",") {
                     let mut items = vec![e];
                     if !self.is_op(")") {
@@ -875,6 +979,8 @@ pub struct Steps {
     pub conv: Option<Conv>,
     /// How many, of what (None: by the ends' kind).
     pub step: Option<(Option<Expr>, Option<Prec>)>,
+    /// Operations on the range's list (| filter …, | map …).
+    pub after: Vec<Conv>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -937,7 +1043,7 @@ fn directive_text(comment: &str) -> Option<&str> {
     }
     let low = word.to_ascii_lowercase();
     let after = body[word.len()..].trim_start();
-    let known = WORDS.contains(&low.as_str()) || ["=", "+=", "-=", "*=", "/=", "++", "--"].iter().any(|o| after.starts_with(o));
+    let known = WORDS.contains(&low.as_str()) || ["=", "+=", "-=", "*=", "/=", "|=", "++", "--"].iter().any(|o| after.starts_with(o));
     if !known {
         return None;
     }
@@ -1125,7 +1231,7 @@ pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, 
                 kind
             } else if call && FUNCTIONS.contains(&w.as_str()) {
                 Paint::Func
-            } else if matches!(w.as_str(), "in" | "step" | "and" | "or" | "not" | "true" | "false" | "null" | "error" | "continue" | "stop") || (unit(&w).is_some() && out.iter().any(|(r, _)| s[r.clone()].eq_ignore_ascii_case("step"))) {
+            } else if matches!(w.as_str(), "in" | "step" | "and" | "or" | "not" | "true" | "false" | "null" | "error" | "continue" | "stop" | "at" | "by" | "desc" | "asc") || (unit(&w).is_some() && out.iter().any(|(r, _)| s[r.clone()].eq_ignore_ascii_case("step"))) {
                 kind
             } else {
                 Paint::Name
@@ -1158,7 +1264,7 @@ pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, 
             let op = OPS.iter().chain(["{", "}", ":", "$"].iter()).find(|o| s[i..].starts_with(**o)).map_or(c.len_utf8(), |o| o.len());
             i += op;
             out.push((start..i, Paint::Op));
-            prev_pipe = &s[start..i] == "|";
+            prev_pipe = matches!(&s[start..i], "|" | "|=");
             continue;
         }
         prev_pipe = false;
@@ -1266,11 +1372,22 @@ pub fn marks(sql: &str, in_comment: &dyn Fn(usize) -> bool) -> Vec<Range<usize>>
 }
 
 fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
-    let to = p.unary()?;
+    let mut to = p.unary()?;
+    // "a .. b | filter …": on the list; peeled off the end.
+    let mut after = Vec::new();
+    while let Expr::Pipe(t, c) = to {
+        if c.on_items() {
+            after.insert(0, c);
+            to = *t;
+        } else {
+            to = Expr::Pipe(t, c);
+            break;
+        }
+    }
     let mut conv = None;
     let (from, to) = match (from, to) {
         // "a .. b | date f": the pipe reads both ends.
-        (f, Expr::Pipe(t, c)) if !matches!(f, Expr::Pipe(..)) => {
+        (f, Expr::Pipe(t, c)) if !matches!(f, Expr::Pipe(..)) && after.is_empty() => {
             conv = Some(c);
             (f, *t)
         }
@@ -1289,7 +1406,10 @@ fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
         };
         step = Some((n, u));
     }
-    Ok(Steps { from, to, conv, step })
+    while p.no_pipe == 0 && p.eat_op("|") {
+        after.push(p.conv()?);
+    }
+    Ok(Steps { from, to, conv, step, after })
 }
 
 fn unit(w: &str) -> Option<Prec> {
@@ -1440,10 +1560,19 @@ fn read_line(src: &str, line: usize) -> Result<Line, String> {
         _ => {
             // name = …, name += …, name++, name--.
             let name = low;
-            let op = ["=", "+=", "-=", "*=", "/=", "++", "--"].into_iter().find(|o| p.is_op(o)).ok_or(format!("no directive \"@{word}\""))?;
+            let op = ["=", "+=", "-=", "*=", "/=", "|=", "++", "--"].into_iter().find(|o| p.is_op(o)).ok_or(format!("no directive \"@{word}\""))?;
             p.i += 1;
-            let value = if op == "++" || op == "--" { None } else { Some(p.list_or_expr()?) };
-            Line::Node(Node::Set { line, name, op, value })
+            if op == "|=" {
+                // x |= pop: x = x | pop.
+                let mut e = Expr::Pipe(Box::new(Expr::Var(name.clone())), p.conv()?);
+                while p.eat_op("|") {
+                    e = Expr::Pipe(Box::new(e), p.conv()?);
+                }
+                Line::Node(Node::Set { line, name, op: "=", value: Some(e) })
+            } else {
+                let value = if op == "++" || op == "--" { None } else { Some(p.list_or_expr()?) };
+                Line::Node(Node::Set { line, name, op, value })
+            }
         }
     };
     p.done()?;
@@ -1830,6 +1959,10 @@ impl Run<'_> {
                             }
                             any
                         }
+                        Case::Range(s) if !s.after.is_empty() => {
+                            let Value::List(l) = self.eval(&Expr::Range(Box::new(s.clone())), vars, *line)? else { unreachable!() };
+                            l.iter().any(|w| equal(&v, w))
+                        }
                         Case::Range(s) => {
                             let (a, b, _) = self.ends(s, vars, *line)?;
                             let lo = if compare(&a, &b).is_some_and(|o| o.is_le()) { (a, b) } else { (b, a) };
@@ -1923,8 +2056,16 @@ impl Run<'_> {
             }),
             Source::Range(s) => {
                 let (a, b, step) = self.ends(s, vars, line)?;
-                let list = range(&a, &b, step).map_err(wrong)?;
-                Ok(numbered(list))
+                let mut list = Value::List(range(&a, &b, step).map_err(wrong)?);
+                for c in &s.after {
+                    list = on_items(list, c, vars, self.d, self.host).map_err(wrong)?;
+                }
+                Ok(match list {
+                    Value::List(l) => numbered(l),
+                    Value::Dict(d) => d.into_iter().map(|(k, v)| (Value::Str(k), v)).collect(),
+                    Value::Null => Vec::new(),
+                    v => numbered(vec![v]),
+                })
             }
         }
     }
@@ -2055,6 +2196,9 @@ fn convert(v: Value, c: &Conv) -> Result<Value, String> {
                 Value::Date(d, p)
             }
         },
+
+        // (Those go through on_items.)
+        _ => return Err("not a conversion".into()),
     })
 }
 
@@ -2254,7 +2398,224 @@ fn eval(e: &Expr, vars: &Vars, d: Dialect, host: &mut dyn Host) -> Result<Value,
             }
             op => binary(op, eval(a, vars, d, host)?, eval(b, vars, d, host)?)?,
         },
+        Expr::Pipe(x, c) if c.on_items() => on_items(eval(x, vars, d, host)?, c, vars, d, host)?,
         Expr::Pipe(x, c) => convert(eval(x, vars, d, host)?, c)?,
+        Expr::Range(s) => {
+            let mut a = eval(&s.from, vars, d, host)?;
+            let mut b = eval(&s.to, vars, d, host)?;
+            if let Some(c) = &s.conv {
+                a = convert(a, c)?;
+                b = convert(b, c)?;
+            }
+            let step = match &s.step {
+                None => None,
+                Some((n, u)) => Some((
+                    match n {
+                        Some(e) => Some(eval(e, vars, d, host)?.int().ok_or("a step is a whole number")?),
+                        None => None,
+                    },
+                    *u,
+                )),
+            };
+            let mut v = Value::List(range(&a, &b, step)?);
+            for c in &s.after {
+                v = on_items(v, c, vars, d, host)?;
+            }
+            v
+        }
+    })
+}
+
+/// A collection's operation (| push, | pop, | map …).
+fn on_items(v: Value, c: &Conv, vars: &Vars, d: Dialect, host: &mut dyn Host) -> Result<Value, String> {
+    // Each item as `name`, in a copy of the variables.
+    let each = |name: &str| {
+        let mut local = vars.clone();
+        local.loops.push((name.to_string(), Value::Null));
+        local
+    };
+    let set = |local: &mut Vars, x: Value| local.loops.last_mut().unwrap().1 = x;
+    // A dictionary's items as {key, value}.
+    let entry = |k: &str, x: &Value| Value::Dict(vec![("key".into(), Value::Str(k.to_string())), ("value".into(), x.clone())]);
+    let place = |i: i64, n: usize, end: bool| -> Result<usize, String> {
+        let n = n as i64;
+        let k = if i < 0 { n + i + end as i64 } else { i };
+        if k < 0 || k > n || (!end && k == n) { Err(format!("no place {i}: {n} items")) } else { Ok(k as usize) }
+    };
+    Ok(match (v, c) {
+        (v, c) if !c.on_items() => convert(v, c)?,
+        (Value::Null, Conv::Push(..)) => return on_items(Value::List(Vec::new()), c, vars, d, host),
+        (Value::Null, _) => Value::Null,
+        (Value::List(mut l), Conv::Push(x, at)) => {
+            let x = eval(x, vars, d, host)?;
+            let k = match at {
+                Some(e) => place(eval(e, vars, d, host)?.int().ok_or("a place is a whole number")?, l.len(), true)?,
+                None => l.len(),
+            };
+            l.insert(k, x);
+            Value::List(l)
+        }
+        (Value::Dict(mut m), Conv::Push(x, _)) => match eval(x, vars, d, host)? {
+            Value::Dict(more) => {
+                for (k, x) in more {
+                    match m.iter_mut().find(|(n, _)| *n == k) {
+                        Some(slot) => slot.1 = x,
+                        None => m.push((k, x)),
+                    }
+                }
+                Value::Dict(m)
+            }
+            other => return Err(format!("a dictionary takes a dictionary ({{key: value}}), not a {}", other.kind())),
+        },
+        (Value::List(mut l), Conv::Pop(at)) => {
+            if l.is_empty() {
+                return Err("| pop: the list is empty".into());
+            }
+            let k = match at {
+                Some(e) => place(eval(e, vars, d, host)?.int().ok_or("a place is a whole number")?, l.len(), false)?,
+                None => l.len() - 1,
+            };
+            l.remove(k);
+            Value::List(l)
+        }
+        (Value::Dict(mut m), Conv::Pop(at)) => {
+            match at {
+                Some(e) => {
+                    let k = eval(e, vars, d, host)?.text()?;
+                    let n = m.iter().position(|(n, _)| *n == k).ok_or(format!("no \"{k}\" in it"))?;
+                    m.remove(n);
+                }
+                None => {
+                    m.pop().ok_or("| pop: the dictionary is empty")?;
+                }
+            }
+            Value::Dict(m)
+        }
+        (Value::List(mut l), Conv::Remove(x)) => {
+            let x = eval(x, vars, d, host)?;
+            l.retain(|y| !equal(y, &x));
+            Value::List(l)
+        }
+        (Value::Dict(mut m), Conv::Remove(x)) => {
+            let k = eval(x, vars, d, host)?.text()?;
+            m.retain(|(n, _)| *n != k);
+            Value::Dict(m)
+        }
+        (Value::List(l), Conv::Map(n, e)) => {
+            let mut local = each(n);
+            let mut out = Vec::with_capacity(l.len());
+            for x in l {
+                set(&mut local, x);
+                out.push(eval(e, &local, d, host)?);
+            }
+            Value::List(out)
+        }
+        (Value::Dict(m), Conv::Map(n, e)) => {
+            let mut local = each(n);
+            let mut out = Vec::with_capacity(m.len());
+            for (k, x) in &m {
+                set(&mut local, entry(k, x));
+                out.push(eval(e, &local, d, host)?);
+            }
+            Value::List(out)
+        }
+        (Value::List(l), Conv::Filter(n, e)) => {
+            let mut local = each(n);
+            let mut out = Vec::new();
+            for x in l {
+                set(&mut local, x.clone());
+                if eval(e, &local, d, host)?.truthy() {
+                    out.push(x);
+                }
+            }
+            Value::List(out)
+        }
+        (Value::Dict(m), Conv::Filter(n, e)) => {
+            let mut local = each(n);
+            let mut out = Vec::new();
+            for (k, x) in m {
+                set(&mut local, entry(&k, &x));
+                if eval(e, &local, d, host)?.truthy() {
+                    out.push((k, x));
+                }
+            }
+            Value::Dict(out)
+        }
+        (v @ (Value::List(_) | Value::Dict(_)), Conv::Sort { desc, by }) => {
+            let dict = matches!(v, Value::Dict(_));
+            let items: Vec<(Value, Value)> = match v {
+                Value::List(l) => l.into_iter().map(|x| (x.clone(), x)).collect(),
+                Value::Dict(m) => m.into_iter().map(|(k, x)| (Value::Str(k), x)).collect(),
+                _ => unreachable!(),
+            };
+            // (Each one's key worked out once.)
+            let mut keyed: Vec<(Value, (Value, Value))> = Vec::with_capacity(items.len());
+            let mut local = by.as_ref().map(|(n, _)| each(n));
+            for (k, x) in items {
+                let key = match (by, local.as_mut()) {
+                    (Some((_, e)), Some(lv)) => {
+                        set(lv, if dict { entry(&k.text()?, &x) } else { x.clone() });
+                        eval(e, lv, d, host)?
+                    }
+                    _ => k.clone(),
+                };
+                keyed.push((key, (k, x)));
+            }
+            keyed.sort_by(|a, b| {
+                let o = match (&a.0, &b.0) {
+                    (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+                    (Value::Null, _) => std::cmp::Ordering::Less,
+                    (_, Value::Null) => std::cmp::Ordering::Greater,
+                    (x, y) => compare(x, y).unwrap_or_else(|| x.shown().cmp(&y.shown())),
+                };
+                if *desc { o.reverse() } else { o }
+            });
+            if dict {
+                Value::Dict(keyed.into_iter().map(|(_, (k, x))| (k.text().unwrap_or_default(), x)).collect())
+            } else {
+                Value::List(keyed.into_iter().map(|(_, (_, x))| x).collect())
+            }
+        }
+        (Value::List(mut l), Conv::Reverse) => {
+            l.reverse();
+            Value::List(l)
+        }
+        (Value::Dict(mut m), Conv::Reverse) => {
+            m.reverse();
+            Value::Dict(m)
+        }
+        (Value::Str(t), Conv::Reverse) => Value::Str(t.chars().rev().collect()),
+        (Value::List(l), Conv::Unique) => {
+            let mut out: Vec<Value> = Vec::new();
+            for x in l {
+                if !out.iter().any(|y| equal(y, &x)) {
+                    out.push(x);
+                }
+            }
+            Value::List(out)
+        }
+        (Value::List(l), Conv::Join(sep)) => {
+            let sep = match sep {
+                Some(e) => eval(e, vars, d, host)?.text()?,
+                None => ", ".into(),
+            };
+            Value::Str(l.iter().map(Value::text).collect::<Result<Vec<_>, _>>()?.join(&sep))
+        }
+        (v, c) => {
+            let what = match c {
+                Conv::Push(..) => "push",
+                Conv::Pop(_) => "pop",
+                Conv::Remove(_) => "remove",
+                Conv::Map(..) => "map",
+                Conv::Filter(..) => "filter",
+                Conv::Sort { .. } => "sort",
+                Conv::Reverse => "reverse",
+                Conv::Unique => "unique",
+                Conv::Join(_) => "join",
+                _ => "",
+            };
+            return Err(format!("| {what} of a {}: a list (or a dictionary) wanted", v.kind()));
+        }
     })
 }
 
@@ -2527,6 +2888,39 @@ mod tests {
                 "> 1",
             ]
         );
+    }
+
+    #[test]
+    fn collections_changed() {
+        let l = |s: &str| v(s).shown();
+        assert_eq!(l("[1, 2, 3] | pop"), "[1, 2]");
+        assert_eq!(l("[1, 2, 3] | pop 0"), "[2, 3]");
+        assert_eq!(l("[1, 2, 3] | pop -2"), "[1, 3]");
+        assert_eq!(l("[1, 2] | push 3"), "[1, 2, 3]");
+        assert_eq!(l("[1, 2] | push 0 at 0 | push 9 at -1"), "[0, 1, 2, 9]");
+        assert_eq!(l("[1, 2, 1, 3] | remove 1"), "[2, 3]");
+        assert_eq!(l("{a: 1, b: 2} | pop 'a' | push {c: 3}"), "{\"b\": 2, \"c\": 3}");
+        assert_eq!(l("[1, 2, 3, 4] | map it * 10 | filter it > 15"), "[20, 30, 40]");
+        assert_eq!(l("[1, 2, 3] | map x => x + 1 | join '-'"), "2-3-4");
+        assert_eq!(l("[3, 1, 2] | sort"), "[1, 2, 3]");
+        assert_eq!(l("[3, 1, 2] | sort desc"), "[3, 2, 1]");
+        assert_eq!(l("[{n: 'b', k: 2}, {n: 'a', k: 1}] | sort by it.k | map it.n"), "[\"a\", \"b\"]");
+        assert_eq!(l("[{n: 'b', k: 2}, {n: 'a', k: 1}] | sort by r => r.n desc | map r => r.k"), "[2, 1]");
+        assert_eq!(l("{b: 2, a: 1, c: 3} | sort | filter it.value > 1"), "{\"b\": 2, \"c\": 3}");
+        assert_eq!(l("{a: 1, b: 2} | map `${it.key}=${it.value}` | join"), "a=1, b=2");
+        assert_eq!(l("[1, 2, 2, 3, 1] | unique | reverse"), "[3, 2, 1]");
+        assert_eq!(l("[1, 2] | map (it | string) + '!'"), "[\"1!\", \"2!\"]");
+        // Ranges are lists; an operation after one takes the list.
+        assert_eq!(l("01..05 | filter it % 2 == 1"), "[01, 03, 05]");
+        assert_eq!(l("(1..3) | map it * 2"), "[2, 4, 6]");
+        assert_eq!(l("202611..202612 | date yyyymm step month | map (it | date yyyymm)"), "[\"202611\", \"202612\"]");
+        assert!(eval_plain("[] | pop", &Vars::default(), Dialect::ClickHouse).unwrap_err().contains("empty"));
+        assert!(eval_plain("5 | push 1", &Vars::default(), Dialect::ClickHouse).unwrap_err().contains("list"));
+        // In place: x |= …; over a range in a loop.
+        let src = "-- @set ls = [1, 2, 3]\n-- @ls |= pop 0 | push 7\n-- @ls += [8]\n-- @print(ls)\n-- @for i in 1..6 | filter it % 3 == 0\n-- @print(i)\n-- @end for\n-- @match 4\n-- @case 1..6 | filter it % 2 == 0\n-- @print('even')\n-- @end match";
+        let mut h = Fake::default();
+        assert_eq!(go(src, &mut h), Ok(End::Done));
+        assert_eq!(h.log, ["> [2, 3, 7, 8]", "> 3", "> 6", "> even"]);
     }
 
     #[test]

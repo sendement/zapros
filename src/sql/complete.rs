@@ -971,11 +971,23 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
     let words: Vec<String> = src[ls..start].split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
     let last = words.last().map(String::as_str).unwrap_or("");
     let first = words.get(1).map(String::as_str).unwrap_or("");
-    let pipe = src[ls..start].trim_end().ends_with('|');
+    let pipe = src[ls..start].trim_end().ends_with('|') || src[ls..start].trim_end().ends_with("|=");
     let mut items: Vec<Item> = Vec::new();
     let word = |w: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: w.to_string(), kind: Kind::Keyword, detail: t(ru, en).into() };
     if pipe {
         items.extend([word("number", "в число", "to a number"), word("string", "в строку", "to a string"), word("list", "в список", "to a list"), word("date", "в дату / дату в текст: | date yyyymmdd", "to a date / a date to text: | date yyyymmdd")]);
+        let op = |w: &str, ins: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: ins.to_string(), kind: Kind::Function, detail: t(ru, en).into() };
+        items.extend([
+            op("push", "push $0", "добавить в конец; push x at 0 — в начало", "add at the end; push x at 0 — at the start"),
+            op("pop", "pop", "убрать последний; pop 0 — первый; у словаря pop 'ключ'", "take off the last; pop 0 — the first; a dictionary's pop 'key'"),
+            op("remove", "remove $0", "убрать все, равные значению", "take off all equal to a value"),
+            op("map", "map $0", "каждый элемент (it) во что-то: map it * 2", "each item (it) into something: map it * 2"),
+            op("filter", "filter $0", "оставить подходящие: filter it > 3", "keep those that fit: filter it > 3"),
+            op("sort", "sort", "по возрастанию; sort desc; sort by it.поле", "ascending; sort desc; sort by it.field"),
+            op("reverse", "reverse", "в обратном порядке", "in reverse"),
+            op("unique", "unique", "без повторов", "without repeats"),
+            op("join", "join $0", "в текст через ', ' или join '-'", "to text with ', ' or join '-'"),
+        ]);
     } else if first == "end" && words.len() == 2 {
         items.extend(["for", "while", "if", "match"].map(|w| word(w, "", "")));
     } else if first == "on" {
@@ -992,6 +1004,12 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
             items.push(word("in", "", ""));
         }
         items.extend(var_items(Kind::Param));
+        if words.iter().any(|w| matches!(w.as_str(), "map" | "filter" | "sort" | "where")) {
+            items.push(Item { label: "it".into(), insert: "it".into(), kind: Kind::Param, detail: t("текущий элемент", "the item at hand").into() });
+            if last == "sort" || words.iter().rev().take(3).any(|w| w == "by") {
+                items.extend([word("desc", "по убыванию", "descending"), word("by", "по чему: sort by it.n", "by what: sort by it.n")]);
+            }
+        }
         for f in crate::script::FUNCTIONS {
             items.push(Item { label: f.to_string(), insert: format!("{f}($0)"), kind: Kind::Function, detail: String::new() });
         }

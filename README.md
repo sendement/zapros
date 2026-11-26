@@ -242,6 +242,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   comments so the script stays SQL: `@set` values, lists, dictionaries and
   query results; `@for` over ranges (numbers keeping leading zeros, dates
   by day / hour / month…, letters), lists, dictionaries and query rows;
+  collections changed by a pipe (`ls | push x`, `| pop 0`, `| remove x`,
+  `| map it * 2`, `| filter it > 3`, `| sort by it.n desc`, `| unique`,
+  `| join`, in place `@ls |= pop`);
   `@while` (a query in its condition: waiting for mutations), `@if` /
   `@elif` / `@else`, `@match` / `@case`, `@print`, `@pause`, `@on error`.
   In SQL `:x` puts a value in, `&x` text as it is (`events_&i`,
