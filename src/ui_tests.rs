@@ -3808,3 +3808,13 @@ fn script_loop_stops() {
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     assert!(h.state().rt[&id].last_run.is_some_and(|l| l.1), "stopped: {:?}", log_of(&h, &id));
 }
+
+#[test]
+fn directives_coloured_shot() {
+    let script = "-- @set shards = 01..03 -- each day's table\n-- @set day = '20261101' | date yyyymmdd\n-- @for i in shards\n    -- @if i > 1\n        insert into events_&i\n        select * from events_00 where d = :day and n < :{i * 10};\n    -- @else\n        select /*+ index(e events_d_idx) leading(e) */ count(*) from events_&i e;\n    -- @end if\n    -- @print(`shard ${i}`)\n-- @end for\n";
+    let (mut h, _g) = harness("directives-shot", script, false);
+    for _ in 0..3 {
+        h.step();
+    }
+    shot(&mut h, "directives-coloured");
+}

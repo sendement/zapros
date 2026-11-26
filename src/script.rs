@@ -989,6 +989,282 @@ fn line_of(text: &str, at: usize) -> usize {
     text[..at].matches('\n').count() + 1
 }
 
+// ───────────────────────────── colours ─────────────────────────────
+
+/// What a piece of a directive line is, for its colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paint {
+    /// The "--" that keeps it a comment for the database.
+    Mark,
+    /// The directive's own words, by what it does: loops, conditions,
+    /// variables, the rest (print, pause, on error).
+    Loop,
+    Cond,
+    Var,
+    Misc,
+    /// A variable.
+    Name,
+    Func,
+    Str,
+    Num,
+    Op,
+    /// A query's SQL (inside its brackets).
+    Query,
+    /// " -- what it's for" after it.
+    Comment,
+}
+
+/// Functions a directive's expression may call.
+pub const FUNCTIONS: [&str; 5] = ["len", "upper", "lower", "keys", "values"];
+
+/// The colour a directive's word gives its line (and an "@end"'s word).
+fn kind_of(word: &str) -> Paint {
+    match word {
+        "for" | "while" | "endfor" | "break" | "continue" => Paint::Loop,
+        "if" | "elif" | "else" | "match" | "case" | "default" => Paint::Cond,
+        "set" | "var" => Paint::Var,
+        "print" | "echo" | "pause" | "on" => Paint::Misc,
+        _ => Paint::Var,
+    }
+}
+
+/// Whether the comment `t` of `text` is alone on its line.
+pub fn alone(text: &str, at: usize) -> bool {
+    let ls = text[..at].rfind('\n').map_or(0, |k| k + 1);
+    text[ls..at].trim().is_empty()
+}
+
+/// The pieces of a line comment that is a directive (`comment`: its text,
+/// alone on its line), by their bytes in it; None when it isn't one.
+/// `open`: the blocks open above it (a bare "@end" takes its block's
+/// colour), kept up to date.
+pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, Paint)>> {
+    directive_text(comment)?;
+    let at = comment.find('@')?;
+    let body = &comment[at + 1..];
+    let word: String = body.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let low = word.to_ascii_lowercase();
+    let mut out = vec![(0..2, Paint::Mark)];
+    let w_end = at + 1 + word.len();
+    let known = WORDS.contains(&low.as_str());
+    let mut kind = kind_of(&low);
+    // The "@word" (and "@end for", "@else if"): in the block's colour.
+    let mut head_end = w_end;
+    let next: String = comment[w_end..].trim_start().chars().take_while(|c| c.is_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    let take_next = |head_end: &mut usize| *head_end = w_end + (comment[w_end..].len() - comment[w_end..].trim_start().len()) + next.len();
+    match low.as_str() {
+        "end" => {
+            let top = open.pop();
+            kind = match next.as_str() {
+                "for" | "while" => Paint::Loop,
+                "if" | "match" => Paint::Cond,
+                _ => top.unwrap_or(Paint::Misc),
+            };
+            if matches!(next.as_str(), "for" | "while" | "if" | "match") {
+                take_next(&mut head_end);
+            }
+        }
+        "endfor" => {
+            open.pop();
+        }
+        "else" if next == "if" => take_next(&mut head_end),
+        "on" if next == "error" => take_next(&mut head_end),
+        "for" | "while" => open.push(Paint::Loop),
+        "if" | "match" => open.push(Paint::Cond),
+        _ => {}
+    }
+    if known {
+        out.push((at..head_end, kind));
+    } else {
+        // name = …: the "@" in the variables' colour, the name a variable.
+        out.push((at..at + 1, Paint::Var));
+        out.push((at + 1..w_end, Paint::Name));
+    }
+    // The rest, up to a " -- comment".
+    let rest_end = at + 1 + cut_comment(body).len();
+    let rest_end = rest_end.max(head_end);
+    let s = comment;
+    let b = s.as_bytes();
+    let mut i = head_end;
+    // After "| date": its format, up to a space.
+    let mut fmt_next = false;
+    let mut prev_pipe = false;
+    while i < rest_end {
+        let c = s[i..].chars().next().unwrap();
+        if c.is_whitespace() {
+            i += c.len_utf8();
+            continue;
+        }
+        let start = i;
+        if fmt_next && c != '\'' && c != '"' {
+            while i < rest_end && !s[i..].starts_with(char::is_whitespace) {
+                i += s[i..].chars().next().unwrap().len_utf8();
+            }
+            out.push((start..i, Paint::Str));
+            fmt_next = false;
+            continue;
+        }
+        fmt_next = false;
+        if low == "pause" {
+            out.push((start..rest_end, Paint::Num));
+            break;
+        }
+        if c.is_ascii_digit() {
+            while i < rest_end && (b[i].is_ascii_alphanumeric() || b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+                i += 1;
+            }
+            out.push((start..i, Paint::Num));
+        } else if c.is_alphabetic() || c == '_' {
+            while i < rest_end && s[i..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                i += s[i..].chars().next().unwrap().len_utf8();
+            }
+            let w = s[start..i].to_ascii_lowercase();
+            let call = s[i..rest_end].trim_start().starts_with('(');
+            let p = if prev_pipe {
+                fmt_next = w == "date";
+                kind
+            } else if call && FUNCTIONS.contains(&w.as_str()) {
+                Paint::Func
+            } else if matches!(w.as_str(), "in" | "step" | "and" | "or" | "not" | "true" | "false" | "null" | "error" | "continue" | "stop") || (unit(&w).is_some() && out.iter().any(|(r, _)| s[r.clone()].eq_ignore_ascii_case("step"))) {
+                kind
+            } else {
+                Paint::Name
+            };
+            out.push((start..i, p));
+        } else if c == '\'' || c == '"' || c == '`' {
+            i += 1;
+            while i < rest_end {
+                let ch = s[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                if ch == '\\' {
+                    i = (i + s[i..].chars().next().map_or(0, char::len_utf8)).min(rest_end);
+                } else if ch == c {
+                    break;
+                }
+            }
+            out.push((start..i, Paint::Str));
+        } else if c == '(' && {
+            let w: String = s[i + 1..].trim_start().chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_ascii_lowercase();
+            w == "select" || w == "with"
+        } {
+            let end = closing(&s[..rest_end], i).unwrap_or(rest_end);
+            out.push((i..i + 1, Paint::Op));
+            out.push((i + 1..end, Paint::Query));
+            if end < rest_end {
+                out.push((end..end + 1, Paint::Op));
+            }
+            i = (end + 1).min(rest_end);
+        } else {
+            let op = OPS.iter().chain(["{", "}", ":", "$"].iter()).find(|o| s[i..].starts_with(**o)).map_or(c.len_utf8(), |o| o.len());
+            i += op;
+            out.push((start..i, Paint::Op));
+            prev_pipe = &s[start..i] == "|";
+            continue;
+        }
+        prev_pipe = false;
+    }
+    if rest_end < s.len() {
+        let c = rest_end + (s[rest_end..].len() - s[rest_end..].trim_start().len());
+        if c < s.len() {
+            out.push((c..s.len(), Paint::Comment));
+        }
+    }
+    Some(out)
+}
+
+/// How a directive line shapes the text's blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// @for, @while, @if, @match: a block starts.
+    Open,
+    /// @elif, @else, @case, @default: a block's next part.
+    Mid,
+    /// @end…: the block ends.
+    Close,
+    Plain,
+}
+
+/// The shape of a line comment's directive (None: not one).
+pub fn shape(comment: &str) -> Option<Shape> {
+    let body = directive_text(comment)?;
+    let word: String = body.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>().to_ascii_lowercase();
+    Some(match word.as_str() {
+        "for" | "while" | "if" | "match" => Shape::Open,
+        "elif" | "else" | "case" | "default" => Shape::Mid,
+        "end" | "endfor" => Shape::Close,
+        _ => Shape::Plain,
+    })
+}
+
+/// The variables a script's directives make (@set, @var, @for, name = …),
+/// for hints.
+pub fn var_names(text: &str, d: Dialect) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, s) in directives(text, d) {
+        let words: Vec<&str> = s.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+        let Some(first) = words.first() else { continue };
+        let low = first.to_ascii_lowercase();
+        let names: Vec<&str> = match low.as_str() {
+            "set" | "var" => words.get(1).into_iter().copied().collect(),
+            "for" => {
+                let before_in = s.to_ascii_lowercase().find(" in ").map_or(s.len(), |k| k);
+                s[3.min(s.len())..before_in].split(',').map(str::trim).filter(|w| !w.is_empty()).collect()
+            }
+            w if !WORDS.contains(&w) => vec![*first],
+            _ => Vec::new(),
+        };
+        for n in names {
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(n)) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Where `&x`, `&{…}` and `:{…}` stand in a script's SQL (not in
+/// comments: `in_comment` says where those are), to be coloured as
+/// parameters (`:x` the lexer finds itself).
+pub fn marks(sql: &str, in_comment: &dyn Fn(usize) -> bool) -> Vec<Range<usize>> {
+    let b = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if (c == b'&' || c == b':') && !in_comment(i) {
+            if b.get(i + 1) == Some(&b'{') && !(c == b':' && i > 0 && b[i - 1] == b':') {
+                if let Some(end) = sql[i + 1..].find('}').map(|k| i + 1 + k + 1) {
+                    if !sql[i..end].contains('\n') {
+                        out.push(i..end);
+                        i = end;
+                        continue;
+                    }
+                }
+            } else if c == b'&' && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic() || *x == b'_') {
+                let mut j = i + 1;
+                loop {
+                    while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                        j += 1;
+                    }
+                    // .field, or the "." that ends the name.
+                    if b.get(j) == Some(&b'.') {
+                        j += 1;
+                        if b.get(j).is_some_and(|x| x.is_ascii_alphabetic() || *x == b'_') {
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                out.push(i..j);
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
     let to = p.unary()?;
     let mut conv = None;
@@ -2319,5 +2595,24 @@ mod tests {
         // Names given values aren't asked for.
         let p = prog("-- @set a = 1\n-- @for i, x in [1]\n-- @y++\n-- @end for").unwrap();
         assert_eq!(p.names(), ["a", "i", "x", "y"]);
+    }
+
+    #[test]
+    fn painted() {
+        let show = |c: &str, open: &mut Vec<Paint>| paint(c, open).unwrap().into_iter().map(|(r, p)| format!("{}:{p:?}", &c[r])).collect::<Vec<_>>().join(" ");
+        let mut open = Vec::new();
+        assert_eq!(show("-- @for i in 1..3 step 1 day -- shards", &mut open), "--:Mark @for:Loop i:Name in:Loop 1:Num ..:Op 3:Num step:Loop 1:Num day:Loop -- shards:Comment");
+        assert_eq!(show("--@if len(xs) > 0 and x == 'a'", &mut open), "--:Mark @if:Cond len:Func (:Op xs:Name ):Op >:Op 0:Num and:Cond x:Name ==:Op 'a':Str");
+        assert_eq!(show("-- @end", &mut open), "--:Mark @end:Cond");
+        assert_eq!(show("-- @end for", &mut open), "--:Mark @end for:Loop");
+        assert_eq!(show("-- @d = (select max(d) from t) | date yyyy-mm", &mut open), "--:Mark @:Var d:Name =:Op (:Op select max(d) from t:Query ):Op |:Op date:Var yyyy-mm:Str");
+        assert_eq!(show("-- @pause 10s", &mut open), "--:Mark @pause:Misc 10s:Num");
+        assert!(paint("-- @author me", &mut open).is_none());
+        assert_eq!(shape("-- @else if x"), Some(Shape::Mid));
+        assert_eq!(shape("-- @endfor"), Some(Shape::Close));
+        assert_eq!(var_names("-- @set a = 1\n-- @for k, v in d\n-- @n++\n", Dialect::Generic), ["a", "k", "v", "n"]);
+        let none = |_| false;
+        let m = |s: &str| marks(s, &none).into_iter().map(|r| s[r].to_string()).collect::<Vec<_>>();
+        assert_eq!(m("select * from ev_&i where a = :{i+1} and b = &t.db..&t.name and c::int = 1 and d = &x."), ["&i", ":{i+1}", "&t.db.", "&t.name", "&x."]);
     }
 }

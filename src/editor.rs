@@ -482,6 +482,19 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
             Class::TableAlias => f.color = rgb(pal.table_alias),
             Class::ColumnAlias => f.color = rgb(pal.column_alias),
             Class::Schema => f.color = rgb(pal.schema),
+            Class::DirMark => f.color = rgb(pal.directive_mark),
+            Class::Dir(k) => {
+                use crate::sql::embed::Dir;
+                f.color = rgb(match k {
+                    Dir::Loop => pal.directive_loop,
+                    Dir::Cond => pal.directive_cond,
+                    Dir::Var => pal.directive_var,
+                    Dir::Misc => pal.directive_other,
+                });
+                f.font_id = bold.clone();
+            }
+            Class::Hint => f.color = rgb(pal.hint),
+            Class::HintArg => f.color = rgb(pal.hint_arg),
             Class::Text => {}
         }
         if sp.level > 0 {
@@ -838,6 +851,20 @@ pub fn crisp_frame(painter: &egui::Painter, rect: egui::Rect, radius: f32, color
 /// column named like a function (no bracket after it).
 pub fn help_at(text: &str, at: usize, d: crate::sql::Dialect) -> Option<(Range<usize>, usize)> {
     let at = floor(text, at.min(text.len()));
+    // A directive's word (-- @for).
+    let ls = line_start(text, at);
+    let line = &text[ls..line_end(text, at)];
+    let body = line.trim_start();
+    if body.starts_with("--") && crate::script::shape(body).is_some() {
+        let k = ls + line.find('@')?;
+        let w: String = text[k + 1..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if at < k || at > k + 1 + w.len() {
+            return None;
+        }
+        let e = crate::sql::help::lookup_in(&format!("@{}", w.to_ascii_lowercase()), d, false, &["directive".to_string()]).or_else(|| crate::sql::help::lookup_in("@set", d, false, &["directive".to_string()]))?;
+        let idx = crate::sql::help::entries().iter().position(|x| std::ptr::eq(x, e))?;
+        return Some((k..k + 1 + w.len(), idx));
+    }
     let r = crate::sql::statement_at(text, at, d, false).filter(|r| r.start <= at && at <= r.end).unwrap_or(0..text.len());
     let (place, idx) = crate::sql::help::at(&text[r.clone()], at - r.start, d)?;
     Some((r.start + place.start..r.start + place.end, idx))
@@ -1332,6 +1359,10 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
                 let mut ind = indent_of(line).to_string();
                 let trimmed = line.trim_end().to_ascii_uppercase();
                 if trimmed.ends_with('(') || ["BEGIN", "THEN", "LOOP", "ELSE", "DECLARE", "IS", "AS"].iter().any(|w| trimmed.ends_with(w) && trimmed[..trimmed.len() - w.len()].ends_with([' ', '\t']) || trimmed == *w) {
+                    ind += &" ".repeat(tab);
+                }
+                // A directive's block (-- @for …, -- @else): its lines a level in.
+                if line.trim_start().starts_with("--") && text[a..line_end(text, a)].trim().is_empty() && matches!(crate::script::shape(line.trim()), Some(crate::script::Shape::Open | crate::script::Shape::Mid)) {
                     ind += &" ".repeat(tab);
                 }
                 // Between ( and ): the ) on a line of its own.

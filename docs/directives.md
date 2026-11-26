@@ -1,7 +1,8 @@
 # Script directives
 
 Status: **implemented** (`src/script.rs`), except what §9 and §11 mark as
-not yet: the dry run, the "how much is ahead" count, hints and hover.
+not yet: the dry run, the "how much is ahead" count, a variable's value
+on hover.
 
 ClickHouse has no procedural language of its own (unlike Oracle's PL/SQL or
 PostgreSQL's PL/pgSQL), yet work there often needs loops: the same
@@ -348,5 +349,29 @@ In SQL text:
   SELECTs) — useful for "count per shard"; `@print` covers it for now.
 - Running passes in parallel (several sessions) — ClickHouse would like it;
   later, with a limit on sessions.
-- Hints and hover in the editor: directive words, variables in scope, the
-  value of `&i` on hover during a run.
+- The value of `&i` on hover during a run.
+
+## 12. In the editor
+
+- **Colours**: the `--` before a directive faint, its words by kind —
+  loops (`@for`, `@while`, `@break`, `@continue`), conditions (`@if`,
+  `@elif`, `@else`, `@match`, `@case`, `@default`), variables (`@set`,
+  `x = …`), the rest (`@print`, `@pause`, `@on error`); a bare `@end` in
+  its block's colour. Variables as parameters, strings, numbers and a
+  query's SQL as usual; `&x`, `&{…}`, `:{…}` in the SQL as parameters (in
+  strings too). Each colour is set in Settings → Colours.
+- **Rainbow bands and frames**: a block (`@for` … `@end for`) is a
+  construct like BEGIN … END: a band under the indent of what's inside, a
+  frame round it, folded by its first line.
+- **Indents**: Enter after a line that opens a block (or `@else`,
+  `@case`) goes a level in. The formatter lays what's inside a block a
+  level right of its directive, `@else` / `@case` / `@end` at the block's
+  own; `&x`, `&{…}`, `:{…}` are kept as written (`events_&i` isn't split).
+- **Hints**: after `-- @` the directives (`for`, `if`, `match` as blocks
+  with their `@end`; the open block's `@end …` first); further on the
+  script's variables, `len()` / `upper()` / …, `step` and the date units,
+  the conversions after `|`, `error continue | stop` after `@on`; in the
+  SQL the variables after `&` and `:`.
+- **Help**: Ctrl+click on a directive's word shows what it does, with an
+  example.
+- The checker doesn't call a name made with `&x` (`events_&i`) unknown.

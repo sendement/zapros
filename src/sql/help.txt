@@ -1516,3 +1516,90 @@ sig: SELECT … SETTINGS name = value, …
 ru: Настройки только для этого запроса: max_threads, max_memory_usage, join_use_nulls…
 en: Settings for this query only: max_threads, max_memory_usage, join_use_nulls…
 ex: SELECT count() FROM events SETTINGS max_threads = 4;
+
+# ---------------------------------------------------------- script directives
+
+@ @for, @endfor | * | k | directive
+title: @for … in … | @for … in …
+sig: -- @for i in 1..10 [step n] | -- @for x in список | -- @for k, v in словарь | -- @for r in (select …) … -- @end for
+ru: Цикл: SQL до «-- @end for» выполняется для каждого значения. Диапазон включает оба конца (01..16 — с нулями, дни: step day), список, словарь (ключ, значение) или строки запроса.
+en: A loop: the SQL down to "-- @end for" runs for each value. A range includes both ends (01..16 keeps zeros, days: step day), a list, a dictionary (key, value) or a query's rows.
+ex: -- @for i in 01..16
+ex: insert into events_all select * from events_&i;
+ex: -- @end for
+
+@ @while | * | k | directive
+title: @while | @while
+sig: -- @while условие … -- @end while
+ru: Цикл, пока условие верно (проверяется перед каждым проходом; в условии может быть запрос).
+en: A loop while the condition holds (checked before each pass; it may hold a query).
+ex: -- @while (select count() from system.mutations where not is_done) > 0
+ex: -- @pause 10s
+ex: -- @end while
+
+@ @if, @elif, @else | * | k | directive
+title: @if … @elif … @else | @if … @elif … @else
+sig: -- @if условие … [-- @elif условие …] [-- @else …] -- @end if
+ru: Условие: выполняется первая часть, чьё условие верно, иначе — @else.
+en: A condition: the first part whose condition holds runs, else @else.
+ex: -- @if (select count() from t) = 0
+ex: insert into t select * from t_old;
+ex: -- @end if
+
+@ @match, @case, @default | * | k | directive
+title: @match … @case … @default | @match … @case … @default
+sig: -- @match значение / -- @case 1, 2 | -- @case 1..5 | -- @default / -- @end match
+ru: Выбор по значению: @case с перечнем значений, диапазоном или списком; @default — для остального.
+en: Pick by a value: @case with values, a range or a list; @default for the rest.
+ex: -- @match env
+ex: -- @case 'prod'
+ex: select 1;
+ex: -- @default
+ex: select 2;
+ex: -- @end match
+
+@ @end | * | k | directive
+title: @end | @end
+sig: -- @end [for | while | if | match]
+ru: Конец блока; слово после @end проверяет, что закрывается нужный.
+en: A block's end; a word after @end checks the right one is closed.
+ex: -- @end for
+
+@ @set, @var | * | k | directive
+title: @set, @var, x = … | @set, @var, x = …
+sig: -- @set x = значение | -- @x = значение | -- @x += 1 | -- @x++
+ru: Переменная: число, строка, `шаблон ${x}`, список [1, 2], диапазон, словарь {a: 1}, дата | date или запрос (select …). В SQL: :x — значение, &x — текст как есть.
+en: A variable: a number, a string, a `template ${x}`, a list [1, 2], a range, a dictionary {a: 1}, a date | date or a query (select …). In SQL: :x a value, &x text as it is.
+ex: -- @set day = '20261101' | date yyyymmdd
+ex: -- @set tables = (select name from system.tables where database = 'logs')
+ex: select * from logs.&tables[0] where d = :day;
+
+@ @print, @echo | * | k | directive
+title: @print | @print
+sig: -- @print(значение, …)
+ru: Пишет значения во вкладку «Вывод».
+en: Writes the values to the Output tab.
+ex: -- @print(`shard ${i}: done`)
+
+@ @pause | * | k | directive
+title: @pause | @pause
+sig: -- @pause 10s | 500ms | 2m | 1h
+ru: Пауза; «Стоп» прерывает её.
+en: A pause; Stop breaks it.
+ex: -- @pause 2s
+
+@ @on | * | k | directive
+title: @on error | @on error
+sig: -- @on error continue | -- @on error stop
+ru: Что делать, когда запрос скрипта упал: идти дальше или остановиться.
+en: What to do when a script's statement fails: go on or stop.
+ex: -- @on error continue
+
+@ @break, @continue | * | k | directive
+title: @break, @continue | @break, @continue
+sig: -- @break | -- @continue
+ru: Выйти из цикла или перейти к его следующему проходу.
+en: Leave the loop, or go on to its next pass.
+ex: -- @if i > 3
+ex: -- @break
+ex: -- @end if

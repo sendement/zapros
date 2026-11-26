@@ -282,6 +282,17 @@ fn gather(g: &mut Gather, text: &str, d: Dialect, map: &dyn Fn(usize) -> Option<
             g.hush(a, b);
         }
     }
+    // Script directives' blocks (-- @for … -- @end for), in the script only.
+    if depth == 0 && text.contains('@') {
+        for t in toks.iter().filter(|t| t.kind == Tk::LineComment && crate::script::alone(text, t.start)) {
+            let Some(at) = map(t.start) else { continue };
+            match crate::script::shape(t.text(text)) {
+                Some(crate::script::Shape::Open) => g.events.push((at, Ev::Block(g.line_indent(at), false, at))),
+                Some(crate::script::Shape::Close) => g.events.push((at, Ev::End(true))),
+                _ => {}
+            }
+        }
+    }
     let nt: Vec<_> = toks.iter().filter(|t| !t.trivia()).collect();
     let up = |k: usize| nt.get(k).filter(|t| matches!(t.kind, Tk::Word | Tk::Keyword)).map(|t| t.text(text).to_ascii_uppercase()).unwrap_or_default();
     // A subprogram's (or package's) header seen: its IS / AS opens its
@@ -588,6 +599,19 @@ mod tests {
         // Inside the bracket: SELECT's tail, WHERE's band, then the bracket's from "IN".
         assert_eq!(c[4], vec![(0, 1, 0), (1, 9, 2), (9, 9, 3)].into_iter().filter(|b| b.0 < b.1).collect::<Vec<_>>(), "{c:?}");
         assert!(c[7].iter().all(|b| b.1 <= 3), "{:?}", c[7]);
+    }
+
+    #[test]
+    fn directive_blocks() {
+        let src = "-- @for i in 1..3\n    -- @if i > 1\n        select 1;\n    -- @end if\n-- @end for\nselect 2;";
+        let c = cols(src, Dialect::ClickHouse);
+        assert_eq!(c[1], vec![(0, 4, 0)]);
+        assert_eq!(c[2], vec![(0, 4, 0), (4, 8, 1)]);
+        assert_eq!(c[3], vec![(0, 4, 0)]);
+        assert!(c[4].is_empty() && c[5].is_empty(), "{c:?}");
+        // Framed and folded as blocks.
+        let (_, blocks) = analyse(src, Dialect::ClickHouse);
+        assert_eq!(blocks.iter().map(|b| (b.range.start, b.col)).collect::<Vec<_>>(), [(0, 0), (22, 4)]);
     }
 
     #[test]

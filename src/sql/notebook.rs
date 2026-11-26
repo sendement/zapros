@@ -30,28 +30,11 @@ pub fn is_notebook(text: &str) -> bool {
     text.lines().any(|l| l.trim_end() == MARK || l.trim_end() == MD_MARK)
 }
 
-/// The text's cells: by its marks, or (plain SQL) a cell per statement,
-/// the comments above one going with it.
-pub fn parse(text: &str, d: Dialect) -> Vec<Piece> {
+/// The text's cells: by its "-- %%" marks only (plain SQL, its comments
+/// and a script's directives: one cell, as it is).
+pub fn parse(text: &str, _d: Dialect) -> Vec<Piece> {
     if !is_notebook(text) {
-        let ranges = super::split(text, d, true);
-        let mut out = Vec::new();
-        let mut prev = 0;
-        for r in ranges {
-            let piece = text[prev..r.end].trim_matches('\n').trim_end();
-            prev = r.end;
-            if !piece.trim().is_empty() {
-                out.push(Piece { kind: Kind::Sql, text: piece.trim_start_matches(['\n', '\r']).to_string() });
-            }
-        }
-        let tail = text[prev..].trim();
-        if !tail.is_empty() {
-            out.push(Piece { kind: Kind::Sql, text: tail.to_string() });
-        }
-        if out.is_empty() {
-            out.push(Piece { kind: Kind::Sql, text: String::new() });
-        }
-        return out;
+        return vec![Piece { kind: Kind::Sql, text: text.trim_matches('\n').trim_end().to_string() }];
     }
     let mut out: Vec<Piece> = Vec::new();
     let mut cur: Option<(Kind, Vec<&str>)> = None;
@@ -371,10 +354,10 @@ mod tests {
         let text = render(&cells);
         assert!(is_notebook(&text));
         assert_eq!(parse(&text, Dialect::Postgres), cells);
-        // Plain SQL: a cell per statement.
-        let p = parse("-- first\nselect 1;\n\nselect 2;\n", Dialect::Postgres);
-        assert_eq!(p.len(), 2);
-        assert_eq!(p[0].text, "-- first\nselect 1;");
+        // Plain SQL, comments and directives: one cell (only marks cut).
+        let p = parse("-- first\nselect 1; -- one\n\n-- @for i in 1..2\nselect 2;\n-- @end for\n", Dialect::Postgres);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].text, "-- first\nselect 1; -- one\n\n-- @for i in 1..2\nselect 2;\n-- @end for");
     }
 
     #[test]

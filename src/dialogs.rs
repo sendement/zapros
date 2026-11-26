@@ -1051,6 +1051,24 @@ fn palette_ui(ui: &mut egui::Ui, p: &mut Palette) {
         ui.end_row();
         row(ui, t("Схемы / пользователи", "Schemas / users"), &mut p.schema);
         ui.end_row();
+        row(ui, t("Хинты оптимизатора", "Optimizer hints"), &mut p.hint);
+        row(ui, t("Таблицы и алиасы в хинтах", "Tables and aliases in hints"), &mut p.hint_arg);
+        ui.end_row();
+    });
+    ui.label(RichText::new(t("Директивы скриптов (-- @…)", "Script directives (-- @…)")).strong());
+    egui::Grid::new("pal-dir").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
+        let row = |ui: &mut egui::Ui, n: &str, c: &mut [u8; 3]| {
+            ui.color_edit_button_srgb(c);
+            ui.label(n);
+        };
+        row(ui, t("Циклы (@for, @while, @break)", "Loops (@for, @while, @break)"), &mut p.directive_loop);
+        row(ui, t("Условия (@if, @match, @case)", "Conditions (@if, @match, @case)"), &mut p.directive_cond);
+        ui.end_row();
+        row(ui, t("Переменные (@set, x = …)", "Variables (@set, x = …)"), &mut p.directive_var);
+        row(ui, t("Прочие (@print, @pause, @on error)", "Others (@print, @pause, @on error)"), &mut p.directive_other);
+        ui.end_row();
+        row(ui, t("«--» перед директивой", "The \"--\" before a directive"), &mut p.directive_mark);
+        ui.end_row();
     });
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut p.bold_keywords, t("Ключевые слова жирным", "Bold keywords"));
@@ -1503,7 +1521,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                     *p = if dark { Palette::dark() } else { Palette::light() };
                 }
                 ui.separator();
-                let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\nselect (1 + 2";
+                let sample = crate::sql::fmt::format(SAMPLE, Dialect::Postgres, s.format) + "\n\ndo $$ begin\n  execute 'delete from ' || quote_ident(t) || ' where note = ''x''';\nend $$;\n\n-- @set shards = 1..3\n-- @for i in shards -- each shard\n    -- @if i > 1\n        insert into events_&i select * from events_0 where day = :day;\n    -- @end if\n-- @end for\nselect (1 + 2";
                 let issues = crate::sql::check::check(&sample, Dialect::Postgres, None);
                 let snapshot = s.clone();
                 let cx = crate::editor::Ctx { dialect: Dialect::Postgres, settings: &snapshot, dark, issues: &issues, server_err: None, rels: &[], lent: &[], routines: &[], rows: 30, read_only: false, outer_wheel: false };

@@ -866,6 +866,86 @@ impl Default for Options {
 /// Lays out a script statement by statement; PL/SQL units and bodies in
 /// $$ are left as written. Comments between statements stay.
 pub fn format(src: &str, d: Dialect, o: Options) -> String {
+    // A script's &x, &{…}, :{…}: kept from the formatter as words.
+    let scripted = crate::script::has_directives(src, d);
+    let (src, marks) = if scripted { protect_marks(src, d) } else { (src.to_string(), Vec::new()) };
+    let laid = format_plain(&src, d, o, scripted);
+    restore_marks(laid, &marks)
+}
+
+/// Placeholders for a script's &x, &{…}, :{…} (outside comments).
+fn protect_marks(src: &str, d: Dialect) -> (String, Vec<String>) {
+    let toks = lex::lex(src, d);
+    let comment = |i: usize| {
+        let k = toks.partition_point(|t| t.end <= i);
+        toks.get(k).is_some_and(|t| matches!(t.kind, Tk::LineComment | Tk::BlockComment))
+    };
+    let mut out = String::with_capacity(src.len());
+    let mut marks = Vec::new();
+    let mut prev = 0;
+    for r in crate::script::marks(src, &comment) {
+        out += &src[prev..r.start];
+        out += &format!("zqv{}zq", marks.len());
+        marks.push(src[r.clone()].to_string());
+        prev = r.end;
+    }
+    out += &src[prev..];
+    (out, marks)
+}
+
+fn restore_marks(mut s: String, marks: &[String]) -> String {
+    for (i, m) in marks.iter().enumerate().rev() {
+        let ph = format!("zqv{i}zq");
+        while let Some(at) = s.to_ascii_lowercase().find(&ph) {
+            s.replace_range(at..at + ph.len(), m);
+        }
+    }
+    s
+}
+
+/// `pad` put before each line of `text` that doesn't start inside a string
+/// or a comment.
+fn pad_lines(text: &str, pad: &str, d: Dialect) -> String {
+    if pad.is_empty() {
+        return text.to_string();
+    }
+    let toks = lex::lex(text, d);
+    let inside = |at: usize| toks.iter().any(|t| t.start < at && at < t.end && t.kind != Tk::Space);
+    let mut out = String::with_capacity(text.len() + pad.len() * 8);
+    let mut ls = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() && !inside(ls) {
+            out += pad;
+        }
+        out += line;
+        ls += line.len();
+    }
+    out
+}
+
+/// A directive line laid: "-- @word …" at its block's depth (it changes
+/// `depth`); None for any other line.
+fn directive_line(line: &str, depth: &mut usize, ind: usize) -> Option<String> {
+    let t = line.trim();
+    let shape = if t.starts_with("--") { crate::script::shape(t)? } else { return None };
+    use crate::script::Shape;
+    let here = match shape {
+        Shape::Close => {
+            *depth = depth.saturating_sub(1);
+            *depth
+        }
+        Shape::Mid => depth.saturating_sub(1),
+        Shape::Open => {
+            *depth += 1;
+            *depth - 1
+        }
+        Shape::Plain => *depth,
+    };
+    let body = t[2..].trim_start();
+    Some(format!("{}-- {body}", " ".repeat(here * ind)))
+}
+
+fn format_plain(src: &str, d: Dialect, o: Options, scripted: bool) -> String {
     let unquoted;
     let src = if o.bare_names {
         unquoted = super::complete::bare_names(src, d);
@@ -877,12 +957,41 @@ pub fn format(src: &str, d: Dialect, o: Options) -> String {
     let ranges = super::split(src, d, false);
     let mut s = String::new();
     let mut prev = 0;
-    // Comments just above a statement stay right above it.
-    let gap = |text: &str| text.lines().map(str::trim_end).filter(|l| !matches!(l.trim(), "" | "/" | ";")).collect::<Vec<_>>().join("\n");
+    // A script's directive blocks: what's in them goes right by a level.
+    let ind = (o.indent as usize).clamp(1, 8);
+    let mut depth = 0usize;
+    // Comments just above a statement stay right above it; directives
+    // at their blocks' depth. (true: it starts with a block's next part
+    // or end: right under what's before, no blank line.)
+    let gap = |text: &str, depth: &mut usize| {
+        let mut close = None;
+        let lines: Vec<String> = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !matches!(l.trim(), "" | "/" | ";"))
+            .map(|l| {
+                if !scripted {
+                    return l.to_string();
+                }
+                if let Some(x) = directive_line(l, depth, ind) {
+                    close.get_or_insert(matches!(crate::script::shape(l.trim()), Some(crate::script::Shape::Close | crate::script::Shape::Mid)));
+                    return x;
+                }
+                close.get_or_insert(false);
+                format!("{}{}", " ".repeat(*depth * ind), l.trim_start())
+            })
+            .collect();
+        // A block ended at the top: a blank line before what follows.
+        let mut g = lines.join("\n");
+        if *depth == 0 && lines.last().is_some_and(|l| matches!(crate::script::shape(l.trim()), Some(crate::script::Shape::Close))) {
+            g.push('\n');
+        }
+        (g, close.unwrap_or(false))
+    };
     for r in &ranges {
-        let g = gap(&src[prev..r.start]);
+        let (g, close) = gap(&src[prev..r.start], &mut depth);
         if !s.is_empty() {
-            s += "\n\n";
+            s += if close { "\n" } else { "\n\n" };
         }
         if !g.is_empty() {
             s += &g;
@@ -891,16 +1000,30 @@ pub fn format(src: &str, d: Dialect, o: Options) -> String {
         let st = &src[r.clone()];
         let toks = lex::lex(st, d);
         let verbatim = super::is_plsql_block(st, d) || toks.iter().any(|t| t.kind == Tk::Str && t.text(st).starts_with('$')) || toks.iter().any(|t| t.open);
-        s += &if verbatim { st.trim().to_string() } else { cased(st, &format_one(st, d), d, o) };
+        let pad = " ".repeat(depth * ind);
+        let laid = if verbatim {
+            // Its lines as written, less its first line's indent.
+            let ls = src[..r.start].rfind('\n').map_or(0, |k| k + 1);
+            let had = &src[ls..r.start];
+            let had = &had[..had.len() - had.trim_start().len()];
+            let body = st.trim();
+            if scripted && !had.is_empty() { body.lines().enumerate().map(|(k, l)| if k > 0 { l.strip_prefix(had).unwrap_or(l) } else { l }).collect::<Vec<_>>().join("\n") } else { body.to_string() }
+        } else {
+            cased(st, &format_one(st, d), d, o)
+        };
+        s += &if scripted { pad_lines(&laid, &pad, d) } else { laid };
         if d == Dialect::Oracle && (src[r.end..].trim_start().starts_with('/') || super::is_plsql_block(st, d)) {
-            s += "\n/";
+            s += "\n";
+            s += &pad;
+            s += "/";
         }
         prev = r.end;
     }
-    let tail = gap(&src[prev..]);
+    let (tail, close) = gap(&src[prev..], &mut depth);
+    let tail = tail.trim_end_matches('\n');
     if !tail.is_empty() {
         if !s.is_empty() {
-            s += "\n\n";
+            s += if close { "\n" } else { "\n\n" };
         }
         s += &tail;
     }
@@ -1028,10 +1151,26 @@ pub fn reformat(src: &str, d: Dialect, o: Options, changed: Range<usize>, caret:
     if hit.iter().any(|r| super::is_plsql_block(&src[(*r).clone()], d)) || toks.iter().any(|t| t.kind == Tk::Str && t.text(part).starts_with('$')) {
         return None;
     }
-    let laid = format(part, d, o);
+    // (A script's &x kept as they are.)
+    let laid = if crate::script::has_directives(src, d) {
+        let (prot, marks) = protect_marks(part, d);
+        restore_marks(format_plain(&prot, d, o, false), &marks)
+    } else {
+        format(part, d, o)
+    };
     let laid = laid.trim_end();
     // (format() ends a statement with ";": only if it had one.)
     let laid = if part.trim_end().ends_with(';') || !laid.ends_with(';') { laid } else { &laid[..laid.len() - 1] };
+    // Its lines under its first, as indented (in a directive's block).
+    let ls = src[..span.start].rfind('\n').map_or(0, |k| k + 1);
+    let lead = &src[ls..span.start];
+    let padded;
+    let laid = if !lead.is_empty() && lead.trim().is_empty() && laid.contains('\n') {
+        padded = pad_lines(laid, lead, d);
+        &padded[lead.len()..]
+    } else {
+        laid
+    };
     if laid == part {
         return None;
     }
@@ -1106,6 +1245,22 @@ mod tests {
         let keep = Options { keywords: Case::AsIs, functions: Case::AsIs, ..o };
         assert_eq!(format("Select Count(x) from t", Dialect::Postgres, keep), "Select Count(x)\n  from t");
         assert_eq!(format("select countIf(x > 1) from t", Dialect::ClickHouse, o), "SELECT countIf(x > 1)\n  FROM t");
+    }
+
+    #[test]
+    fn directive_blocks() {
+        let o = Options { indent: 4, ..Options::default() };
+        let src = "--@set n = 3\n-- @for i in 1..n -- shards\n-- @if i > 1\ninsert into ev_&i select * from ev_0 where d = :d and x = &{i + 1};\n-- @else\nselect count(*) from ev_&i.;\n-- @end if\n-- @end for\nselect 1;";
+        let f = format(src, Dialect::ClickHouse, o);
+        assert_eq!(f, "-- @set n = 3\n-- @for i in 1..n -- shards\n    -- @if i > 1\n        INSERT INTO ev_&i\n        SELECT *\n          FROM ev_0\n         WHERE d = :d\n           AND x = &{i + 1};\n    -- @else\n        SELECT count(*)\n          FROM ev_&i.;\n    -- @end if\n-- @end for\n\nSELECT 1;");
+        // Laid again: the same.
+        assert_eq!(format(&f, Dialect::ClickHouse, o), f);
+        // A statement typed in a block: its lines under its first.
+        assert_eq!(format("select 1;\n-- @for i in 1..2\nselect 2;\n-- @end for\n", Dialect::Generic, o), "SELECT 1;\n\n-- @for i in 1..2\n    SELECT 2;\n-- @end for\n");
+        let typed = "-- @for i in 1..2\n    select a, b from t_&i;\n-- @end for";
+        let at = typed.find(';').unwrap();
+        let (r, _) = reformat(typed, Dialect::ClickHouse, o, at..at + 1, at).unwrap();
+        assert!(r.contains("    SELECT a\n         , b\n      FROM t_&i;"), "{r}");
     }
 
     #[test]

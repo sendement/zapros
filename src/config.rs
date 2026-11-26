@@ -60,6 +60,16 @@ pub struct Palette {
     pub column_alias: Rgb,
     /// A schema / user before a table's name ("shop.orders").
     pub schema: Rgb,
+    /// Script directives (-- @for …): the "--" that keeps them comments
+    /// (faint), their words by kind.
+    pub directive_mark: Rgb,
+    pub directive_loop: Rgb,
+    pub directive_cond: Rgb,
+    pub directive_var: Rgb,
+    pub directive_other: Rgb,
+    /// Optimizer hints (/*+ full(t) */): their names, what they're given.
+    pub hint: Rgb,
+    pub hint_arg: Rgb,
     pub bold_keywords: bool,
     pub italic_comments: bool,
     /// Brackets coloured by depth.
@@ -87,6 +97,13 @@ impl Palette {
             table_alias: [126, 211, 170],
             column_alias: [240, 160, 200],
             schema: [181, 196, 120],
+            directive_mark: [72, 78, 88],
+            directive_loop: [255, 140, 100],
+            directive_cond: [240, 200, 80],
+            directive_var: [170, 150, 255],
+            directive_other: [90, 205, 190],
+            hint: [120, 200, 150],
+            hint_arg: [235, 175, 130],
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,
@@ -110,6 +127,13 @@ impl Palette {
             table_alias: [0, 128, 96],
             column_alias: [176, 48, 140],
             schema: [110, 110, 0],
+            directive_mark: [195, 195, 195],
+            directive_loop: [200, 70, 20],
+            directive_cond: [150, 100, 0],
+            directive_var: [100, 60, 200],
+            directive_other: [0, 120, 120],
+            hint: [0, 125, 90],
+            hint_arg: [150, 80, 20],
             bold_keywords: true,
             italic_comments: true,
             rainbow: true,
@@ -440,7 +464,7 @@ impl Notebook {
         self.cells.iter().map(|c| Piece { kind: if c.kind == CellKind::Markdown { Kind::Markdown } else { Kind::Sql }, text: c.text.clone() }).collect()
     }
 
-    /// Cells from a text (its marks, or a cell per statement); saved
+    /// Cells from a text (by its marks; without them one cell); saved
     /// outputs of cells with the same text kept.
     pub fn from_text(text: &str, d: crate::sql::Dialect, old: &[Cell]) -> Self {
         use crate::sql::notebook::Kind;

@@ -85,6 +85,27 @@ pub fn check(src: &str, d: Dialect, known: Option<&Known>) -> Vec<Issue> {
             }
         }
     }
+    // A script's &x, &{…}, :{…}: names made of them aren't known, they
+    // aren't operators missing their sides.
+    if crate::script::has_directives(src, d) {
+        let comment = |i: usize| {
+            let k = toks.partition_point(|t| t.end <= i);
+            toks.get(k).is_some_and(|t| matches!(t.kind, Tk::LineComment | Tk::BlockComment))
+        };
+        let marks = crate::script::marks(src, &comment);
+        // (Out to the whole name a mark is part of.)
+        let word = |i: usize| i < src.len() && src[i..].starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.');
+        out.retain(|i| !marks.iter().any(|m| {
+            let (mut a, mut b) = (m.start, m.end);
+            while a > 0 && word(a - 1) {
+                a -= 1;
+            }
+            while word(b) {
+                b += 1;
+            }
+            i.range.start <= b && a <= i.range.end
+        }));
+    }
     out.sort_by_key(|i| (i.range.start, std::cmp::Reverse(i.sev)));
     out.dedup_by(|a, b| a.range == b.range);
     out

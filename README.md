@@ -246,8 +246,15 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   `@elif` / `@else`, `@match` / `@case`, `@print`, `@pause`, `@on error`.
   In SQL `:x` puts a value in, `&x` text as it is (`events_&i`,
   `&{d | date yyyymmdd}`). Progress by the results, Stop ends the loop; a
-  notebook's cells share their variables. See
-  [docs/directives.md](docs/directives.md).
+  notebook's cells share their variables. In the editor directives have
+  their own colours (loops, conditions, variables — set in Colours, the
+  `--` faint), rainbow bands and frames for their blocks, indents by Enter
+  and by the formatter, hints after `-- @` and for variables after `&` /
+  `:`, help on Ctrl+click. See [docs/directives.md](docs/directives.md).
+- **Optimizer hints** (`/*+ index(o orders_idx) */`) are coloured: the
+  hint, its brackets, its tables and aliases each their own.
+- **A notebook from a script** is cut only at its `-- %%` marks; without
+  them the script stays one cell (comments and directives don't cut it).
 - **Quitting with queries running** asks first: stop them and quit (the
   servers are told to stop, and it closes once they say so, 5 s at most),
   wait for them to end and quit, or quit leaving them be (a server may then

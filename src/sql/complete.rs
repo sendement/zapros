@@ -680,7 +680,7 @@ pub fn ghost(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
         return None;
     }
     let toks = lex::lex(src, d);
-    if toks.iter().any(|t| t.start < at && (at < t.end || t.open && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
+    if toks.iter().any(|t| t.start < at && (at < t.end || (t.open || t.kind == Tk::LineComment) && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
         return None;
     }
     // (What's typed of it: dotted names too, "u.na".)
@@ -877,12 +877,146 @@ fn join_guesses<'a>(look: impl Fn(&Ref) -> Option<&'a Relation>, refs: &[Ref], d
     out
 }
 
+/// A directive's words (docs/directives.md): (what's typed, the line
+/// laid in; "$0" the caret, "\n" a line of the block's own, `{i}` the
+/// line's indent), what it does.
+const DIRECTIVES: [(&str, &str, &str, &str); 19] = [
+    ("for", "for i in $0\n{i}-- @end for", "цикл: for i in 1..10 / список / (select …)", "loop: for i in 1..10 / a list / (select …)"),
+    ("while", "while $0\n{i}-- @end while", "цикл, пока условие верно", "loop while the condition holds"),
+    ("if", "if $0\n{i}-- @end if", "условие", "a condition"),
+    ("elif", "elif $0", "иначе, если", "else if"),
+    ("else", "else", "иначе", "otherwise"),
+    ("match", "match $0\n{i}-- @case \n{i}-- @end match", "выбор по значению", "pick by a value"),
+    ("case", "case $0", "вариант @match: значения, диапазон, список", "a @match case: values, a range, a list"),
+    ("default", "default", "вариант @match для остального", "the @match case for the rest"),
+    ("end", "end $0", "конец блока", "a block's end"),
+    ("set", "set $0 = ", "переменная (видна везде)", "a variable (seen everywhere)"),
+    ("var", "var $0 = ", "переменная", "a variable"),
+    ("print", "print($0)", "в «Вывод»", "to Output"),
+    ("pause", "pause $0", "пауза: 10s, 500ms, 2m", "a pause: 10s, 500ms, 2m"),
+    ("break", "break", "выйти из цикла", "leave the loop"),
+    ("continue", "continue", "к следующему проходу", "on to the next pass"),
+    ("on error continue", "on error continue", "ошибка запроса — дальше", "a statement's error: go on"),
+    ("on error stop", "on error stop", "ошибка запроса — стоп", "a statement's error: stop"),
+    ("endfor", "endfor", "конец @for", "the end of @for"),
+    ("echo", "echo $0", "то же, что @print", "the same as @print"),
+];
+
+/// Hints in a script's directive (-- @…), or for its variables after & or
+/// : in its SQL. None: not there (the usual hints then).
+fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hints> {
+    let t = crate::i18n::t;
+    let start = src[..at].char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_').last().map_or(at, |(i, _)| i);
+    let prefix = src[start..at].to_lowercase();
+    let ls = src[..start].rfind('\n').map_or(0, |k| k + 1);
+    let line = &src[ls..at];
+    let lead = &line[..line.len() - line.trim_start().len()];
+    let body = line.trim_start();
+    let vars = || crate::script::var_names(src, d);
+    let fits = |label: &str| prefix.is_empty() || label.to_lowercase().starts_with(&prefix);
+    let var_items = |kind: Kind| vars().into_iter().filter(|v| fits(v) && v.to_lowercase() != prefix).map(|v| Item { label: v.clone(), insert: v, kind, detail: t("переменная скрипта", "a script's variable").into() }).collect::<Vec<_>>();
+    // In the SQL: &x, :x of a script.
+    let before = src[..start].chars().next_back();
+    if !body.starts_with("--") {
+        let mark = before == Some('&') || before == Some(':') && !src[..start].ends_with("::");
+        if !mark || !crate::script::has_directives(src, d) {
+            return None;
+        }
+        let items = var_items(Kind::Param);
+        return (!items.is_empty()).then_some(Hints { range: start..at, items });
+    }
+    let after_dashes = body[2..].trim_start();
+    if !after_dashes.starts_with('@') || ls + lead.len() + (body.len() - after_dashes.len()) + 1 > start {
+        return None;
+    }
+    // The first word: the directives.
+    if before == Some('@') {
+        // The blocks open above: their ends first.
+        let mut open: Vec<&str> = Vec::new();
+        for l in src[..ls].lines() {
+            let lt = l.trim();
+            match crate::script::shape(lt) {
+                Some(crate::script::Shape::Open) => {
+                    let w = lt[2..].trim_start()[1..].split(|c: char| !c.is_alphanumeric()).next().unwrap_or("").to_lowercase();
+                    open.push(match w.as_str() {
+                        "for" => "for",
+                        "while" => "while",
+                        "if" => "if",
+                        _ => "match",
+                    });
+                }
+                Some(crate::script::Shape::Close) => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        let mut items = Vec::new();
+        if let Some(top) = open.last() {
+            let w = format!("end {top}");
+            if fits(&w) {
+                items.push(Item { label: w.clone(), insert: w, kind: Kind::Keyword, detail: t("конец открытого блока", "the open block's end").into() });
+            }
+        }
+        for (w, ins, ru, en) in DIRECTIVES {
+            if !fits(w) || w == prefix {
+                continue;
+            }
+            let kind = if ins.contains('\n') { Kind::Snippet } else { Kind::Keyword };
+            items.push(Item { label: w.to_string(), insert: ins.replace("{i}", lead), kind, detail: t(ru, en).into() });
+        }
+        return (!items.is_empty()).then_some(Hints { range: start..at, items });
+    }
+    // Further on: words of the place, variables, functions.
+    let words: Vec<String> = src[ls..start].split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let last = words.last().map(String::as_str).unwrap_or("");
+    let first = words.get(1).map(String::as_str).unwrap_or("");
+    let pipe = src[ls..start].trim_end().ends_with('|');
+    let mut items: Vec<Item> = Vec::new();
+    let word = |w: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: w.to_string(), kind: Kind::Keyword, detail: t(ru, en).into() };
+    if pipe {
+        items.extend([word("number", "в число", "to a number"), word("string", "в строку", "to a string"), word("list", "в список", "to a list"), word("date", "в дату / дату в текст: | date yyyymmdd", "to a date / a date to text: | date yyyymmdd")]);
+    } else if first == "end" && words.len() == 2 {
+        items.extend(["for", "while", "if", "match"].map(|w| word(w, "", "")));
+    } else if first == "on" {
+        if last == "on" {
+            items.push(word("error", "", ""));
+        } else {
+            items.extend([word("continue", "дальше после ошибки", "go on after an error"), word("stop", "стоп на ошибке", "stop at an error")]);
+        }
+    } else {
+        if last == "step" || words.iter().any(|w| w == "step") && last.chars().all(|c| c.is_ascii_digit()) {
+            items.extend(["second", "minute", "hour", "day", "week", "month", "quarter", "year"].map(|w| word(w, "шаг диапазона дат", "a date range's step")));
+        }
+        if first == "for" && !words.iter().any(|w| w == "in") && words.len() >= 3 {
+            items.push(word("in", "", ""));
+        }
+        items.extend(var_items(Kind::Param));
+        for f in crate::script::FUNCTIONS {
+            items.push(Item { label: f.to_string(), insert: format!("{f}($0)"), kind: Kind::Function, detail: String::new() });
+        }
+        if words.iter().any(|w| w == "in") || matches!(first, "if" | "elif" | "while" | "case") {
+            items.extend([word("step", "шаг диапазона: 1..10 step 2", "a range's step: 1..10 step 2"), word("and", "", ""), word("or", "", ""), word("not", "", ""), word("true", "", ""), word("false", "", ""), word("null", "", "")]);
+        }
+        if prefix.is_empty() && !forced {
+            return Some(Hints { range: start..at, items: Vec::new() }).filter(|_| false);
+        }
+    }
+    items.retain(|i| fits(&i.label) && i.label.to_lowercase() != prefix);
+    (!items.is_empty()).then_some(Hints { range: start..at, items })
+}
+
 /// Hints at `at` (None inside strings and comments, or with nothing to say).
 /// (`lent`: relations from elsewhere, a notebook's CTEs from cells above.)
 pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
     let at = at.min(src.len());
+    if src.contains('@') {
+        if let Some(h) = directive_hints(src, at, d, forced) {
+            return Some(h);
+        }
+    }
     let toks = lex::lex(src, d);
-    if toks.iter().any(|t| t.start < at && (at < t.end || t.open && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
+    if toks.iter().any(|t| t.start < at && (at < t.end || (t.open || t.kind == Tk::LineComment) && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
         return None;
     }
     let start = src[..at].char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$').last().map_or(at, |(i, _)| i);
@@ -1234,6 +1368,33 @@ mod tests {
         assert!(h.items.iter().any(|i| i.insert == "select"));
         assert_eq!(h.items[0].kind, Kind::Snippet);
         assert!(hints("select 'fro", 11, Dialect::Postgres, &[], &[], &[], Case::Upper, false, false).is_none());
+    }
+
+    #[test]
+    fn directives_hinted() {
+        crate::i18n::set_ru(false);
+        let h = |src: &str| {
+            let at = src.find('‸').unwrap();
+            let src = src.replace('‸', "");
+            hints(&src, at, Dialect::ClickHouse, &[], &[], &[], Case::Upper, false, false).map(|h| (h.range.clone(), h.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(), h.items.iter().map(|i| i.insert.clone()).collect::<Vec<_>>()))
+        };
+        let (_, labels, ins) = h("  -- @fo‸").unwrap();
+        assert_eq!(labels, ["for"]);
+        assert_eq!(ins, ["for i in $0\n  -- @end for"]);
+        // An open block: its end first.
+        let (_, labels, _) = h("-- @for i in 1..3\nselect 1;\n-- @e‸").unwrap();
+        assert_eq!(labels[0], "end for");
+        // Variables in the directive, and after & in the SQL.
+        let (_, labels, _) = h("-- @set shard = 1\n-- @if sh‸").unwrap();
+        assert_eq!(labels, ["shard"]);
+        let (r, labels, _) = h("-- @set shard = 1\nselect * from ev_&sh‸").unwrap();
+        assert_eq!((r, labels), (36..38, vec!["shard".to_string()]));
+        let (_, labels, _) = h("-- @for d in 1..3 step 1 ‸").map(|x| x).unwrap_or_default();
+        assert!(labels.is_empty() || labels.contains(&"day".to_string()));
+        let (_, labels, _) = h("-- @x = y | d‸").unwrap();
+        assert_eq!(labels, ["date"]);
+        // A plain comment: none.
+        assert!(h("-- about fo‸").is_none());
     }
 
     #[test]

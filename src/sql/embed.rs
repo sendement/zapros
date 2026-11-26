@@ -405,6 +405,21 @@ pub enum Class {
     TableAlias,
     ColumnAlias,
     Schema,
+    /// A directive's "--" (docs/directives.md).
+    DirMark,
+    /// A directive's words, by what it does.
+    Dir(Dir),
+    /// An optimizer hint's name (/*+ full(t) */), and what it's given.
+    Hint,
+    HintArg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    Loop,
+    Cond,
+    Var,
+    Misc,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -419,7 +434,125 @@ pub struct Span {
 /// Every byte of `src` in a class; SQL in strings coloured as SQL (when
 /// `deep`).
 pub fn classify(src: &str, d: Dialect, deep: bool) -> Vec<Span> {
-    classify_at(src, d, if deep { 0 } else { MAX_LEVEL }, 0)
+    let spans = classify_at(src, d, if deep { 0 } else { MAX_LEVEL }, 0);
+    let dirs = src.contains('@');
+    let hints = src.contains("/*+") || src.contains("--+");
+    if !dirs && !hints {
+        return spans;
+    }
+    let mut over: Vec<Span> = Vec::new();
+    // Directive blocks open so far (a bare "@end" takes its block's colour).
+    let mut open = Vec::new();
+    let mut scripted = false;
+    for sp in spans.iter().filter(|s| s.class == Class::Comment && s.level == 0) {
+        let text = &src[sp.range.clone()];
+        let at = sp.range.start;
+        if hints && (text.starts_with("/*+") || text.starts_with("--+")) {
+            for (r, class) in hint_pieces(text) {
+                over.push(Span { range: at + r.start..at + r.end, class, level: 0 });
+            }
+            continue;
+        }
+        if !dirs || !text.starts_with("--") || !text.contains('@') || !crate::script::alone(src, at) {
+            continue;
+        }
+        let Some(pieces) = crate::script::paint(text, &mut open) else { continue };
+        scripted = true;
+        for (r, p) in pieces {
+            use crate::script::Paint as P;
+            let class = match p {
+                P::Mark => Class::DirMark,
+                P::Loop => Class::Dir(Dir::Loop),
+                P::Cond => Class::Dir(Dir::Cond),
+                P::Var => Class::Dir(Dir::Var),
+                P::Misc => Class::Dir(Dir::Misc),
+                P::Name => Class::Param,
+                P::Func => Class::Function,
+                P::Str => Class::Str,
+                P::Num => Class::Number,
+                P::Op => Class::Op,
+                P::Comment => Class::Comment,
+                P::Query => {
+                    let q = &text[r.clone()];
+                    for s in classify_at(q, d, if deep { 0 } else { MAX_LEVEL }, 0) {
+                        over.push(Span { range: at + r.start + s.range.start..at + r.start + s.range.end, class: s.class, level: 0 });
+                    }
+                    continue;
+                }
+            };
+            over.push(Span { range: at + r.start..at + r.end, class, level: 0 });
+        }
+    }
+    // A script's &x, &{…}, :{…} in its SQL: parameters.
+    if scripted {
+        let comment = |i: usize| {
+            let k = spans.partition_point(|s| s.range.end <= i);
+            spans.get(k).is_some_and(|s| s.class == Class::Comment)
+        };
+        for r in crate::script::marks(src, &comment) {
+            over.push(Span { range: r, class: Class::Param, level: 0 });
+        }
+    }
+    over.sort_by_key(|s| s.range.start);
+    // (Not overlapping: a later one starting inside the last is dropped.)
+    let mut clean: Vec<Span> = Vec::with_capacity(over.len());
+    for s in over {
+        if s.range.start >= clean.last().map_or(0, |l: &Span| l.range.end) && s.range.start < s.range.end {
+            clean.push(s);
+        }
+    }
+    flatten(spans, clean)
+}
+
+/// The pieces of an optimizer hint's comment (/*+ … */, --+ …): the hints'
+/// names, their brackets by depth, the tables, aliases and query blocks
+/// they're given.
+pub fn hint_pieces(text: &str) -> Vec<(Range<usize>, Class)> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let (from, to) = if text.starts_with("/*+") { (3, text.len() - if text.ends_with("*/") && text.len() >= 5 { 2 } else { 0 }) } else { (3, text.len()) };
+    let mut depth = 0u8;
+    let mut i = from;
+    while i < to {
+        let c = b[i];
+        let start = i;
+        if c.is_ascii_alphabetic() || c == b'_' || c == b'@' || c >= 0x80 {
+            i += 1;
+            while i < to && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'$' | b'#' | b'.') || b[i] >= 0x80) {
+                i += 1;
+            }
+            while !text.is_char_boundary(i) {
+                i += 1;
+            }
+            out.push((start..i, if depth == 0 { Class::Hint } else { Class::HintArg }));
+        } else if c.is_ascii_digit() {
+            while i < to && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            out.push((start..i, if depth == 0 { Class::Hint } else { Class::Number }));
+        } else if c == b'(' {
+            out.push((i..i + 1, Class::Bracket(depth)));
+            depth = depth.saturating_add(1);
+            i += 1;
+        } else if c == b')' {
+            depth = depth.saturating_sub(1);
+            out.push((i..i + 1, Class::Bracket(depth)));
+            i += 1;
+        } else if c == b'"' {
+            i += 1;
+            while i < to && b[i] != b'"' {
+                i += 1;
+            }
+            i = (i + 1).min(to);
+            out.push((start..i, Class::HintArg));
+        } else {
+            i += 1;
+            while !text.is_char_boundary(i) {
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn base_spans(src: &str, toks: &[Tok], level: u8, d: Dialect) -> Vec<Span> {
@@ -924,5 +1057,44 @@ mod keyword_bracket_tests {
         }
         assert_eq!(class_of("select case when (a > 1) then (2) else (3) end", "when (", pg), Class::Keyword);
         assert_eq!(class_of("select if(a, 1, 2) from t", "if(", Dialect::ClickHouse), Class::Function);
+    }
+}
+
+#[cfg(test)]
+mod directive_colour_tests {
+    use super::*;
+
+    fn class_of(src: &str, word: &str, d: Dialect) -> Class {
+        let at = src.find(word).unwrap();
+        classify(src, d, true).into_iter().find(|s| s.range.start <= at && at < s.range.end).unwrap().class
+    }
+
+    #[test]
+    fn directives_and_hints_coloured() {
+        let src = "-- @set n = (select max(id) from t) -- top\n-- @for i in 1..n\n-- @if i > 1\nselect * from ev_&i where d = :{i + 1} and s like 'x_&i%';\n-- @end if\n-- @end\n-- plain @word\nselect /*+ index(o orders_idx) leading(a b) */ 1 from orders o;";
+        let d = Dialect::ClickHouse;
+        assert_eq!(class_of(src, "-- @set", d), Class::DirMark);
+        assert_eq!(class_of(src, "@set", d), Class::Dir(Dir::Var));
+        assert_eq!(class_of(src, "n =", d), Class::Param);
+        assert_eq!(class_of(src, "select max", d), Class::Keyword);
+        assert_eq!(class_of(src, "max(", d), Class::Function);
+        assert_eq!(class_of(src, "-- top", d), Class::Comment);
+        assert_eq!(class_of(src, "@for", d), Class::Dir(Dir::Loop));
+        assert_eq!(class_of(src, "@if", d), Class::Dir(Dir::Cond));
+        assert_eq!(class_of(src, "&i where", d), Class::Param);
+        assert_eq!(class_of(src, ":{i", d), Class::Param);
+        assert_eq!(class_of(src, "&i%", d), Class::Param);
+        assert_eq!(class_of(src, "'x_", d), Class::Str);
+        assert_eq!(class_of(src, "@end if", d), Class::Dir(Dir::Cond));
+        // A bare @end: its block's.
+        assert_eq!(class_of(src, "@end\n", d), Class::Dir(Dir::Loop));
+        assert_eq!(class_of(src, "plain @word", d), Class::Comment);
+        assert_eq!(class_of(src, "index(", d), Class::Hint);
+        assert_eq!(class_of(src, "(o ", d), Class::Bracket(0));
+        assert_eq!(class_of(src, "orders_idx", d), Class::HintArg);
+        assert_eq!(class_of(src, "leading", d), Class::Hint);
+        assert_eq!(class_of(src, "/*+", d), Class::Comment);
+        // No directives: & stays an operator.
+        assert_eq!(class_of("select a &b from t", "&b", Dialect::Postgres), Class::Op);
     }
 }
