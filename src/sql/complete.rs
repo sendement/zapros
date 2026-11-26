@@ -671,6 +671,17 @@ pub fn star_at(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Rela
 /// parameter, in INSERT INTO t ( its columns.
 pub fn ghost(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine]) -> Option<String> {
     let at = at.min(src.len());
+    // A script's &x put in first (as for hints).
+    if let Some((text, map)) = src.is_char_boundary(at).then(|| crate::script::resolved(src, at, d)).flatten() {
+        if let Some(delta) = shift(&map, at) {
+            return ghost_here(&text, (at as isize + delta) as usize, d, rels, lent, routines);
+        }
+    }
+    ghost_here(src, at, d, rels, lent, routines)
+}
+
+fn ghost_here(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine]) -> Option<String> {
+    let at = at.min(src.len());
     if !src.is_char_boundary(at) {
         return None;
     }
@@ -1033,6 +1044,70 @@ pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relati
             return Some(h);
         }
     }
+    // A script's names made with &x: hinted as they come out
+    // ("from bis.calls_&m c" — c's columns).
+    if let Some((text, map)) = crate::script::resolved(src, at, d) {
+        if let Some(delta) = shift(&map, at) {
+            let new_at = (at as isize + delta) as usize;
+            let back = |p: usize| (p as isize - delta) as usize;
+            // (Not when the word typed runs into what was put in.)
+            let mut last = 0;
+            let mut before = 0isize;
+            for (r, n) in map.iter().filter(|(r, _)| r.end <= at) {
+                last = (r.start as isize + before) as usize + n;
+                before += *n as isize - r.len() as isize;
+            }
+            if let Some(h) = hints_here(&text, new_at, d, rels, lent, routines, case, forced, quote_schemas) {
+                if h.range.start >= last {
+                    return Some(Hints { range: back(h.range.start)..back(h.range.end), items: h.items });
+                }
+            }
+        }
+    }
+    hints_here(src, at, d, rels, lent, routines, case, forced, quote_schemas)
+}
+
+/// A script's text with its &x put in (script::resolved), `at` moved
+/// along: None when there are none, or `at` is inside one.
+pub fn resolved_at(src: &str, at: usize, d: Dialect) -> Option<(String, Vec<(Range<usize>, usize)>, usize)> {
+    let (text, map) = crate::script::resolved(src, at, d)?;
+    let delta = shift(&map, at)?;
+    Some((text, map, (at as isize + delta) as usize))
+}
+
+/// A place in the resolved text back in the script's (inside what an &x
+/// became: the &x's start, or its end for an end).
+pub fn back(map: &[(Range<usize>, usize)], p: usize, end: bool) -> usize {
+    let mut before = 0isize;
+    for (r, n) in map {
+        let (a, b) = ((r.start as isize + before) as usize, (r.start as isize + before) as usize + n);
+        if p < a {
+            break;
+        }
+        if p < b || (end && p == b) {
+            return if end { r.end } else { r.start };
+        }
+        before += *n as isize - r.len() as isize;
+    }
+    (p as isize - before) as usize
+}
+
+/// How far `at` moves when a script's &x are put in (None: it's in one).
+fn shift(map: &[(Range<usize>, usize)], at: usize) -> Option<isize> {
+    let mut delta = 0isize;
+    for (r, n) in map {
+        if r.start < at && at < r.end {
+            return None;
+        }
+        if r.end <= at {
+            delta += *n as isize - r.len() as isize;
+        }
+    }
+    Some(delta)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hints_here(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
     let toks = lex::lex(src, d);
     if toks.iter().any(|t| t.start < at && (at < t.end || (t.open || t.kind == Tk::LineComment) && at <= t.end) && matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)) {
         return None;
@@ -1413,6 +1488,42 @@ mod tests {
         assert_eq!(labels, ["date"]);
         // A plain comment: none.
         assert!(h("-- about fo‸").is_none());
+    }
+
+    #[test]
+    fn tables_made_with_amp_hinted() {
+        let r = vec![Relation { schema: "BIS".into(), name: "CALLS_062026".into(), cols: vec![("CALL_ID".into(), "NUMBER".into()), ("MSISDN".into(), "VARCHAR2".into())], qualify: false, written: false }];
+        let h = |src: &str| {
+            let at = src.find('‸').unwrap();
+            let src = src.replace('‸', "");
+            hints(&src, at, Dialect::Oracle, &r, &[], &[], Case::Upper, false, false).map(|h| (src[h.range.clone()].to_string(), h.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()))
+        };
+        let head = "-- @var call_mnth = 202606 | date yyyymm | string mmyyyy\n";
+        // By its alias.
+        let (word, labels) = h(&format!("{head}SELECT c.ms‸ FROM bis.CALLS_&call_mnth c")).unwrap();
+        assert_eq!((word.as_str(), labels[0].as_str()), ("ms", "MSISDN"));
+        // By the table's own name, and after the table.
+        let (_, labels) = h(&format!("{head}SELECT * FROM bis.CALLS_&call_mnth WHERE call‸")).unwrap();
+        assert!(labels.iter().any(|l| l == "CALL_ID"), "{labels:?}");
+        // A loop's first pass; a query's value can't be told.
+        let (_, labels) = h("-- @for m in ['062026', '072026']\nselect c.‸ from bis.calls_&m c\n-- @end for").unwrap();
+        assert!(labels.iter().any(|l| l == "CALL_ID"), "{labels:?}");
+        assert!(h("-- @set m = (select 1 from dual)\nselect c.‸ from bis.calls_&m c").is_none_or(|(_, l)| !l.iter().any(|l| l == "CALL_ID")));
+        // Ctrl+click on the name: the table it comes out as; places mapped back.
+        let src = format!("{head}SELECT c.msisdn FROM bis.CALLS_&call_mnth c WHERE c.call_id = 1");
+        let at = src.find("CALLS_").unwrap();
+        let (t, map, a) = resolved_at(&src, at, Dialect::Oracle).unwrap();
+        match crate::sql::follow::follow(&t, a, Dialect::Oracle, &|_, _| false).map(|x| x.1) {
+            Some(crate::sql::follow::Target::Object { name, .. }) => assert!(name.eq_ignore_ascii_case("calls_062026"), "{name}"),
+            o => panic!("{o:?}"),
+        }
+        let w = t.find("WHERE").unwrap();
+        assert_eq!(&src[back(&map, w, false)..back(&map, w + 5, true)], "WHERE");
+        let inside = t.find("062026").unwrap();
+        assert_eq!(&src[back(&map, inside, false)..back(&map, inside + 6, true)], "&call_mnth");
+        // The ghost too.
+        let src = format!("{head}SELECT c.call_id FROM bis.CALLS_&call_mnth c WHERE c.");
+        let _ = ghost(&src, src.len(), Dialect::Oracle, &r, &[], &[]);
     }
 
     #[test]

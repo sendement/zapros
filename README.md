@@ -253,7 +253,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   their own colours (loops, conditions, variables — set in Colours, the
   `--` faint), rainbow bands and frames for their blocks, indents by Enter
   and by the formatter, hints after `-- @` and for variables after `&` /
-  `:`, help on Ctrl+click. See [docs/directives.md](docs/directives.md).
+  `:`, help on Ctrl+click. Tables named with `&x` (`from bis.calls_&m c`)
+  get their columns hinted and open by Ctrl+click: the name is worked
+  out from the directives above (values, not queries). See [docs/directives.md](docs/directives.md).
 - **Optimizer hints** (`/*+ index(o orders_idx) */`) are coloured: the
   hint, its brackets, its tables and aliases each their own.
 - **A notebook from a script** is cut only at its `-- %%` marks; without

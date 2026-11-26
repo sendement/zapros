@@ -420,3 +420,10 @@ In SQL text:
 - **Help**: Ctrl+click on a directive's word shows what it does, with an
   example.
 - The checker doesn't call a name made with `&x` (`events_&i`) unknown.
+- **Names made with `&x`**: hints, the ghost hint, Ctrl+click and `*`
+  read the name as it comes out — `-- @var m = 202606 | date yyyymm |
+  string mmyyyy` then `from bis.calls_&m c`: `c.` hints the columns of
+  `bis.calls_062026`. The variables are worked out from the directives
+  above without running anything: plain values, conversions, ranges and
+  collections; a loop's variable takes its first pass. A query's value
+  can't be known before a run, so such names stay unhinted.

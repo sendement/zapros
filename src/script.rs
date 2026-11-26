@@ -2638,21 +2638,125 @@ fn on_items(v: Value, c: &Conv, vars: &Vars, d: Dialect, host: &mut dyn Host) ->
 }
 
 /// A value worked out apart from a run (no queries): for tests and hover.
-pub fn eval_plain(src: &str, vars: &Vars, d: Dialect) -> Result<Value, String> {
-    struct NoHost;
-    impl Host for NoHost {
-        fn sql(&mut self, _: Stmt) -> SqlEnd {
-            SqlEnd::Over
+/// A run's host that has no database.
+struct NoHost;
+
+impl Host for NoHost {
+    fn sql(&mut self, _: Stmt) -> SqlEnd {
+        SqlEnd::Over
+    }
+    fn query(&mut self, _: &str) -> Result<Table, String> {
+        Err("no queries here".into())
+    }
+    fn print(&mut self, _: String) {}
+    fn progress(&mut self, _: String) {}
+    fn stopped(&self) -> bool {
+        false
+    }
+}
+
+/// The variables a script's directives above `upto` give, as far as can
+/// be told without running it: plain values (not queries), a loop's
+/// first pass. What can't be told is left out.
+pub fn static_vars(text: &str, upto: usize, d: Dialect) -> Vars {
+    let mut vars = Vars::default();
+    for (r, src) in directives(text, d) {
+        if r.start >= upto {
+            break;
         }
-        fn query(&mut self, _: &str) -> Result<Table, String> {
-            Err("no queries here".into())
-        }
-        fn print(&mut self, _: String) {}
-        fn progress(&mut self, _: String) {}
-        fn stopped(&self) -> bool {
-            false
+        let Ok(line) = read_line(&src, 0) else { continue };
+        let ev = |e: &Expr, vars: &Vars| eval(e, vars, d, &mut NoHost).ok();
+        match line {
+            Line::Node(Node::Set { name, op, value, .. }) => {
+                let v = match &value {
+                    Some(e) => ev(e, &vars),
+                    None => Some(Value::Int(1)),
+                };
+                let Some(v) = v else {
+                    vars.globals.remove(&name);
+                    continue;
+                };
+                let v = if op == "=" {
+                    Some(v)
+                } else {
+                    let bin = match op {
+                        "+=" | "++" => "+",
+                        "-=" | "--" => "-",
+                        "*=" => "*",
+                        _ => "/",
+                    };
+                    vars.get(&name).cloned().and_then(|old| binary(bin, old, v).ok())
+                };
+                match v {
+                    Some(v) => vars.set(&name, v),
+                    None => {
+                        vars.globals.remove(&name);
+                    }
+                }
+            }
+            Line::For(names, source) => {
+                let all = match source {
+                    Source::Expr(e) => ev(&e, &vars),
+                    Source::Range(st) => ev(&Expr::Range(Box::new(st)), &vars),
+                };
+                let first = match all {
+                    Some(Value::List(l)) => l.into_iter().next().map(|v| (Value::Int(0), v)),
+                    Some(Value::Dict(m)) => m.into_iter().next().map(|(k, v)| (Value::Str(k), v)),
+                    Some(Value::Null) | None => None,
+                    Some(v) => Some((Value::Int(0), v)),
+                };
+                if let Some((k, v)) = first {
+                    if names.len() == 2 {
+                        vars.globals.insert(names[0].clone(), k);
+                        vars.globals.insert(names[1].clone(), v);
+                    } else {
+                        vars.globals.insert(names[0].clone(), v);
+                    }
+                }
+            }
+            _ => {}
         }
     }
+    vars
+}
+
+/// A script's text with its &x put in as far as `static_vars` tells (for
+/// hints: "from bis.calls_&m" is a table then), and where each went: (its
+/// range in `text`, the length of what it became). None: nothing put in.
+pub fn resolved(text: &str, upto: usize, d: Dialect) -> Option<(String, Vec<(Range<usize>, usize)>)> {
+    if !text.contains('&') || !has_directives(text, d) {
+        return None;
+    }
+    let vars = static_vars(text, upto, d);
+    let toks = lex::lex(text, d);
+    let comment = |i: usize| {
+        let k = toks.partition_point(|t| t.end <= i);
+        toks.get(k).is_some_and(|t| matches!(t.kind, Tk::LineComment | Tk::BlockComment))
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::new();
+    let mut prev = 0;
+    for m in marks(text, &comment) {
+        if !text[m.clone()].starts_with('&') {
+            continue;
+        }
+        let Ok(put) = put(&text[m.clone()], &vars, d) else { continue };
+        if put == text[m.clone()] {
+            continue;
+        }
+        out += &text[prev..m.start];
+        out += &put;
+        map.push((m.clone(), put.len()));
+        prev = m.end;
+    }
+    if map.is_empty() {
+        return None;
+    }
+    out += &text[prev..];
+    Some((out, map))
+}
+
+pub fn eval_plain(src: &str, vars: &Vars, d: Dialect) -> Result<Value, String> {
     let mut p = P::new(src)?;
     let e = p.list_or_expr()?;
     p.done()?;
@@ -3031,6 +3135,12 @@ mod tests {
         assert_eq!(shape("-- @else if x"), Some(Shape::Mid));
         assert_eq!(shape("-- @endfor"), Some(Shape::Close));
         assert_eq!(var_names("-- @set a = 1\n-- @for k, v in d\n-- @n++\n", Dialect::Generic), ["a", "k", "v", "n"]);
+        // &x as far as can be told before a run.
+        let src = "-- @var m = 202606 | date yyyymm | string mmyyyy\n-- @set n = (select 1)\n-- @for s in 01..03\nselect * from bis.calls_&m c join ev_&s e on 1 = 1 join t_&n x;\n-- @end for";
+        let at = src.find("select *").unwrap();
+        let (text, map) = resolved(src, at, Dialect::Oracle).unwrap();
+        assert!(text.contains("from bis.calls_062026 c join ev_01 e on 1 = 1 join t_&n x;"), "{text}");
+        assert_eq!(map.len(), 2);
         let none = |_| false;
         let m = |s: &str| marks(s, &none).into_iter().map(|r| s[r].to_string()).collect::<Vec<_>>();
         assert_eq!(m("select * from ev_&i where a = :{i+1} and b = &t.db..&t.name and c::int = 1 and d = &x."), ["&i", ":{i+1}", "&t.db.", "&t.name", "&x."]);

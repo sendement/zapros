@@ -911,7 +911,12 @@ fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str
     let star_here = text.get(at..).is_some_and(|r| r.starts_with('*')) || (at > 0 && text.get(at - 1..at) == Some("*"));
     if star_here {
         let at_star = if text.get(at..).is_some_and(|r| r.starts_with('*')) { at } else { at - 1 };
-        if let Some((range, cols, qualify)) = crate::sql::complete::star_at(text, at_star, cx.dialect, cx.rels, cx.lent) {
+        // (A script's &x put in first: "from bis.calls_&m".)
+        let star = match crate::sql::complete::resolved_at(text, at_star, cx.dialect) {
+            Some((t, map, a)) => crate::sql::complete::star_at(&t, a, cx.dialect, cx.rels, cx.lent).map(|(r, c, q)| (crate::sql::complete::back(&map, r.start, false)..crate::sql::complete::back(&map, r.end, true), c, q)),
+            None => crate::sql::complete::star_at(text, at_star, cx.dialect, cx.rels, cx.lent),
+        };
+        if let Some((range, cols, qualify)) = star {
             let wr = rect_of(&(at_star..at_star + 1));
             if wr.expand(3.0).contains(pos) {
                 ui.painter().hline(wr.x_range(), wr.bottom() - 1.0, egui::Stroke::new(1.2, ui.visuals().hyperlink_color));
@@ -935,7 +940,15 @@ fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str
             return;
         }
     }
-    let Some(word) = name_at(text, at) else { return };
+    let Some(mut word) = name_at(text, at) else { return };
+    // A name made with a script's &x: as it comes out (calls_&m → calls_062026).
+    let resolved = crate::sql::complete::resolved_at(text, word.start, cx.dialect);
+    if let Some((_, map, _)) = &resolved {
+        loop {
+            let Some((r, _)) = map.iter().find(|(r, _)| r.start == word.end) else { break };
+            word.end = name_at(text, r.end).filter(|w| w.start == r.end).map_or(r.end, |w| w.end);
+        }
+    }
     let wr = rect_of(&word);
     if !wr.expand(2.0).contains(pos) {
         return;
@@ -947,7 +960,14 @@ fn follow_links(ui: &mut egui::Ui, ctx: &egui::Context, id: egui::Id, text: &str
         return;
     }
     let has_col = |t: &str, c: &str| cx.rels.iter().any(|r| r.name.eq_ignore_ascii_case(t) && r.cols.iter().any(|(n, _)| n.eq_ignore_ascii_case(c)));
-    match crate::sql::follow::follow(text, word.start, cx.dialect, &has_col).map(|x| x.1) {
+    let target = match &resolved {
+        Some((t, map, a)) => crate::sql::follow::follow(t, *a, cx.dialect, &has_col).map(|x| match x.1 {
+            crate::sql::follow::Target::Here(r) => crate::sql::follow::Target::Here(crate::sql::complete::back(map, r.start, false)..crate::sql::complete::back(map, r.end, true)),
+            o => o,
+        }),
+        None => crate::sql::follow::follow(text, word.start, cx.dialect, &has_col).map(|x| x.1),
+    };
+    match target {
         Some(crate::sql::follow::Target::Here(r)) => {
             set_cursor(ctx, id, text, r.start, r.end);
             ui.scroll_to_rect(rect_of(&r), Some(egui::Align::Center));
