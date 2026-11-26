@@ -3667,3 +3667,61 @@ fn stop_in_one_notebook_spares_another() {
     assert!(rb.run.is_none() && rb.last_run.is_some_and(|l| !l.1), "{:?}", rb.log.iter().map(|l| &l.text).collect::<Vec<_>>());
     assert!(rb.results.first().is_some_and(|v| v.table.rows.first().and_then(|r| r[0].as_deref()) == Some("42")), "the second ran");
 }
+
+#[test]
+fn quitting_with_queries_running() {
+    use crate::app::QuitAsk;
+    let forever = "-- %%\nwith recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n;\n";
+    let (mut h, _g) = harness("quit-running", forever, false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let key = {
+        let t = h.state().tab();
+        crate::app::App::cell_key(&t.id, &t.notebook.as_ref().unwrap().cells[0].id)
+    };
+    let close = |h: &mut Harness<'static, App>| {
+        h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        h.step();
+        h.step();
+    };
+    let steps = |h: &mut Harness<'static, App>, n: usize| {
+        for _ in 0..n {
+            h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    h.state_mut().run_cells(&ctx, None);
+    steps(&mut h, 20);
+    assert!(h.state().rt[&key].run.is_some());
+    // Closed: asked first, not closed.
+    close(&mut h);
+    assert_eq!(h.state().quit_ask, Some(QuitAsk::Ask));
+    assert!(!h.state().force_close);
+    steps(&mut h, 3);
+    shot(&mut h, "quit-ask");
+    // Waiting: stays open while it runs; not quitting after all.
+    h.state_mut().quit_waiting();
+    steps(&mut h, 20);
+    assert!(matches!(h.state().quit_ask, Some(QuitAsk::Waiting(_))) && !h.state().force_close);
+    shot(&mut h, "quit-wait");
+    h.state_mut().quit_ask = None;
+    // Left running: closes at once, the run untouched.
+    close(&mut h);
+    h.state_mut().quit_now(&ctx);
+    assert!(h.state().force_close);
+    assert!(h.state().rt[&key].run.as_ref().is_some_and(|r| r.stop_asked.is_none()));
+    h.state_mut().force_close = false;
+    // Stopped: closes once the run says it's stopped, well before the limit.
+    close(&mut h);
+    assert_eq!(h.state().quit_ask, Some(QuitAsk::Ask));
+    let t0 = std::time::Instant::now();
+    h.state_mut().quit_stopping();
+    while !h.state().force_close && t0.elapsed() < Duration::from_secs(10) {
+        steps(&mut h, 1);
+    }
+    assert!(h.state().force_close);
+    assert!(t0.elapsed() < Duration::from_secs(4), "{:?}", t0.elapsed());
+    let r = &h.state().rt[&key];
+    assert!(r.run.is_none() && r.last_run.is_some_and(|l| l.1));
+}

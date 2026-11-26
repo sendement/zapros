@@ -72,6 +72,20 @@ pub enum TxThen {
     Quit,
 }
 
+/// Closing with queries still running: what's being done about them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitAsk {
+    /// Asked what to do.
+    Ask,
+    /// Waiting for them to end (since when).
+    Waiting(Instant),
+    /// Stopped; waiting a little for the servers to say so (since when).
+    Stopping(Instant),
+}
+
+/// How long stopped queries get to end before closing anyway.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
 pub enum Node {
     Loading,
     Ready(Vec<Obj>),
@@ -308,10 +322,12 @@ pub struct App {
     pub tx_ask: Option<(Vec<String>, TxThen)>,
     /// Closing once the commits asked for are done (since when).
     pub quitting: Option<Instant>,
+    /// Closing asked for with queries running.
+    pub quit_ask: Option<QuitAsk>,
     pub outline_filter: String,
     /// The structure panel's search takes the keys next frame.
     pub outline_focus: bool,
-    force_close: bool,
+    pub(crate) force_close: bool,
     pub settings_open: bool,
     pub ws_edit: Option<usize>,
     pub tab_rename: Option<(String, String)>,
@@ -446,6 +462,7 @@ impl App {
             confirm: None,
             tx_ask: None,
             quitting: None,
+            quit_ask: None,
             outline_filter: String::new(),
             outline_focus: false,
             force_close: false,
@@ -1951,13 +1968,77 @@ impl App {
             }
             return;
         }
+        match self.quit_ask {
+            Some(QuitAsk::Waiting(_)) if self.running() == (0, 0) => self.quit_after_runs(ctx),
+            Some(QuitAsk::Stopping(t)) if self.running().0 == 0 || t.elapsed() > STOP_WAIT => self.quit_after_runs(ctx),
+            Some(QuitAsk::Waiting(_) | QuitAsk::Stopping(_)) => ctx.request_repaint_after(Duration::from_millis(200)),
+            _ => {}
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.force_close {
+            if self.running() != (0, 0) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.quit_ask = Some(QuitAsk::Ask);
+                return;
+            }
             let pending: Vec<String> = self.live.iter().filter(|(_, l)| l.pending).map(|(c, _)| c.clone()).collect();
             if !pending.is_empty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.tx_ask = Some((pending, TxThen::Quit));
             }
         }
+    }
+
+    /// What's still going: (queries running or waiting their turn, exports).
+    pub fn running(&self) -> (usize, usize) {
+        let runs = self.rt.values().filter(|r| r.run.is_some()).count();
+        let exports = self.rt.values().flat_map(|r| &r.results).filter(|v| v.exporting.is_some()).count();
+        (runs, exports)
+    }
+
+    /// The connections the running queries are on (their names).
+    pub fn running_on(&self) -> Vec<String> {
+        let mut conns: Vec<&String> = self.rt.values().filter_map(|r| r.run.as_ref()).map(|r| &r.conn).collect();
+        conns.sort();
+        conns.dedup();
+        conns.iter().map(|c| self.spec(c).map(|s| s.title()).unwrap_or_else(|| c.to_string())).collect()
+    }
+
+    /// Closing: every query running or queued is stopped first.
+    pub fn quit_stopping(&mut self) {
+        let keys: Vec<String> = self.rt.iter().filter(|(_, r)| r.run.is_some()).map(|(k, _)| k.clone()).collect();
+        for k in keys {
+            self.cancel_key(&k);
+        }
+        self.quit_ask = Some(QuitAsk::Stopping(Instant::now()));
+    }
+
+    /// Closing once everything running has ended by itself.
+    pub fn quit_waiting(&mut self) {
+        self.quit_ask = Some(QuitAsk::Waiting(Instant::now()));
+    }
+
+    /// Closing at once, the queries left to the servers.
+    pub fn quit_now(&mut self, ctx: &egui::Context) {
+        self.quit_ask = None;
+        self.close_now(ctx);
+    }
+
+    /// The runs are over (or stopped): uncommitted changes asked about,
+    /// else closed.
+    fn quit_after_runs(&mut self, ctx: &egui::Context) {
+        self.quit_ask = None;
+        let pending: Vec<String> = self.live.iter().filter(|(_, l)| l.pending).map(|(c, _)| c.clone()).collect();
+        if pending.is_empty() {
+            self.close_now(ctx);
+        } else {
+            self.tx_ask = Some((pending, TxThen::Quit));
+        }
+    }
+
+    fn close_now(&mut self, ctx: &egui::Context) {
+        self.save_session();
+        self.force_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn global_keys(&mut self, ctx: &egui::Context) {

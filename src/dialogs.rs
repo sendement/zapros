@@ -33,6 +33,7 @@ pub fn all(app: &mut App, ctx: &egui::Context) {
     password(app, ctx);
     confirm(app, ctx);
     tx_ask(app, ctx);
+    quit_ask(app, ctx);
     settings(app, ctx);
     workspace(app, ctx);
     small(app, ctx);
@@ -651,6 +652,87 @@ fn tx_ask(app: &mut App, ctx: &egui::Context) {
         if let Some(commit) = answer {
             app.tx_answer(ctx, conns, then, commit);
         }
+    }
+}
+
+/// Closing with queries running: stop them, wait for them, or leave them be.
+fn quit_ask(app: &mut App, ctx: &egui::Context) {
+    use crate::app::QuitAsk;
+    let Some(state) = app.quit_ask else { return };
+    let (runs, exports) = app.running();
+    let on = app.running_on();
+    enum Do {
+        Stop,
+        Wait,
+        Now,
+        Cancel,
+    }
+    let mut done = None;
+    egui::Modal::new(egui::Id::new("quit-ask")).show(ctx, |ui| {
+        ui.set_width(580.0);
+        let mut what = Vec::new();
+        if runs > 0 {
+            what.push(format!("{}: {runs}{}", t("Запросов", "Queries"), if on.is_empty() { String::new() } else { format!(" ({})", on.join(", ")) }));
+        }
+        if exports > 0 {
+            what.push(format!("{}: {exports}", t("Выгрузок в файл", "Exports to files")));
+        }
+        match state {
+            QuitAsk::Ask => {
+                ui.heading(t("Ещё выполняются", "Still running"));
+                ui.label(what.join("\n"));
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(RichText::new(format!("⏹ {}", t("Остановить и выйти", "Stop and quit"))).strong()).clicked() {
+                        done = Some(Do::Stop);
+                    }
+                    if ui.button(format!("⏳ {}", t("Дождаться и выйти", "Wait and quit"))).clicked() {
+                        done = Some(Do::Wait);
+                    }
+                    if ui.button(t("Выйти, не останавливая", "Quit, leave them running")).clicked() {
+                        done = Some(Do::Now);
+                    }
+                    if ui.button(t("Отмена", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        done = Some(Do::Cancel);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(t(
+                        "Не остановленные запросы сервер может выполнять и после выхода; незафиксированные изменения при этом пропадут, выгрузки останутся недописанными.",
+                        "Queries not stopped may go on on the server after quitting; uncommitted changes are lost then, exports left unfinished.",
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+            QuitAsk::Waiting(since) | QuitAsk::Stopping(since) => {
+                let stopping = matches!(state, QuitAsk::Stopping(_));
+                ui.heading(if stopping { t("Останавливаем запросы…", "Stopping the queries…") } else { t("Ждём, пока закончатся…", "Waiting for them to end…") });
+                let secs = since.elapsed().as_secs();
+                ui.label(format!("{}\n{} {}:{:02}", what.join("\n"), t("прошло", "elapsed"), secs / 60, secs % 60));
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if !stopping && ui.button(RichText::new(format!("⏹ {}", t("Остановить и выйти", "Stop and quit"))).strong()).clicked() {
+                        done = Some(Do::Stop);
+                    }
+                    if ui.button(t("Выйти сейчас", "Quit now")).clicked() {
+                        done = Some(Do::Now);
+                    }
+                    if ui.button(t("Не выходить", "Don't quit")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        done = Some(Do::Cancel);
+                    }
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
+    });
+    match done {
+        Some(Do::Stop) => app.quit_stopping(),
+        Some(Do::Wait) => app.quit_waiting(),
+        Some(Do::Now) => app.quit_now(ctx),
+        Some(Do::Cancel) => app.quit_ask = None,
+        None => {}
     }
 }
 
