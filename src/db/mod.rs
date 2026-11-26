@@ -556,6 +556,10 @@ pub enum Req {
     /// `limit`: rows in a batch; the last statement's cursor stays open
     /// after it, for `More` / `StopFetch`.
     Run { run: u64, stmts: Vec<Stmt>, limit: usize, go_on: bool },
+    /// A script with directives (`crate::script`): its statements run as
+    /// its loops and conditions say. `scope`: whose variables it shares
+    /// (a notebook's cells), kept here between runs.
+    Script { run: u64, prog: Box<crate::script::Program>, vars: Box<crate::script::Vars>, scope: Option<String>, limit: usize, go_on: bool },
     /// The open cursor: `n` more rows (`all`: batch after batch to the end).
     More { run: u64, n: usize, all: bool },
     /// The open cursor's rest written to a file as it comes (none of it
@@ -592,7 +596,7 @@ pub enum TxOp {
     Auto(bool),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Stmt {
     pub sql: String,
     /// Where it starts in the editor's text (bytes).
@@ -620,6 +624,10 @@ pub enum What {
     Note { run: u64, text: String },
     Result { run: u64, index: usize, at: usize, sql: String, outcome: Result<Outcome, Failure>, took: Duration },
     Finished { run: u64, cancelled: bool },
+    /// Where a script's got to ("7/16 · i = 06").
+    Progress { run: u64, text: String },
+    /// A script's directive went wrong (at its line).
+    ScriptError { run: u64, line: usize, msg: String },
     /// The first batch of a result whose cursor stays open (the run counts
     /// as finished after it).
     Page { run: u64, at: usize, sql: String, table: Table, took: Duration },
@@ -760,6 +768,87 @@ impl Drop for Worker {
     }
 }
 
+/// Where a script's statements run: the worker's session.
+struct ScriptHost<'a> {
+    session: &'a mut Option<Box<dyn Session>>,
+    tell: &'a dyn Fn(What),
+    run: u64,
+    limit: usize,
+    auto: &'a std::cell::Cell<bool>,
+    stop: &'a std::sync::atomic::AtomicBool,
+    index: usize,
+    cancelled: bool,
+}
+
+impl ScriptHost<'_> {
+    /// A statement run in the session (`fetch`: how its rows come).
+    fn exec(&mut self, sql: &str, fetch: &mut Fetch) -> Result<Outcome, Failure> {
+        let Some(s) = self.session.as_mut() else { return Err(Failure::new("no connection")) };
+        let (run, tell) = (self.run, self.tell);
+        let mut note = |text: String| tell(What::Note { run, text });
+        let outcome = match if self.auto.get() { Ok(()) } else { s.tx_before(sql) } {
+            Ok(()) => s.run(sql, fetch, &mut note),
+            Err(e) => Err(e),
+        };
+        if !self.auto.get() && !outcome.as_ref().is_err_and(|f| f.lost) {
+            s.tx_after(sql, outcome.is_ok());
+        }
+        if let Err(f) = &outcome {
+            if f.lost {
+                *self.session = None;
+                (self.tell)(What::Lost(f.message.clone()));
+            }
+            if self.stop.load(Ordering::Relaxed) || is_cancel_message(&f.message) {
+                self.cancelled = true;
+            }
+        }
+        outcome
+    }
+}
+
+impl crate::script::Host for ScriptHost<'_> {
+    fn sql(&mut self, st: Stmt) -> crate::script::SqlEnd {
+        use crate::script::SqlEnd;
+        if self.session.is_none() {
+            return SqlEnd::Over;
+        }
+        let index = self.index;
+        self.index += 1;
+        (self.tell)(What::Started { run: self.run, index, at: st.at, sql: st.sql.clone() });
+        let t = Instant::now();
+        let outcome = self.exec(&st.sql, &mut Fetch::limit(self.limit));
+        let end = match &outcome {
+            Ok(_) => SqlEnd::Ok,
+            Err(f) if f.lost || self.cancelled => SqlEnd::Over,
+            Err(_) => SqlEnd::Failed,
+        };
+        (self.tell)(What::Result { run: self.run, index, at: st.at, sql: st.sql, outcome, took: t.elapsed() });
+        end
+    }
+
+    fn query(&mut self, sql: &str) -> Result<Table, String> {
+        // The whole answer (up to a million rows).
+        let mut fetch = Fetch::new(10_000, |t: &mut Table| if t.rows.len() >= 1_000_000 { 0 } else { 10_000 });
+        match self.exec(sql, &mut fetch) {
+            Ok(Outcome::Rows(t)) => Ok(t),
+            Ok(Outcome::Done(_)) => Ok(Table::default()),
+            Err(f) => Err(f.message),
+        }
+    }
+
+    fn print(&mut self, text: String) {
+        (self.tell)(What::Note { run: self.run, text });
+    }
+
+    fn progress(&mut self, text: String) {
+        (self.tell)(What::Progress { run: self.run, text });
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.session.is_none()
+    }
+}
+
 /// What a worker's thread shares with its handle.
 struct Shared {
     cancel: Arc<Mutex<Option<Canceller>>>,
@@ -820,6 +909,8 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             }
         }
     };
+    // Scripts' variables by whose they are (a notebook's), between runs.
+    let mut scopes: std::collections::HashMap<String, crate::script::Vars> = std::collections::HashMap::new();
     // A request that came while a cursor was open: next.
     let mut stash: Option<Req> = None;
     loop {
@@ -828,7 +919,7 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
             break;
         }
         // Its turn: on, unless it was stopped while it waited.
-        if let Req::Run { run, .. } = &req {
+        if let Req::Run { run, .. } | Req::Script { run, .. } = &req {
             let mut cur = current.lock().unwrap();
             if dropped.lock().unwrap().remove(run) {
                 continue;
@@ -989,6 +1080,31 @@ fn work(spec: Spec, password: String, rx: Receiver<Req>, events: Sender<Event>, 
                 if !paged {
                     tell(What::Finished { run, cancelled });
                 }
+                *current.lock().unwrap() = 0;
+            }
+            Req::Script { run, prog, vars, scope, limit, go_on } => {
+                let mut vars = *vars;
+                if let Some(saved) = scope.as_ref().and_then(|s| scopes.get(s)) {
+                    for (k, v) in &saved.globals {
+                        vars.globals.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                let mut cancelled = false;
+                if ensure(&mut session) {
+                    let mut host = ScriptHost { session: &mut session, tell: &tell, run, limit, auto: &auto, stop: &stop, index: 0, cancelled: false };
+                    let end = crate::script::run(&prog, &mut vars, spec.kind.dialect(), go_on, &mut host);
+                    cancelled = host.cancelled || stop.load(Ordering::Relaxed);
+                    if let Err(m) = end {
+                        tell(What::ScriptError { run, line: m.line, msg: m.msg });
+                    }
+                }
+                if let Some(s) = scope {
+                    scopes.insert(s, vars);
+                }
+                if !auto.get() && let Some(s) = session.as_mut() {
+                    tell(What::Tx { auto: false, pending: s.pending() });
+                }
+                tell(What::Finished { run, cancelled });
                 *current.lock().unwrap() = 0;
             }
             // (No cursor open any more — the session was made anew: what's

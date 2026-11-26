@@ -237,6 +237,17 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   behind it go on in the new one), and the hung session is ended on the server from the other
   one: PostgreSQL `pg_terminate_backend`, Oracle `ALTER SYSTEM KILL
   SESSION` (when the user may), ClickHouse `KILL QUERY`.
+- **Script directives** — loops and variables for servers with no
+  procedural language of their own (ClickHouse first of all), in `-- @…`
+  comments so the script stays SQL: `@set` values, lists, dictionaries and
+  query results; `@for` over ranges (numbers keeping leading zeros, dates
+  by day / hour / month…, letters), lists, dictionaries and query rows;
+  `@while` (a query in its condition: waiting for mutations), `@if` /
+  `@elif` / `@else`, `@match` / `@case`, `@print`, `@pause`, `@on error`.
+  In SQL `:x` puts a value in, `&x` text as it is (`events_&i`,
+  `&{d | date yyyymmdd}`). Progress by the results, Stop ends the loop; a
+  notebook's cells share their variables. See
+  [docs/directives.md](docs/directives.md).
 - **Quitting with queries running** asks first: stop them and quit (the
   servers are told to stop, and it closes once they say so, 5 s at most),
   wait for them to end and quit, or quit leaving them be (a server may then

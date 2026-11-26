@@ -3725,3 +3725,86 @@ fn quitting_with_queries_running() {
     let r = &h.state().rt[&key];
     assert!(r.run.is_none() && r.last_run.is_some_and(|l| l.1));
 }
+
+fn log_of(h: &Harness<'static, App>, key: &str) -> Vec<String> {
+    h.state().rt.get(key).map(|r| r.log.iter().map(|l| format!("{:?} {}", l.kind, l.text)).collect()).unwrap_or_default()
+}
+
+#[test]
+fn script_loops_into_sql() {
+    let script = "-- @set names = ('a', 'b', 'c')\n\
+        create table sx(n int, s text);\n\
+        -- @for i, x in names\n\
+        insert into sx values (:i, :x);\n\
+        select count(*) from sx;\n\
+        -- @end for\n\
+        -- @print('rows: ', (select count(*) from sx), ', last: ', (select s from sx order by n desc limit 1))\n";
+    let (mut h, _g) = harness("script-loop", script, false);
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, true, false);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let rt = &h.state().rt[&id];
+    let log = log_of(&h, &id);
+    assert!(rt.output.iter().any(|l| l.text == "rows: 3, last: c"), "{:?} {log:?}", rt.output.iter().map(|l| &l.text).collect::<Vec<_>>());
+    // One result for the statement in the loop: the last pass's.
+    assert_eq!(rt.results.len(), 1, "{log:?}");
+    assert_eq!(rt.results[0].table.rows[0][0].as_deref(), Some("3"));
+    assert!(log.iter().any(|l| l.contains("insert into sx values (2, 'c')")), "{log:?}");
+    assert!(rt.last_run.is_some_and(|l| !l.1));
+}
+
+#[test]
+fn script_mistake_runs_nothing() {
+    let (mut h, _g) = harness("script-mistake", "create table never(n int);\n-- @for i in 1 .. 3\nselect &i;\n", false);
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, true, false);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let log = log_of(&h, &id);
+    assert!(log.iter().any(|l| l.contains(" 2: @for") && l.contains("isn't closed")), "{log:?}");
+    assert!(!log.iter().any(|l| l.starts_with("Run")), "{log:?}");
+}
+
+#[test]
+fn script_vars_shared_by_notebook_cells() {
+    let (mut h, _g) = harness("script-nb", "-- %%\n-- @set n = 2\n-- @set tbl = 'customers'\n-- %%\nselect :n * 10, count(*) > 0 from &tbl;\n", false);
+    h.state_mut().toggle_notebook();
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cells(&ctx, None);
+    settle(&mut h);
+    let t = h.state().tab().clone();
+    let cells = &t.notebook.as_ref().unwrap().cells;
+    let key = crate::app::App::cell_key(&t.id, &cells[1].id);
+    let rt = &h.state().rt[&key];
+    assert_eq!(rt.results.first().map(|v| v.table.rows[0].clone()), Some(vec![Some("20".into()), Some("1".into())]), "{:?}", log_of(&h, &key));
+    // Run on its own later: the variables are still there.
+    h.state_mut().run_cells(&ctx, Some(cells[1].id.clone()));
+    settle(&mut h);
+    assert!(h.state().param_ask.is_empty());
+    assert_eq!(h.state().rt[&key].results.first().and_then(|v| v.table.rows[0][0].clone()).as_deref(), Some("20"));
+}
+
+#[test]
+fn script_loop_stops() {
+    let (mut h, _g) = harness("script-stop", "-- @while true\nselect 1;\n-- @pause 200ms\n-- @end while\n", false);
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, true, false);
+    let id = h.state().tab().id.clone();
+    for _ in 0..60 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let r = h.state().rt[&id].run.as_ref().expect("still running");
+    assert!(r.progress.as_deref().is_some_and(|p| p.starts_with("while · ")), "{:?}", r.progress);
+    shot(&mut h, "script-running");
+    let t0 = std::time::Instant::now();
+    h.state_mut().cancel();
+    while h.state().rt[&id].run.is_some() && t0.elapsed() < Duration::from_secs(5) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    assert!(h.state().rt[&id].last_run.is_some_and(|l| l.1), "stopped: {:?}", log_of(&h, &id));
+}

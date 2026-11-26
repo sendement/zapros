@@ -703,9 +703,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                                     ctx.request_repaint_after(std::time::Duration::from_millis(250));
                                 }
                             }
-                            if let Some(since) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| r.since) {
+                            if let Some((since, progress)) = app.rt.get(&key).and_then(|r| r.run.as_ref()).map(|r| (r.since, r.progress.clone())) {
                                 ui.add(egui::Spinner::new().size(14.0));
                                 crate::app::stopwatch_label(ui, since, true);
+                                if let Some(p) = progress {
+                                    ui.label(egui::RichText::new(p).monospace().small().weak());
+                                }
                             } else if let Some((took, cancelled)) = app.rt.get(&key).and_then(|r| r.last_run) {
                                 crate::app::last_run_label(ui, took, cancelled);
                             }

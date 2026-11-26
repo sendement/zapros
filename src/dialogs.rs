@@ -49,6 +49,8 @@ pub struct ParamAsk {
     pub conn: String,
     pub params: Vec<crate::sql::params::Param>,
     pub d: Dialect,
+    /// A script's (with its variables' scope): run once they're given.
+    pub script: Option<(Box<crate::script::Program>, Option<String>)>,
 }
 
 fn params(app: &mut App, ctx: &egui::Context) {
@@ -109,9 +111,19 @@ fn params(app: &mut App, ctx: &egui::Context) {
     match done {
         Some(Some(fill)) => {
             let mut stmts = ask.stmts;
+            let vals = app.param_values.clone();
+            // Only those asked (a script's own variables go in as it runs).
+            let get = |p: &params::Param| ask.params.iter().any(|q| q.key() == p.key()).then(|| vals.get(&p.key()).map(|(v, a)| if p.amp { v.clone() } else { params::value(v, *a, ask.d) })).flatten();
+            if let Some((mut prog, scope)) = ask.script {
+                if fill {
+                    for s in prog.sql_mut() {
+                        s.sql = params::put(&s.sql, ask.d, get);
+                    }
+                }
+                app.dispatch_script_now(ctx, ask.tab, *prog, scope, &ask.conn);
+                return;
+            }
             if fill {
-                let vals = app.param_values.clone();
-                let get = |p: &params::Param| vals.get(&p.key()).map(|(v, a)| if p.amp { v.clone() } else { params::value(v, *a, ask.d) });
                 for s in &mut stmts {
                     s.sql = params::put(&s.sql, ask.d, get);
                 }

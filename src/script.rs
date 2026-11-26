@@ -1,0 +1,2323 @@
+//! Script directives (docs/directives.md): variables, lists, dictionaries,
+//! loops, conditions and output, written in `-- @…` comments of an SQL
+//! script. The script is read through first (`parse`) into a program of SQL
+//! statements and directives; the connection's worker then runs it (`run`)
+//! in its session, putting the variables into the SQL (`:x` a value, `&x`
+//! text as it is) statement by statement.
+
+use std::collections::HashMap;
+use std::ops::Range;
+use std::time::Duration;
+
+use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, Timelike};
+
+use crate::db::{Stmt, Table};
+use crate::sql::Dialect;
+use crate::sql::lex::{self, Tk};
+
+// ───────────────────────────── values ─────────────────────────────
+
+/// How fine a date is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Prec {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    /// A number written with leading zeros: keeps its width when put in.
+    Pad(i64, u8),
+    Num(f64),
+    Str(String),
+    Date(NaiveDateTime, Prec),
+    List(Vec<Value>),
+    Dict(Vec<(String, Value)>),
+}
+
+impl Value {
+    fn kind(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Int(_) | Value::Pad(..) | Value::Num(_) => "number",
+            Value::Str(_) => "string",
+            Value::Date(..) => "date",
+            Value::List(_) => "list",
+            Value::Dict(_) => "dictionary",
+        }
+    }
+
+    pub fn truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Int(n) | Value::Pad(n, _) => *n != 0,
+            Value::Num(n) => *n != 0.0,
+            Value::Str(s) => !s.is_empty(),
+            Value::Date(..) => true,
+            Value::List(l) => !l.is_empty(),
+            Value::Dict(d) => !d.is_empty(),
+        }
+    }
+
+    fn num(&self) -> Option<f64> {
+        match self {
+            Value::Int(n) | Value::Pad(n, _) => Some(*n as f64),
+            Value::Num(n) => Some(*n),
+            Value::Bool(b) => Some(*b as i64 as f64),
+            Value::Str(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn int(&self) -> Option<i64> {
+        match self {
+            Value::Int(n) | Value::Pad(n, _) => Some(*n),
+            Value::Num(n) if n.fract() == 0.0 => Some(*n as i64),
+            Value::Str(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// As text, the way `&x` and `@print` put it.
+    pub fn text(&self) -> Result<String, String> {
+        Ok(match self {
+            Value::Null => String::new(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(n) => n.to_string(),
+            Value::Pad(n, w) => pad(*n, *w),
+            Value::Num(n) => num_text(*n),
+            Value::Str(s) => s.clone(),
+            Value::Date(d, p) => date_text(d, *p),
+            Value::List(l) => l.iter().map(Value::text).collect::<Result<Vec<_>, _>>()?.join(","),
+            Value::Dict(_) => return Err("a dictionary can't go into SQL as it is: take a field of it".into()),
+        })
+    }
+
+    /// As a value in SQL, the way `:x` puts it.
+    pub fn sql(&self, d: Dialect) -> Result<String, String> {
+        Ok(match self {
+            Value::Null => "NULL".into(),
+            Value::Bool(b) if d == Dialect::Oracle => (if *b { "1" } else { "0" }).into(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(_) | Value::Pad(..) | Value::Num(_) => self.text()?,
+            Value::Str(s) => crate::sql::params::value(s, crate::sql::params::As::Text, d),
+            Value::Date(dt, p) => {
+                let s = date_text(dt, *p);
+                match d {
+                    Dialect::Oracle if *p >= Prec::Day => format!("DATE '{s}'"),
+                    Dialect::Oracle => format!("TIMESTAMP '{s}'"),
+                    _ => format!("'{s}'"),
+                }
+            }
+            Value::List(l) => l.iter().map(|v| v.sql(d)).collect::<Result<Vec<_>, _>>()?.join(", "),
+            Value::Dict(_) => return Err("a dictionary can't go into SQL as it is: take a field of it".into()),
+        })
+    }
+
+    /// As `@print` shows it inside a list or dictionary.
+    fn shown_inner(&self) -> String {
+        match self {
+            Value::Str(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+            Value::Date(..) => format!("\"{}\"", self.shown()),
+            _ => self.shown(),
+        }
+    }
+
+    /// As `@print` shows it.
+    pub fn shown(&self) -> String {
+        match self {
+            Value::Null => "null".into(),
+            Value::List(l) => format!("[{}]", l.iter().map(Value::shown_inner).collect::<Vec<_>>().join(", ")),
+            Value::Dict(d) => format!("{{{}}}", d.iter().map(|(k, v)| format!("\"{k}\": {}", v.shown_inner())).collect::<Vec<_>>().join(", ")),
+            v => v.text().unwrap_or_default(),
+        }
+    }
+
+    fn field(&self, name: &str) -> Option<&Value> {
+        match self {
+            Value::Dict(d) => d.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+}
+
+fn pad(n: i64, w: u8) -> String {
+    if n < 0 { format!("-{:0w$}", -n, w = w as usize) } else { format!("{:0w$}", n, w = w as usize) }
+}
+
+fn num_text(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 { format!("{}", n as i64) } else { format!("{n}") }
+}
+
+fn date_text(d: &NaiveDateTime, p: Prec) -> String {
+    match p {
+        Prec::Second => d.format("%Y-%m-%d %H:%M:%S").to_string(),
+        Prec::Minute | Prec::Hour => d.format("%Y-%m-%d %H:%M:00").to_string(),
+        _ => d.format("%Y-%m-%d").to_string(),
+    }
+}
+
+// ───────────────────────────── dates ─────────────────────────────
+
+/// A date format's pieces (Oracle style, any case).
+#[derive(Clone, Debug, PartialEq)]
+enum Fmt {
+    Yyyy,
+    Yy,
+    Mm,
+    Dd,
+    Ddd,
+    Hh,
+    Mi,
+    Ss,
+    Q,
+    Lit(char),
+}
+
+fn fmt_tokens(f: &str) -> Vec<Fmt> {
+    let low = f.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < low.len() {
+        let r = &low[i..];
+        let (t, n) = if r.starts_with("yyyy") {
+            (Fmt::Yyyy, 4)
+        } else if r.starts_with("hh24") {
+            (Fmt::Hh, 4)
+        } else if r.starts_with("ddd") {
+            (Fmt::Ddd, 3)
+        } else if r.starts_with("yy") {
+            (Fmt::Yy, 2)
+        } else if r.starts_with("mm") {
+            (Fmt::Mm, 2)
+        } else if r.starts_with("dd") {
+            (Fmt::Dd, 2)
+        } else if r.starts_with("hh") {
+            (Fmt::Hh, 2)
+        } else if r.starts_with("mi") {
+            (Fmt::Mi, 2)
+        } else if r.starts_with("ss") {
+            (Fmt::Ss, 2)
+        } else if r.starts_with('q') {
+            (Fmt::Q, 1)
+        } else {
+            let c = f[i..].chars().next().unwrap();
+            (Fmt::Lit(c), c.len_utf8())
+        };
+        out.push(t);
+        i += n;
+    }
+    out
+}
+
+/// A date read with a format; its precision, the finest piece there.
+fn date_by(s: &str, f: &str) -> Result<(NaiveDateTime, Prec), String> {
+    let bad = || format!("'{s}' doesn't read as a date by '{f}'");
+    let (mut y, mut mo, mut d, mut h, mut mi, mut se) = (1970i32, 1u32, 1u32, 0u32, 0u32, 0u32);
+    let mut doy: Option<u32> = None;
+    let mut prec = Prec::Year;
+    let mut rest = s.trim();
+    let take = |n: usize, rest: &mut &str| -> Result<u32, String> {
+        let digits: String = rest.chars().take(n).take_while(char::is_ascii_digit).collect();
+        if digits.len() != n {
+            return Err(bad());
+        }
+        *rest = &rest[n..];
+        digits.parse().map_err(|_| bad())
+    };
+    for t in fmt_tokens(f) {
+        match t {
+            Fmt::Yyyy => y = take(4, &mut rest)? as i32,
+            Fmt::Yy => y = 2000 + take(2, &mut rest)? as i32,
+            Fmt::Q => {
+                mo = (take(1, &mut rest)? - 1) * 3 + 1;
+                prec = prec.min(Prec::Quarter);
+            }
+            Fmt::Mm => {
+                mo = take(2, &mut rest)?;
+                prec = prec.min(Prec::Month);
+            }
+            Fmt::Dd => {
+                d = take(2, &mut rest)?;
+                prec = prec.min(Prec::Day);
+            }
+            Fmt::Ddd => {
+                doy = Some(take(3, &mut rest)?);
+                prec = prec.min(Prec::Day);
+            }
+            Fmt::Hh => {
+                h = take(2, &mut rest)?;
+                prec = prec.min(Prec::Hour);
+            }
+            Fmt::Mi => {
+                mi = take(2, &mut rest)?;
+                prec = prec.min(Prec::Minute);
+            }
+            Fmt::Ss => {
+                se = take(2, &mut rest)?;
+                prec = prec.min(Prec::Second);
+            }
+            Fmt::Lit(c) => {
+                if !rest.starts_with(c) {
+                    return Err(bad());
+                }
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    if !rest.is_empty() {
+        return Err(bad());
+    }
+    let date = match doy {
+        Some(n) => NaiveDate::from_yo_opt(y, n),
+        None => NaiveDate::from_ymd_opt(y, mo, d),
+    }
+    .ok_or_else(bad)?;
+    let dt = date.and_hms_opt(h, mi, se).ok_or_else(bad)?;
+    Ok((dt, prec))
+}
+
+/// A date written the usual way: 2026-11-01, 2026-11-01 10:30[:00], 2026-11.
+fn date_iso(s: &str) -> Result<(NaiveDateTime, Prec), String> {
+    let s = s.trim();
+    for (f, p) in [("%Y-%m-%d %H:%M:%S", Prec::Second), ("%Y-%m-%dT%H:%M:%S", Prec::Second), ("%Y-%m-%d %H:%M", Prec::Minute)] {
+        if let Ok(d) = NaiveDateTime::parse_from_str(s, f) {
+            return Ok((d, p));
+        }
+    }
+    // Fractions of a second (from a server): dropped.
+    if let Some(head) = s.split('.').next()
+        && head.len() < s.len()
+        && let Ok(d) = NaiveDateTime::parse_from_str(head, "%Y-%m-%d %H:%M:%S")
+    {
+        return Ok((d, Prec::Second));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok((d.and_hms_opt(0, 0, 0).unwrap(), Prec::Day));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d") {
+        return Ok((d.and_hms_opt(0, 0, 0).unwrap(), Prec::Month));
+    }
+    Err(format!("'{s}' doesn't read as a date (2026-11-01, 2026-11-01 10:30, 2026-11; or give a format: | date yyyymmdd)"))
+}
+
+fn date_fmt(d: &NaiveDateTime, f: &str) -> String {
+    let mut out = String::new();
+    for t in fmt_tokens(f) {
+        match t {
+            Fmt::Yyyy => out += &format!("{:04}", d.year()),
+            Fmt::Yy => out += &format!("{:02}", d.year() % 100),
+            Fmt::Mm => out += &format!("{:02}", d.month()),
+            Fmt::Dd => out += &format!("{:02}", d.day()),
+            Fmt::Ddd => out += &format!("{:03}", d.ordinal()),
+            Fmt::Hh => out += &format!("{:02}", d.hour()),
+            Fmt::Mi => out += &format!("{:02}", d.minute()),
+            Fmt::Ss => out += &format!("{:02}", d.second()),
+            Fmt::Q => out += &((d.month() - 1) / 3 + 1).to_string(),
+            Fmt::Lit(c) => out.push(c),
+        }
+    }
+    out
+}
+
+/// A date moved by `n` units.
+fn date_add(d: NaiveDateTime, unit: Prec, n: i64) -> Option<NaiveDateTime> {
+    let months = |m: i64| if m >= 0 { d.checked_add_months(Months::new(m as u32)) } else { d.checked_sub_months(Months::new((-m) as u32)) };
+    match unit {
+        Prec::Second => d.checked_add_signed(chrono::Duration::seconds(n)),
+        Prec::Minute => d.checked_add_signed(chrono::Duration::minutes(n)),
+        Prec::Hour => d.checked_add_signed(chrono::Duration::hours(n)),
+        Prec::Day => d.checked_add_signed(chrono::Duration::days(n)),
+        Prec::Week => d.checked_add_signed(chrono::Duration::weeks(n)),
+        Prec::Month => months(n),
+        Prec::Quarter => months(n * 3),
+        Prec::Year => months(n * 12),
+    }
+}
+
+// ───────────────────────────── expressions ─────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Conv {
+    Number,
+    Str,
+    List,
+    Date(Option<String>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Piece {
+    Text(String),
+    Expr(Expr),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Expr {
+    Lit(Value),
+    Var(String),
+    List(Vec<Expr>),
+    Dict(Vec<(String, Expr)>),
+    Template(Vec<Piece>),
+    /// A query: its text (variables put in when it runs).
+    Query(String),
+    Field(Box<Expr>, String),
+    Index(Box<Expr>, Box<Expr>),
+    Call(String, Vec<Expr>),
+    Unary(&'static str, Box<Expr>),
+    Bin(&'static str, Box<Expr>, Box<Expr>),
+    Pipe(Box<Expr>, Conv),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum T {
+    Num(String),
+    Str(String),
+    Tpl(String),
+    Name(String),
+    Query(String),
+    Op(&'static str),
+}
+
+const OPS: [&str; 27] = ["..", "==", "!=", "<>", "<=", ">=", "+=", "-=", "*=", "/=", "++", "--", "=", "<", ">", "+", "-", "*", "/", "%", "|", "(", ")", "[", "]", ",", "."];
+
+fn tokens(src: &str) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = src[i..].chars().next().unwrap();
+        if c.is_whitespace() {
+            i += c.len_utf8();
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            // A fraction, not a range's "..".
+            if j + 1 < b.len() && b[j] == b'.' && b[j + 1].is_ascii_digit() {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+            }
+            out.push(T::Num(src[i..j].to_string()));
+            i = j;
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' {
+            let mut j = i;
+            while j < src.len() && src[j..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                j += src[j..].chars().next().unwrap().len_utf8();
+            }
+            out.push(T::Name(src[i..j].to_string()));
+            i = j;
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            let mut s = String::new();
+            let mut j = i + 1;
+            loop {
+                let Some(ch) = src[j..].chars().next() else { return Err("a string isn't closed".into()) };
+                j += ch.len_utf8();
+                if ch == '\\' {
+                    if let Some(n) = src[j..].chars().next() {
+                        s.push(n);
+                        j += n.len_utf8();
+                    }
+                } else if ch == c {
+                    // '' inside '…': one quote.
+                    if src[j..].starts_with(c) {
+                        s.push(c);
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    s.push(ch);
+                }
+            }
+            out.push(T::Str(s));
+            i = j;
+            continue;
+        }
+        if c == '`' {
+            let Some(end) = src[i + 1..].find('`') else { return Err("a ` string isn't closed".into()) };
+            out.push(T::Tpl(src[i + 1..i + 1 + end].to_string()));
+            i += end + 2;
+            continue;
+        }
+        if c == '{' || c == '}' || c == ':' {
+            out.push(T::Op(match c {
+                '{' => "{",
+                '}' => "}",
+                _ => ":",
+            }));
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            // A query: its text to the matching ")".
+            let after = src[i + 1..].trim_start();
+            let word: String = after.chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_ascii_lowercase();
+            if word == "select" || word == "with" {
+                let end = closing(src, i).ok_or("a query's \"(\" isn't closed")?;
+                out.push(T::Query(src[i + 1..end].trim().to_string()));
+                i = end + 1;
+                continue;
+            }
+        }
+        let Some(op) = OPS.iter().find(|o| src[i..].starts_with(**o)) else { return Err(format!("\"{c}\" isn't understood here")) };
+        out.push(T::Op(op));
+        i += op.len();
+    }
+    Ok(out)
+}
+
+/// The ")" matching the "(" at `open` (strings skipped).
+fn closing(src: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    for (k, c) in src[open..].char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + k);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+struct P {
+    t: Vec<T>,
+    i: usize,
+}
+
+impl P {
+    fn new(src: &str) -> Result<P, String> {
+        Ok(P { t: tokens(src)?, i: 0 })
+    }
+
+    fn peek(&self) -> Option<&T> {
+        self.t.get(self.i)
+    }
+
+    fn is_op(&self, op: &str) -> bool {
+        matches!(self.peek(), Some(T::Op(o)) if *o == op)
+    }
+
+    fn is_word(&self, w: &str) -> bool {
+        matches!(self.peek(), Some(T::Name(n)) if n.eq_ignore_ascii_case(w))
+    }
+
+    fn eat_op(&mut self, op: &str) -> bool {
+        let y = self.is_op(op);
+        if y {
+            self.i += 1;
+        }
+        y
+    }
+
+    fn eat_word(&mut self, w: &str) -> bool {
+        let y = self.is_word(w);
+        if y {
+            self.i += 1;
+        }
+        y
+    }
+
+    fn want_op(&mut self, op: &str) -> Result<(), String> {
+        if self.eat_op(op) { Ok(()) } else { Err(format!("\"{op}\" expected{}", self.here())) }
+    }
+
+    fn here(&self) -> String {
+        match self.peek() {
+            None => " at the end".into(),
+            Some(T::Op(o)) => format!(" before \"{o}\""),
+            Some(T::Name(n)) | Some(T::Num(n)) => format!(" before \"{n}\""),
+            Some(T::Str(s)) => format!(" before '{s}'"),
+            Some(_) => String::new(),
+        }
+    }
+
+    fn name(&mut self) -> Result<String, String> {
+        match self.peek() {
+            Some(T::Name(n)) => {
+                let n = n.clone();
+                self.i += 1;
+                Ok(n)
+            }
+            _ => Err(format!("a name expected{}", self.here())),
+        }
+    }
+
+    fn done(&self) -> Result<(), String> {
+        if self.i < self.t.len() { Err(format!("more than expected{}", self.here())) } else { Ok(()) }
+    }
+
+    /// An expression, or bare items with commas: a list.
+    fn list_or_expr(&mut self) -> Result<Expr, String> {
+        let first = self.expr()?;
+        if !self.is_op(",") {
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while self.eat_op(",") {
+            items.push(self.expr()?);
+        }
+        Ok(Expr::List(items))
+    }
+
+    fn expr(&mut self) -> Result<Expr, String> {
+        let mut l = self.and()?;
+        while self.eat_word("or") {
+            l = Expr::Bin("or", Box::new(l), Box::new(self.and()?));
+        }
+        Ok(l)
+    }
+
+    fn and(&mut self) -> Result<Expr, String> {
+        let mut l = self.not()?;
+        while self.eat_word("and") {
+            l = Expr::Bin("and", Box::new(l), Box::new(self.not()?));
+        }
+        Ok(l)
+    }
+
+    fn not(&mut self) -> Result<Expr, String> {
+        if self.eat_word("not") {
+            return Ok(Expr::Unary("not", Box::new(self.not()?)));
+        }
+        self.cmp()
+    }
+
+    fn cmp(&mut self) -> Result<Expr, String> {
+        let l = self.add()?;
+        for op in ["==", "!=", "<>", "<=", ">=", "=", "<", ">"] {
+            if self.eat_op(op) {
+                let op = match op {
+                    "==" => "=",
+                    "<>" => "!=",
+                    o => o,
+                };
+                let op: &'static str = ["=", "!=", "<=", ">=", "<", ">"].into_iter().find(|o| *o == op).unwrap();
+                return Ok(Expr::Bin(op, Box::new(l), Box::new(self.add()?)));
+            }
+        }
+        if self.eat_word("in") {
+            return Ok(Expr::Bin("in", Box::new(l), Box::new(self.add()?)));
+        }
+        if self.is_word("not") && matches!(self.t.get(self.i + 1), Some(T::Name(n)) if n.eq_ignore_ascii_case("in")) {
+            self.i += 2;
+            return Ok(Expr::Unary("not", Box::new(Expr::Bin("in", Box::new(l), Box::new(self.add()?)))));
+        }
+        Ok(l)
+    }
+
+    fn add(&mut self) -> Result<Expr, String> {
+        let mut l = self.mul()?;
+        loop {
+            let op = if self.is_op("+") {
+                "+"
+            } else if self.is_op("-") {
+                "-"
+            } else {
+                break;
+            };
+            self.i += 1;
+            l = Expr::Bin(op, Box::new(l), Box::new(self.mul()?));
+        }
+        Ok(l)
+    }
+
+    fn mul(&mut self) -> Result<Expr, String> {
+        let mut l = self.unary()?;
+        loop {
+            let op = ["*", "/", "%"].into_iter().find(|o| self.is_op(o));
+            let Some(op) = op else { break };
+            self.i += 1;
+            l = Expr::Bin(op, Box::new(l), Box::new(self.unary()?));
+        }
+        Ok(l)
+    }
+
+    fn unary(&mut self) -> Result<Expr, String> {
+        if self.eat_op("-") {
+            return Ok(Expr::Unary("-", Box::new(self.unary()?)));
+        }
+        let mut e = self.post()?;
+        while self.eat_op("|") {
+            e = Expr::Pipe(Box::new(e), self.conv()?);
+        }
+        Ok(e)
+    }
+
+    fn conv(&mut self) -> Result<Conv, String> {
+        let n = self.name()?.to_ascii_lowercase();
+        Ok(match n.as_str() {
+            "number" | "num" | "int" => Conv::Number,
+            "string" | "str" | "text" => Conv::Str,
+            "list" => Conv::List,
+            "date" => {
+                // The format: the words, digits and marks up to what can't
+                // be one (an operator, "step", "..", the end).
+                let mut f = String::new();
+                if let Some(T::Str(s)) = self.peek() {
+                    f = s.clone();
+                    self.i += 1;
+                } else {
+                    while let Some(T::Name(w)) = self.peek() {
+                        if w.eq_ignore_ascii_case("step") || w.eq_ignore_ascii_case("and") || w.eq_ignore_ascii_case("or") {
+                            break;
+                        }
+                        f += w;
+                        self.i += 1;
+                        // yyyy-mm-dd, dd.mm.yyyy, hh24:mi: marks glued
+                        // between format words.
+                        let mark = ["-", ".", "/", ":"].into_iter().find(|m| self.is_op(m));
+                        match mark {
+                            Some(m) if self.fmt_glued() => {
+                                f += m;
+                                self.i += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                Conv::Date((!f.is_empty()).then_some(f))
+            }
+            other => return Err(format!("no conversion \"{other}\" (number, string, list, date)")),
+        })
+    }
+
+    /// The word after a "-" is a date format's piece.
+    fn fmt_glued(&self) -> bool {
+        matches!(self.t.get(self.i + 1), Some(T::Name(w)) if fmt_tokens(w).iter().all(|t| !matches!(t, Fmt::Lit(_))))
+    }
+
+    fn post(&mut self) -> Result<Expr, String> {
+        let mut e = self.atom()?;
+        loop {
+            if self.is_op(".") && matches!(self.t.get(self.i + 1), Some(T::Name(_))) {
+                self.i += 1;
+                let n = self.name()?;
+                e = Expr::Field(Box::new(e), n);
+            } else if self.eat_op("[") {
+                let k = self.expr()?;
+                self.want_op("]")?;
+                e = Expr::Index(Box::new(e), Box::new(k));
+            } else {
+                return Ok(e);
+            }
+        }
+    }
+
+    fn atom(&mut self) -> Result<Expr, String> {
+        let Some(t) = self.peek().cloned() else { return Err("a value expected at the end".into()) };
+        self.i += 1;
+        Ok(match t {
+            T::Num(n) => {
+                if n.contains('.') {
+                    Expr::Lit(Value::Num(n.parse().map_err(|_| format!("bad number {n}"))?))
+                } else {
+                    let v: i64 = n.parse().map_err(|_| format!("bad number {n}"))?;
+                    if n.len() > 1 && n.starts_with('0') { Expr::Lit(Value::Pad(v, n.len() as u8)) } else { Expr::Lit(Value::Int(v)) }
+                }
+            }
+            T::Str(s) => Expr::Lit(Value::Str(s)),
+            T::Tpl(s) => Expr::Template(template(&s)?),
+            T::Query(q) => Expr::Query(q),
+            T::Name(n) => match n.to_ascii_lowercase().as_str() {
+                "true" => Expr::Lit(Value::Bool(true)),
+                "false" => Expr::Lit(Value::Bool(false)),
+                "null" => Expr::Lit(Value::Null),
+                _ if self.is_op("(") => {
+                    self.i += 1;
+                    let mut args = Vec::new();
+                    if !self.eat_op(")") {
+                        loop {
+                            args.push(self.expr()?);
+                            if self.eat_op(")") {
+                                break;
+                            }
+                            self.want_op(",")?;
+                        }
+                    }
+                    Expr::Call(n.to_ascii_lowercase(), args)
+                }
+                _ => Expr::Var(n.to_ascii_lowercase()),
+            },
+            T::Op("(") => {
+                let e = self.expr()?;
+                if self.eat_op(",") {
+                    let mut items = vec![e];
+                    if !self.is_op(")") {
+                        loop {
+                            items.push(self.expr()?);
+                            if !self.eat_op(",") || self.is_op(")") {
+                                break;
+                            }
+                        }
+                    }
+                    self.want_op(")")?;
+                    Expr::List(items)
+                } else {
+                    self.want_op(")")?;
+                    e
+                }
+            }
+            T::Op("[") => Expr::List(self.items("]")?),
+            T::Op("{") => {
+                if self.eat_op("}") {
+                    return Ok(Expr::Dict(Vec::new()));
+                }
+                // {k: v, …} a dictionary, {a, b} a list.
+                let is_dict = matches!(self.t.get(self.i + 1), Some(T::Op(":")));
+                if !is_dict {
+                    return Ok(Expr::List(self.items("}")?));
+                }
+                let mut pairs = Vec::new();
+                loop {
+                    let k = match self.peek().cloned() {
+                        Some(T::Str(s)) | Some(T::Name(s)) => s,
+                        Some(T::Num(s)) => s,
+                        _ => return Err(format!("a key expected{}", self.here())),
+                    };
+                    self.i += 1;
+                    self.want_op(":")?;
+                    pairs.push((k, self.expr()?));
+                    if self.eat_op("}") {
+                        break;
+                    }
+                    self.want_op(",")?;
+                    if self.eat_op("}") {
+                        break;
+                    }
+                }
+                Expr::Dict(pairs)
+            }
+            T::Op(o) => return Err(format!("\"{o}\" isn't expected here")),
+        })
+    }
+
+    fn items(&mut self, close: &str) -> Result<Vec<Expr>, String> {
+        let mut items = Vec::new();
+        if self.eat_op(close) {
+            return Ok(items);
+        }
+        loop {
+            items.push(self.expr()?);
+            if self.eat_op(close) {
+                return Ok(items);
+            }
+            self.want_op(",")?;
+            if self.eat_op(close) {
+                return Ok(items);
+            }
+        }
+    }
+}
+
+/// A `…${x}…` string's pieces.
+fn template(s: &str) -> Result<Vec<Piece>, String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(k) = rest.find("${") {
+        if k > 0 {
+            out.push(Piece::Text(rest[..k].to_string()));
+        }
+        let end = rest[k..].find('}').ok_or("\"${\" isn't closed with \"}\"")? + k;
+        out.push(Piece::Expr(parse_expr(&rest[k + 2..end])?));
+        rest = &rest[end + 1..];
+    }
+    if !rest.is_empty() {
+        out.push(Piece::Text(rest.to_string()));
+    }
+    Ok(out)
+}
+
+/// One whole expression.
+pub fn parse_expr(src: &str) -> Result<Expr, String> {
+    let mut p = P::new(src)?;
+    let e = p.expr()?;
+    p.done()?;
+    Ok(e)
+}
+
+// ───────────────────────────── the program ─────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Steps {
+    pub from: Expr,
+    pub to: Expr,
+    pub conv: Option<Conv>,
+    /// How many, of what (None: by the ends' kind).
+    pub step: Option<(Option<Expr>, Option<Prec>)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    Range(Steps),
+    Expr(Expr),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Case {
+    Range(Steps),
+    Values(Vec<Expr>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Node {
+    Sql(Stmt),
+    Set { line: usize, name: String, op: &'static str, value: Option<Expr> },
+    For { line: usize, names: Vec<String>, source: Source, body: Vec<Node> },
+    While { line: usize, cond: Expr, body: Vec<Node> },
+    If { line: usize, arms: Vec<(Expr, Vec<Node>)>, other: Vec<Node> },
+    Match { line: usize, subject: Expr, cases: Vec<(Case, Vec<Node>)>, other: Vec<Node> },
+    Break(usize),
+    Continue(usize),
+    Print { line: usize, args: Vec<Expr> },
+    Pause(usize, Duration),
+    OnError(bool),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Program {
+    pub nodes: Vec<Node>,
+}
+
+/// A directive line, as read.
+#[derive(Debug)]
+enum Line {
+    Node(Node),
+    For(Vec<String>, Source),
+    While(Expr),
+    If(Expr),
+    Elif(Expr),
+    Else,
+    Match(Expr),
+    Case(Case),
+    Default,
+    End(Option<&'static str>),
+}
+
+const WORDS: [&str; 18] = ["set", "var", "for", "while", "if", "elif", "else", "match", "case", "default", "end", "break", "continue", "print", "pause", "on", "echo", "endfor"];
+
+/// The directive in a comment's text (`-- @…`), if it is one: its text
+/// after the "@" (the trailing " -- comment" cut).
+fn directive_text(comment: &str) -> Option<&str> {
+    let body = comment.strip_prefix("--")?.trim_start();
+    let body = body.strip_prefix('@')?;
+    let word: String = body.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if word.is_empty() {
+        return None;
+    }
+    let low = word.to_ascii_lowercase();
+    let after = body[word.len()..].trim_start();
+    let known = WORDS.contains(&low.as_str()) || ["=", "+=", "-=", "*=", "/=", "++", "--"].iter().any(|o| after.starts_with(o));
+    if !known {
+        return None;
+    }
+    Some(cut_comment(body).trim())
+}
+
+/// The text up to a " -- " outside strings.
+fn cut_comment(s: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let b = s.as_bytes();
+    for (k, c) in s.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' || c == '`' => quote = Some(c),
+            None if c == '-' && b.get(k + 1) == Some(&b'-') && (k == 0 || b[k - 1] == b' ' || b[k - 1] == b'\t') => {
+                // "@x--" is a decrement, not a comment.
+                let rest = s[k + 2..].trim();
+                if !(rest.is_empty() && k > 0 && b[k - 1] != b' ') {
+                    return &s[..k];
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+/// The directives in a text: (the comment's range, the directive's text).
+fn directives(text: &str, d: Dialect) -> Vec<(Range<usize>, String)> {
+    lex::lex(text, d)
+        .into_iter()
+        .filter(|t| t.kind == Tk::LineComment)
+        .filter(|t| {
+            // Alone on its line.
+            let line_start = text[..t.start].rfind('\n').map_or(0, |k| k + 1);
+            text[line_start..t.start].trim().is_empty()
+        })
+        .filter_map(|t| directive_text(t.text(text)).map(|s| (t.start..t.end, s.to_string())))
+        .collect()
+}
+
+/// The text holds directives (then it's run as a script).
+pub fn has_directives(text: &str, d: Dialect) -> bool {
+    text.contains('@') && !directives(text, d).is_empty()
+}
+
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at].matches('\n').count() + 1
+}
+
+fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
+    let to = p.unary()?;
+    let mut conv = None;
+    let (from, to) = match (from, to) {
+        // "a .. b | date f": the pipe reads both ends.
+        (f, Expr::Pipe(t, c)) if !matches!(f, Expr::Pipe(..)) => {
+            conv = Some(c);
+            (f, *t)
+        }
+        (f, t) => (f, t),
+    };
+    let mut step = None;
+    if p.eat_word("step") {
+        let n = if matches!(p.peek(), Some(T::Name(w)) if unit(w).is_some()) { None } else { Some(p.unary()?) };
+        let u = match p.peek() {
+            Some(T::Name(w)) if unit(w).is_some() => {
+                let u = unit(w);
+                p.i += 1;
+                u
+            }
+            _ => None,
+        };
+        step = Some((n, u));
+    }
+    Ok(Steps { from, to, conv, step })
+}
+
+fn unit(w: &str) -> Option<Prec> {
+    Some(match w.to_ascii_lowercase().trim_end_matches('s') {
+        "second" | "sec" => Prec::Second,
+        "minute" | "min" => Prec::Minute,
+        "hour" => Prec::Hour,
+        "day" => Prec::Day,
+        "week" => Prec::Week,
+        "month" => Prec::Month,
+        "quarter" => Prec::Quarter,
+        "year" => Prec::Year,
+        _ => return None,
+    })
+}
+
+fn duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim().to_ascii_lowercase();
+    let bad = || format!("\"{s}\": a pause is like 10s, 500ms, 2m, 1h");
+    let (n, k) = if let Some(n) = s.strip_suffix("ms") {
+        (n, 0.001)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1.0)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60.0)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600.0)
+    } else {
+        (s.as_str(), 1.0)
+    };
+    let n: f64 = n.trim().parse().map_err(|_| bad())?;
+    if !(n >= 0.0) {
+        return Err(bad());
+    }
+    Ok(Duration::from_secs_f64(n * k))
+}
+
+/// One directive's text read.
+fn read_line(src: &str, line: usize) -> Result<Line, String> {
+    let mut p = P::new(src)?;
+    let word = p.name()?;
+    let low = word.to_ascii_lowercase();
+    let out = match low.as_str() {
+        "set" | "var" => {
+            let name = p.name()?.to_ascii_lowercase();
+            p.want_op("=")?;
+            let value = p.list_or_expr()?;
+            Line::Node(Node::Set { line, name, op: "=", value: Some(value) })
+        }
+        "for" => {
+            let mut names = vec![p.name()?.to_ascii_lowercase()];
+            if p.eat_op(",") {
+                names.push(p.name()?.to_ascii_lowercase());
+            }
+            if !p.eat_word("in") {
+                return Err(format!("\"in\" expected{}", p.here()));
+            }
+            let first = p.unary()?;
+            let source = if p.eat_op("..") {
+                Source::Range(steps(&mut p, first)?)
+            } else if p.is_op(",") {
+                let mut items = vec![first];
+                while p.eat_op(",") {
+                    items.push(p.expr()?);
+                }
+                Source::Expr(Expr::List(items))
+            } else {
+                // The rest of an expression after its first part.
+                p.i = 0;
+                p.name()?;
+                p.name()?;
+                if p.eat_op(",") {
+                    p.name()?;
+                }
+                p.eat_word("in");
+                Source::Expr(p.list_or_expr()?)
+            };
+            Line::For(names, source)
+        }
+        "while" => Line::While(p.expr()?),
+        "if" => Line::If(p.expr()?),
+        "elif" => Line::Elif(p.expr()?),
+        "else" if p.eat_word("if") => Line::Elif(p.expr()?),
+        "else" => Line::Else,
+        "match" => Line::Match(p.expr()?),
+        "case" => {
+            let first = p.unary()?;
+            if p.eat_op("..") {
+                Line::Case(Case::Range(steps(&mut p, first)?))
+            } else {
+                let mut items = vec![first];
+                while p.eat_op(",") {
+                    items.push(p.expr()?);
+                }
+                Line::Case(Case::Values(items))
+            }
+        }
+        "default" => Line::Default,
+        "end" | "endfor" => {
+            let what = if low == "endfor" {
+                Some("for")
+            } else {
+                match p.peek() {
+                    Some(T::Name(w)) => {
+                        let w = w.to_ascii_lowercase();
+                        let k = ["for", "while", "if", "match"].into_iter().find(|k| *k == w).ok_or(format!("\"@end {w}\": for, while, if or match"))?;
+                        p.i += 1;
+                        Some(k)
+                    }
+                    _ => None,
+                }
+            };
+            Line::End(what)
+        }
+        "break" => Line::Node(Node::Break(line)),
+        "continue" => Line::Node(Node::Continue(line)),
+        "print" | "echo" => {
+            let args = if p.eat_op("(") {
+                p.items(")")?
+            } else if p.peek().is_none() {
+                Vec::new()
+            } else {
+                match p.list_or_expr()? {
+                    Expr::List(items) => items,
+                    e => vec![e],
+                }
+            };
+            Line::Node(Node::Print { line, args })
+        }
+        "pause" => {
+            let rest = src.trim_start()[word.len()..].trim();
+            p.i = p.t.len();
+            Line::Node(Node::Pause(line, duration(rest)?))
+        }
+        "on" => {
+            if !p.eat_word("error") {
+                return Err("\"@on error stop\" or \"@on error continue\"".into());
+            }
+            let go_on = if p.eat_word("continue") {
+                true
+            } else if p.eat_word("stop") {
+                false
+            } else {
+                return Err("\"@on error stop\" or \"@on error continue\"".into());
+            };
+            Line::Node(Node::OnError(go_on))
+        }
+        _ => {
+            // name = …, name += …, name++, name--.
+            let name = low;
+            let op = ["=", "+=", "-=", "*=", "/=", "++", "--"].into_iter().find(|o| p.is_op(o)).ok_or(format!("no directive \"@{word}\""))?;
+            p.i += 1;
+            let value = if op == "++" || op == "--" { None } else { Some(p.list_or_expr()?) };
+            Line::Node(Node::Set { line, name, op, value })
+        }
+    };
+    p.done()?;
+    Ok(out)
+}
+
+/// An open block while reading.
+enum Open {
+    For { line: usize, names: Vec<String>, source: Source },
+    While { line: usize, cond: Expr },
+    If { line: usize, arms: Vec<(Expr, Vec<Node>)>, cond: Option<Expr> },
+    Match { line: usize, subject: Expr, cases: Vec<(Case, Vec<Node>)>, case: Option<Case>, default: bool },
+}
+
+impl Open {
+    fn word(&self) -> &'static str {
+        match self {
+            Open::For { .. } => "for",
+            Open::While { .. } => "while",
+            Open::If { .. } => "if",
+            Open::Match { .. } => "match",
+        }
+    }
+
+    fn line(&self) -> usize {
+        match self {
+            Open::For { line, .. } | Open::While { line, .. } | Open::If { line, .. } | Open::Match { line, .. } => *line,
+        }
+    }
+}
+
+/// A mistake in a script: its line (in the editor's text) and what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mistake {
+    pub line: usize,
+    pub msg: String,
+}
+
+/// The script read through: its SQL (split as a script is) and directives.
+/// `base`: where `text` starts in the editor's text (`full`).
+pub fn parse(full: &str, base: usize, text: &str, d: Dialect, blank_lines: bool) -> Result<Program, Mistake> {
+    let found = directives(text, d);
+    // Each level: (the open block, nodes so far).
+    let mut stack: Vec<(Option<Open>, Vec<Node>)> = vec![(None, Vec::new())];
+    let mut from = 0;
+    let sql_part = |stack: &mut Vec<(Option<Open>, Vec<Node>)>, a: usize, b: usize| {
+        let part = &text[a..b];
+        for r in crate::sql::split(part, d, blank_lines) {
+            let sql = crate::sql::runnable(&part[r.clone()], d);
+            if !sql.is_empty() {
+                stack.last_mut().unwrap().1.push(Node::Sql(Stmt { sql, at: base + a + r.start }));
+            }
+        }
+    };
+    for (r, src) in found {
+        sql_part(&mut stack, from, r.start);
+        from = r.end;
+        let line = line_of(full, base + r.start);
+        let wrong = |msg: String| Mistake { line, msg };
+        match read_line(&src, line).map_err(|m| wrong(format!("@{src}: {m}")))? {
+            Line::Node(n) => stack.last_mut().unwrap().1.push(n),
+            Line::For(names, source) => stack.push((Some(Open::For { line, names, source }), Vec::new())),
+            Line::While(cond) => stack.push((Some(Open::While { line, cond }), Vec::new())),
+            Line::If(cond) => stack.push((Some(Open::If { line, arms: Vec::new(), cond: Some(cond) }), Vec::new())),
+            Line::Match(subject) => stack.push((Some(Open::Match { line, subject, cases: Vec::new(), case: None, default: false }), Vec::new())),
+            Line::Elif(_) | Line::Else if !matches!(stack.last().unwrap().0, Some(Open::If { .. })) => {
+                return Err(wrong("@elif / @else outside @if".into()));
+            }
+            Line::Elif(c) => {
+                let (open, body) = stack.last_mut().unwrap();
+                let Some(Open::If { arms, cond, .. }) = open else { unreachable!() };
+                let Some(prev) = cond.take() else { return Err(wrong("@elif after @else".into())) };
+                arms.push((prev, std::mem::take(body)));
+                *cond = Some(c);
+            }
+            Line::Else => {
+                let (open, body) = stack.last_mut().unwrap();
+                let Some(Open::If { arms, cond, .. }) = open else { unreachable!() };
+                let Some(prev) = cond.take() else { return Err(wrong("a second @else".into())) };
+                arms.push((prev, std::mem::take(body)));
+            }
+            Line::Case(c) => {
+                let (open, body) = stack.last_mut().unwrap();
+                let Some(Open::Match { cases, case, default, .. }) = open else { return Err(wrong("@case outside @match".into())) };
+                if *default {
+                    return Err(wrong("@case after @default".into()));
+                }
+                if let Some(prev) = case.take() {
+                    cases.push((prev, std::mem::take(body)));
+                } else if !body.is_empty() {
+                    return Err(wrong("between @match and its first @case there's nothing to put".into()));
+                }
+                *case = Some(c);
+            }
+            Line::Default => {
+                let (open, body) = stack.last_mut().unwrap();
+                let Some(Open::Match { cases, case, default, .. }) = open else { return Err(wrong("@default outside @match".into())) };
+                if *default {
+                    return Err(wrong("a second @default".into()));
+                }
+                if let Some(prev) = case.take() {
+                    cases.push((prev, std::mem::take(body)));
+                }
+                *default = true;
+            }
+            Line::End(what) => {
+                if stack.len() == 1 {
+                    return Err(wrong("@end with nothing open".into()));
+                }
+                let (open, body) = stack.pop().unwrap();
+                let open = open.unwrap();
+                if let Some(w) = what
+                    && w != open.word()
+                {
+                    return Err(wrong(format!("@end {w} closes the @{} of line {}", open.word(), open.line())));
+                }
+                let node = match open {
+                    Open::For { line, names, source } => Node::For { line, names, source, body },
+                    Open::While { line, cond } => Node::While { line, cond, body },
+                    Open::If { line, mut arms, cond } => {
+                        let other = match cond {
+                            Some(c) => {
+                                arms.push((c, body));
+                                Vec::new()
+                            }
+                            None => body,
+                        };
+                        Node::If { line, arms, other }
+                    }
+                    Open::Match { line, subject, mut cases, case, default } => {
+                        let other = if default {
+                            body
+                        } else {
+                            if let Some(c) = case {
+                                cases.push((c, body));
+                            }
+                            Vec::new()
+                        };
+                        Node::Match { line, subject, cases, other }
+                    }
+                };
+                stack.last_mut().unwrap().1.push(node);
+            }
+        }
+    }
+    sql_part(&mut stack, from, text.len());
+    if stack.len() > 1 {
+        let (open, _) = stack.pop().unwrap();
+        let open = open.unwrap();
+        return Err(Mistake { line: open.line(), msg: format!("@{} isn't closed with @end", open.word()) });
+    }
+    Ok(Program { nodes: stack.pop().unwrap().1 })
+}
+
+impl Program {
+    /// The names its directives give values to (they aren't asked for).
+    pub fn names(&self) -> Vec<String> {
+        fn walk(nodes: &[Node], out: &mut Vec<String>) {
+            for n in nodes {
+                match n {
+                    Node::Set { name, .. } => out.push(name.clone()),
+                    Node::For { names, body, .. } => {
+                        out.extend(names.iter().cloned());
+                        walk(body, out);
+                    }
+                    Node::While { body, .. } => walk(body, out),
+                    Node::If { arms, other, .. } => {
+                        arms.iter().for_each(|(_, b)| walk(b, out));
+                        walk(other, out);
+                    }
+                    Node::Match { cases, other, .. } => {
+                        cases.iter().for_each(|(_, b)| walk(b, out));
+                        walk(other, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.nodes, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Every SQL statement in it, in order (to look over or change).
+    pub fn sql_mut(&mut self) -> Vec<&mut Stmt> {
+        fn walk<'a>(nodes: &'a mut [Node], out: &mut Vec<&'a mut Stmt>) {
+            for n in nodes {
+                match n {
+                    Node::Sql(s) => out.push(s),
+                    Node::For { body, .. } | Node::While { body, .. } => walk(body, out),
+                    Node::If { arms, other, .. } => {
+                        for (_, b) in arms.iter_mut() {
+                            walk(b, out);
+                        }
+                        walk(other, out);
+                    }
+                    Node::Match { cases, other, .. } => {
+                        for (_, b) in cases.iter_mut() {
+                            walk(b, out);
+                        }
+                        walk(other, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&mut self.nodes, &mut out);
+        out
+    }
+}
+
+// ───────────────────────────── running ─────────────────────────────
+
+/// What a statement came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlEnd {
+    Ok,
+    Failed,
+    /// Stopped, or the session's gone: the run ends.
+    Over,
+}
+
+/// Where the script's statements and queries run.
+pub trait Host {
+    fn sql(&mut self, st: Stmt) -> SqlEnd;
+    /// A query's whole answer (for a value).
+    fn query(&mut self, sql: &str) -> Result<Table, String>;
+    fn print(&mut self, text: String);
+    /// Where it's got to ("7/16 · i = 06").
+    fn progress(&mut self, text: String);
+    fn stopped(&self) -> bool;
+}
+
+/// The variables: the script's own and, inside loops, the loops'.
+#[derive(Clone, Debug, Default)]
+pub struct Vars {
+    pub globals: HashMap<String, Value>,
+    loops: Vec<(String, Value)>,
+}
+
+impl Vars {
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        let name = name.to_ascii_lowercase();
+        self.loops.iter().rev().find(|(n, _)| *n == name).map(|(_, v)| v).or_else(|| self.globals.get(&name))
+    }
+
+    fn set(&mut self, name: &str, v: Value) {
+        if let Some(slot) = self.loops.iter_mut().rev().find(|(n, _)| n == name) {
+            slot.1 = v;
+        } else {
+            self.globals.insert(name.to_string(), v);
+        }
+    }
+}
+
+/// How a run ended (Err: a mistake in a directive, at its line).
+#[derive(Debug, PartialEq)]
+pub enum End {
+    Done,
+    /// A statement failed and the script stopped there.
+    Failed,
+    Over,
+}
+
+enum Flow {
+    Next,
+    Break,
+    Continue,
+    Stop(End),
+}
+
+/// Passes without any SQL before a loop's taken for runaway.
+const RUNAWAY: u64 = 100_000;
+
+struct Run<'h> {
+    host: &'h mut dyn Host,
+    d: Dialect,
+    go_on: bool,
+    idle: u64,
+}
+
+pub fn run(prog: &Program, vars: &mut Vars, d: Dialect, go_on: bool, host: &mut dyn Host) -> Result<End, Mistake> {
+    let mut r = Run { host, d, go_on, idle: 0 };
+    match r.block(&prog.nodes, vars)? {
+        Flow::Stop(e) => Ok(e),
+        _ => Ok(End::Done),
+    }
+}
+
+impl Run<'_> {
+    fn block(&mut self, nodes: &[Node], vars: &mut Vars) -> Result<Flow, Mistake> {
+        for n in nodes {
+            if self.host.stopped() {
+                return Ok(Flow::Stop(End::Over));
+            }
+            match self.node(n, vars)? {
+                Flow::Next => {}
+                f => return Ok(f),
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    fn eval(&mut self, e: &Expr, vars: &Vars, line: usize) -> Result<Value, Mistake> {
+        eval(e, vars, self.d, &mut *self.host).map_err(|msg| Mistake { line, msg })
+    }
+
+    fn node(&mut self, n: &Node, vars: &mut Vars) -> Result<Flow, Mistake> {
+        match n {
+            Node::Sql(st) => {
+                self.idle = 0;
+                let sql = put(&st.sql, vars, self.d).map_err(|msg| Mistake { line: 0, msg })?;
+                match self.host.sql(Stmt { sql, at: st.at }) {
+                    SqlEnd::Ok => {}
+                    SqlEnd::Failed if self.go_on => {}
+                    SqlEnd::Failed => return Ok(Flow::Stop(End::Failed)),
+                    SqlEnd::Over => return Ok(Flow::Stop(End::Over)),
+                }
+            }
+            Node::Set { line, name, op, value } => {
+                let v = match value {
+                    Some(e) => self.eval(e, vars, *line)?,
+                    None => Value::Int(1),
+                };
+                let v = if *op == "=" {
+                    v
+                } else {
+                    let old = vars.get(name).cloned().ok_or(Mistake { line: *line, msg: format!("\"{name}\" has no value yet") })?;
+                    let bin = match *op {
+                        "+=" | "++" => "+",
+                        "-=" | "--" => "-",
+                        "*=" => "*",
+                        _ => "/",
+                    };
+                    binary(bin, old, v).map_err(|msg| Mistake { line: *line, msg })?
+                };
+                vars.set(name, v);
+            }
+            Node::Print { line, args } => {
+                let mut s = String::new();
+                for a in args {
+                    s += &self.eval(a, vars, *line)?.shown();
+                }
+                self.host.print(s);
+            }
+            Node::Pause(_, d) => {
+                let until = std::time::Instant::now() + *d;
+                while std::time::Instant::now() < until {
+                    if self.host.stopped() {
+                        return Ok(Flow::Stop(End::Over));
+                    }
+                    std::thread::sleep((until - std::time::Instant::now()).min(Duration::from_millis(50)));
+                }
+            }
+            Node::OnError(go_on) => self.go_on = *go_on,
+            Node::Break(_) => return Ok(Flow::Break),
+            Node::Continue(_) => return Ok(Flow::Continue),
+            Node::If { line, arms, other } => {
+                for (c, body) in arms {
+                    if self.eval(c, vars, *line)?.truthy() {
+                        return self.block(body, vars);
+                    }
+                }
+                return self.block(other, vars);
+            }
+            Node::Match { line, subject, cases, other } => {
+                let v = self.eval(subject, vars, *line)?;
+                for (case, body) in cases {
+                    let fits = match case {
+                        Case::Values(items) => {
+                            let mut any = false;
+                            for e in items {
+                                let w = self.eval(e, vars, *line)?;
+                                any |= match &w {
+                                    Value::List(l) => l.iter().any(|x| equal(&v, x)),
+                                    w => equal(&v, w),
+                                };
+                                if any {
+                                    break;
+                                }
+                            }
+                            any
+                        }
+                        Case::Range(s) => {
+                            let (a, b, _) = self.ends(s, vars, *line)?;
+                            let lo = if compare(&a, &b).is_some_and(|o| o.is_le()) { (a, b) } else { (b, a) };
+                            compare(&v, &lo.0).is_some_and(|o| o.is_ge()) && le_end(&v, &lo.1)
+                        }
+                    };
+                    if fits {
+                        return self.block(body, vars);
+                    }
+                }
+                return self.block(other, vars);
+            }
+            Node::While { line, cond, body } => {
+                let mut pass = 0u64;
+                while self.eval(cond, vars, *line)?.truthy() {
+                    pass += 1;
+                    self.host.progress(format!("while · {pass}"));
+                    if let Some(f) = self.pass(body, vars, *line)? {
+                        return Ok(f);
+                    }
+                }
+            }
+            Node::For { line, names, source, body } => {
+                let items = self.items(source, vars, *line)?;
+                let total = items.len();
+                let shown = names.last().cloned().unwrap_or_default();
+                for (k, (key, v)) in items.into_iter().enumerate() {
+                    self.host.progress(format!("{}/{total} · {shown} = {}", k + 1, v.shown()));
+                    let mark = vars.loops.len();
+                    if names.len() == 2 {
+                        vars.loops.push((names[0].clone(), key));
+                        vars.loops.push((names[1].clone(), v));
+                    } else {
+                        vars.loops.push((names[0].clone(), v));
+                    }
+                    let f = self.pass(body, vars, *line);
+                    vars.loops.truncate(mark);
+                    if let Some(f) = f? {
+                        return Ok(f);
+                    }
+                }
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    /// A loop's pass: Some — the loop's over (stopped, broken off).
+    fn pass(&mut self, body: &[Node], vars: &mut Vars, line: usize) -> Result<Option<Flow>, Mistake> {
+        self.idle += 1;
+        if self.idle > RUNAWAY {
+            return Err(Mistake { line, msg: format!("{RUNAWAY} passes without any SQL: the loop's taken for endless") });
+        }
+        match self.block(body, vars)? {
+            Flow::Next | Flow::Continue => Ok(None),
+            Flow::Break => Ok(Some(Flow::Next)),
+            f @ Flow::Stop(_) => Ok(Some(f)),
+        }
+    }
+
+    /// A range's ends worked out (read by its pipe), and its step.
+    fn ends(&mut self, s: &Steps, vars: &Vars, line: usize) -> Result<(Value, Value, Option<(Option<i64>, Option<Prec>)>), Mistake> {
+        let mut a = self.eval(&s.from, vars, line)?;
+        let mut b = self.eval(&s.to, vars, line)?;
+        if let Some(c) = &s.conv {
+            a = convert(a, c).map_err(|msg| Mistake { line, msg })?;
+            b = convert(b, c).map_err(|msg| Mistake { line, msg })?;
+        }
+        let step = match &s.step {
+            None => None,
+            Some((n, u)) => {
+                let n = match n {
+                    Some(e) => Some(self.eval(e, vars, line)?.int().ok_or(Mistake { line, msg: "a step is a whole number".into() })?),
+                    None => None,
+                };
+                Some((n, *u))
+            }
+        };
+        Ok((a, b, step))
+    }
+
+    /// What a loop goes over: (key or pass number, value) each.
+    fn items(&mut self, src: &Source, vars: &Vars, line: usize) -> Result<Vec<(Value, Value)>, Mistake> {
+        let wrong = |msg: String| Mistake { line, msg };
+        let numbered = |l: Vec<Value>| l.into_iter().enumerate().map(|(k, v)| (Value::Int(k as i64), v)).collect();
+        match src {
+            Source::Expr(e) => Ok(match self.eval(e, vars, line)? {
+                Value::List(l) => numbered(l),
+                Value::Dict(d) => d.into_iter().map(|(k, v)| (Value::Str(k), v)).collect(),
+                Value::Null => Vec::new(),
+                v => numbered(vec![v]),
+            }),
+            Source::Range(s) => {
+                let (a, b, step) = self.ends(s, vars, line)?;
+                let list = range(&a, &b, step).map_err(wrong)?;
+                Ok(numbered(list))
+            }
+        }
+    }
+}
+
+/// `v` is at or before a range's end (a date's end: to the end of its
+/// precision).
+fn le_end(v: &Value, end: &Value) -> bool {
+    match (v, end) {
+        (Value::Date(x, _), Value::Date(e, p)) => date_add(*e, *p, 1).is_some_and(|lim| x < &lim),
+        _ => compare(v, end).is_some_and(|o| o.is_le()),
+    }
+}
+
+/// The values of a range, both ends in.
+fn range(a: &Value, b: &Value, step: Option<(Option<i64>, Option<Prec>)>) -> Result<Vec<Value>, String> {
+    const MOST: usize = 1_000_000;
+    let n = step.and_then(|s| s.0);
+    if n == Some(0) {
+        return Err("a step of 0".into());
+    }
+    match (a, b) {
+        (Value::Date(x, px), Value::Date(y, py)) => {
+            let unit = step.and_then(|s| s.1).unwrap_or(*px.min(py));
+            let n = n.unwrap_or(1);
+            let mut out = Vec::new();
+            let mut cur = *x;
+            if x <= y {
+                if n < 0 {
+                    return Err("the range goes up, the step down".into());
+                }
+                // The end's in up to the end of its precision.
+                let lim = date_add(*y, *py, 1).ok_or("a date out of range")?;
+                while cur < lim {
+                    out.push(Value::Date(cur, unit));
+                    cur = date_add(cur, unit, n).ok_or("a date out of range")?;
+                    if out.len() > MOST {
+                        return Err("more than a million passes".into());
+                    }
+                }
+            } else {
+                let n = if n > 0 { -n } else { n };
+                while cur >= *y {
+                    out.push(Value::Date(cur, unit));
+                    cur = date_add(cur, unit, n).ok_or("a date out of range")?;
+                    if out.len() > MOST {
+                        return Err("more than a million passes".into());
+                    }
+                }
+            }
+            Ok(out)
+        }
+        (Value::Str(x), Value::Str(y)) if x.chars().count() == 1 && y.chars().count() == 1 => {
+            let (x, y) = (x.chars().next().unwrap() as i64, y.chars().next().unwrap() as i64);
+            Ok(int_range(x, y, n)?.into_iter().filter_map(|c| char::from_u32(c as u32)).map(|c| Value::Str(c.to_string())).collect())
+        }
+        (x, y) if x.int().is_some() && y.int().is_some() && !matches!(x, Value::Str(_)) => {
+            let w = match (x, y) {
+                (Value::Pad(_, w), _) | (_, Value::Pad(_, w)) => Some(*w),
+                _ => None,
+            };
+            let list = int_range(x.int().unwrap(), y.int().unwrap(), n)?;
+            if list.len() > MOST {
+                return Err("more than a million passes".into());
+            }
+            Ok(list.into_iter().map(|i| match w {
+                Some(w) => Value::Pad(i, w),
+                None => Value::Int(i),
+            }).collect())
+        }
+        (x, y) => Err(format!("a range from a {} to a {}: numbers, dates or letters", x.kind(), y.kind())),
+    }
+}
+
+fn int_range(a: i64, b: i64, n: Option<i64>) -> Result<Vec<i64>, String> {
+    let n = n.unwrap_or(if a <= b { 1 } else { -1 });
+    if (a < b && n < 0) || (a > b && n > 0) {
+        return Err("the step goes the other way from the range".into());
+    }
+    if ((b - a) / n) as u64 > 1_000_000 {
+        return Err("more than a million passes".into());
+    }
+    let mut out = Vec::new();
+    let mut i = a;
+    while (n > 0 && i <= b) || (n < 0 && i >= b) {
+        out.push(i);
+        i += n;
+    }
+    Ok(out)
+}
+
+fn convert(v: Value, c: &Conv) -> Result<Value, String> {
+    Ok(match c {
+        Conv::Number => match &v {
+            Value::Int(_) | Value::Num(_) => v,
+            Value::Pad(n, _) => Value::Int(*n),
+            Value::Null => Value::Null,
+            _ => {
+                let s = v.text()?;
+                let t = s.trim();
+                if let Ok(n) = t.parse::<i64>() {
+                    Value::Int(n)
+                } else {
+                    Value::Num(t.parse::<f64>().map_err(|_| format!("'{s}' isn't a number"))?)
+                }
+            }
+        },
+        Conv::Str => match v {
+            Value::Null => Value::Null,
+            v => Value::Str(v.text()?),
+        },
+        Conv::List => match v {
+            Value::List(_) => v,
+            Value::Null => Value::List(Vec::new()),
+            v => Value::List(vec![v]),
+        },
+        Conv::Date(f) => match (v, f) {
+            // A date given a format: text in that format.
+            (Value::Date(d, _), Some(f)) => Value::Str(date_fmt(&d, f)),
+            (v @ Value::Date(..), None) => v,
+            (Value::Null, _) => Value::Null,
+            (v, Some(f)) => {
+                let (d, p) = date_by(&v.text()?, f)?;
+                Value::Date(d, p)
+            }
+            (v, None) => {
+                let (d, p) = date_iso(&v.text()?)?;
+                Value::Date(d, p)
+            }
+        },
+    })
+}
+
+fn equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::List(x), Value::List(y)) => x.len() == y.len() && x.iter().zip(y).all(|(a, b)| equal(a, b)),
+        (Value::Dict(x), Value::Dict(y)) => x.len() == y.len() && x.iter().all(|(k, v)| b.field(k).is_some_and(|w| equal(v, w))),
+        _ => compare(a, b) == Some(std::cmp::Ordering::Equal),
+    }
+}
+
+fn compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Date(x, _), Value::Date(y, _)) => Some(x.cmp(y)),
+        (Value::Date(x, _), Value::Str(s)) => date_iso(s).ok().map(|(y, _)| x.cmp(&y)),
+        (Value::Str(s), Value::Date(y, _)) => date_iso(s).ok().map(|(x, _)| x.cmp(y)),
+        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
+        (x, y) => match (x.num(), y.num()) {
+            (Some(p), Some(q)) => p.partial_cmp(&q),
+            _ => None,
+        },
+    }
+}
+
+fn arith(op: &str, a: &Value, b: &Value) -> Result<Value, String> {
+    if let (Some(x), Some(y)) = (a.int().filter(|_| !matches!(a, Value::Str(_) | Value::Num(_))), b.int().filter(|_| !matches!(b, Value::Str(_) | Value::Num(_)))) {
+        return Ok(match op {
+            "+" => Value::Int(x.wrapping_add(y)),
+            "-" => Value::Int(x.wrapping_sub(y)),
+            "*" => Value::Int(x.wrapping_mul(y)),
+            "/" if y == 0 => return Err("division by zero".into()),
+            "/" if x % y == 0 => Value::Int(x / y),
+            "/" => Value::Num(x as f64 / y as f64),
+            "%" if y == 0 => return Err("division by zero".into()),
+            _ => Value::Int(x % y),
+        });
+    }
+    match (a.num(), b.num()) {
+        (Some(x), Some(y)) => Ok(Value::Num(match op {
+            "+" => x + y,
+            "-" => x - y,
+            "*" => x * y,
+            "/" if y == 0.0 => return Err("division by zero".into()),
+            "/" => x / y,
+            _ => x % y,
+        })),
+        _ => Err(format!("{} {op} {}: numbers wanted", a.kind(), b.kind())),
+    }
+}
+
+fn binary(op: &str, a: Value, b: Value) -> Result<Value, String> {
+    match op {
+        "+" => match (a, b) {
+            (Value::List(mut x), Value::List(y)) => {
+                x.extend(y);
+                Ok(Value::List(x))
+            }
+            (Value::Date(d, p), n) | (n, Value::Date(d, p)) if n.int().is_some() && !matches!(n, Value::Str(_)) => Ok(Value::Date(date_add(d, p, n.int().unwrap()).ok_or("a date out of range")?, p)),
+            (a @ Value::Str(_), b) | (a, b @ Value::Str(_)) => Ok(Value::Str(a.text()? + &b.text()?)),
+            (a, b) => arith("+", &a, &b),
+        },
+        "-" => match (a, b) {
+            (Value::Date(d, p), n) if n.int().is_some() && !matches!(n, Value::Str(_)) => Ok(Value::Date(date_add(d, p, -n.int().unwrap()).ok_or("a date out of range")?, p)),
+            (a, b) => arith("-", &a, &b),
+        },
+        "*" | "/" | "%" => arith(op, &a, &b),
+        "=" => Ok(Value::Bool(equal(&a, &b))),
+        "!=" => Ok(Value::Bool(!equal(&a, &b))),
+        "<" | "<=" | ">" | ">=" => {
+            let o = compare(&a, &b).ok_or(format!("a {} and a {} don't compare", a.kind(), b.kind()))?;
+            Ok(Value::Bool(match op {
+                "<" => o.is_lt(),
+                "<=" => o.is_le(),
+                ">" => o.is_gt(),
+                _ => o.is_ge(),
+            }))
+        }
+        "in" => Ok(Value::Bool(match &b {
+            Value::List(l) => l.iter().any(|x| equal(&a, x)),
+            Value::Dict(_) => b.field(&a.text()?).is_some(),
+            Value::Str(s) => s.contains(&a.text()?),
+            Value::Null => false,
+            _ => return Err(format!("\"in\" a {}: a list, dictionary or string wanted", b.kind())),
+        })),
+        _ => Err(format!("no operator {op}")),
+    }
+}
+
+/// A query's answer as a value: one cell, a value; one column, a list;
+/// more, a list of rows (dictionaries by column).
+pub fn from_table(t: &Table) -> Value {
+    let cell = |k: usize, v: &Option<String>| -> Value {
+        let Some(s) = v else { return Value::Null };
+        let col = &t.cols[k];
+        let ty = col.ty.to_ascii_lowercase();
+        if col.numeric {
+            if let Ok(n) = s.trim().parse::<i64>() {
+                return Value::Int(n);
+            }
+            if let Ok(n) = s.trim().parse::<f64>() {
+                return Value::Num(n);
+            }
+        }
+        if (ty.contains("date") || ty.contains("time")) && let Ok((d, p)) = date_iso(s) {
+            return Value::Date(d, p);
+        }
+        Value::Str(s.clone())
+    };
+    match (t.cols.len(), t.rows.len()) {
+        (1, 1) => cell(0, &t.rows[0][0]),
+        (1, 0) => Value::Null,
+        (1, _) => Value::List(t.rows.iter().map(|r| cell(0, &r[0])).collect()),
+        _ => Value::List(t.rows.iter().map(|r| Value::Dict(t.cols.iter().enumerate().map(|(k, c)| (c.name.clone(), cell(k, &r[k]))).collect())).collect()),
+    }
+}
+
+fn eval(e: &Expr, vars: &Vars, d: Dialect, host: &mut dyn Host) -> Result<Value, String> {
+    Ok(match e {
+        Expr::Lit(v) => v.clone(),
+        Expr::Var(n) => vars.get(n).cloned().ok_or(format!("\"{n}\" has no value"))?,
+        Expr::List(items) => Value::List(items.iter().map(|x| eval(x, vars, d, host)).collect::<Result<_, _>>()?),
+        Expr::Dict(pairs) => Value::Dict(pairs.iter().map(|(k, x)| Ok((k.clone(), eval(x, vars, d, host)?))).collect::<Result<_, String>>()?),
+        Expr::Template(pieces) => {
+            let mut s = String::new();
+            for p in pieces {
+                match p {
+                    Piece::Text(t) => s += t,
+                    Piece::Expr(x) => s += &eval(x, vars, d, host)?.shown(),
+                }
+            }
+            Value::Str(s)
+        }
+        Expr::Query(q) => {
+            let sql = put(q, vars, d)?;
+            from_table(&host.query(&sql)?)
+        }
+        Expr::Field(x, name) => {
+            let v = eval(x, vars, d, host)?;
+            match &v {
+                Value::Dict(_) => v.field(name).cloned().ok_or(format!("no \"{name}\" in it"))?,
+                other => return Err(format!("\".{name}\" of a {}: a dictionary or a row wanted", other.kind())),
+            }
+        }
+        Expr::Index(x, k) => {
+            let v = eval(x, vars, d, host)?;
+            let k = eval(k, vars, d, host)?;
+            match (&v, &k) {
+                (Value::List(l), k) => {
+                    let i = k.int().ok_or("a list's index is a whole number")?;
+                    let i = if i < 0 { l.len() as i64 + i } else { i };
+                    l.get(i as usize).cloned().ok_or(format!("no element {i}: the list has {}", l.len()))?
+                }
+                (Value::Dict(_), k) => v.field(&k.text()?).cloned().ok_or(format!("no \"{}\" in it", k.text()?))?,
+                (Value::Str(s), k) => {
+                    let i = k.int().ok_or("a string's index is a whole number")?;
+                    let n = s.chars().count() as i64;
+                    let i = if i < 0 { n + i } else { i };
+                    s.chars().nth(i as usize).map(|c| Value::Str(c.to_string())).ok_or("past the string's end")?
+                }
+                (other, _) => return Err(format!("[…] of a {}", other.kind())),
+            }
+        }
+        Expr::Call(f, args) => {
+            let a: Vec<Value> = args.iter().map(|x| eval(x, vars, d, host)).collect::<Result<_, _>>()?;
+            match (f.as_str(), a.as_slice()) {
+                ("len", [v]) => Value::Int(match v {
+                    Value::List(l) => l.len(),
+                    Value::Dict(x) => x.len(),
+                    Value::Null => 0,
+                    v => v.text()?.chars().count(),
+                } as i64),
+                ("upper", [v]) => Value::Str(v.text()?.to_uppercase()),
+                ("lower", [v]) => Value::Str(v.text()?.to_lowercase()),
+                ("keys", [Value::Dict(x)]) => Value::List(x.iter().map(|(k, _)| Value::Str(k.clone())).collect()),
+                ("values", [Value::Dict(x)]) => Value::List(x.iter().map(|(_, v)| v.clone()).collect()),
+                _ => return Err(format!("no function {f}({} arguments): len, upper, lower, keys, values", a.len())),
+            }
+        }
+        Expr::Unary(op, x) => {
+            let v = eval(x, vars, d, host)?;
+            match *op {
+                "not" => Value::Bool(!v.truthy()),
+                _ => arith("-", &Value::Int(0), &v)?,
+            }
+        }
+        Expr::Bin(op, a, b) => match *op {
+            "and" => {
+                let l = eval(a, vars, d, host)?;
+                if !l.truthy() { l } else { eval(b, vars, d, host)? }
+            }
+            "or" => {
+                let l = eval(a, vars, d, host)?;
+                if l.truthy() { l } else { eval(b, vars, d, host)? }
+            }
+            op => binary(op, eval(a, vars, d, host)?, eval(b, vars, d, host)?)?,
+        },
+        Expr::Pipe(x, c) => convert(eval(x, vars, d, host)?, c)?,
+    })
+}
+
+/// A value worked out apart from a run (no queries): for tests and hover.
+pub fn eval_plain(src: &str, vars: &Vars, d: Dialect) -> Result<Value, String> {
+    struct NoHost;
+    impl Host for NoHost {
+        fn sql(&mut self, _: Stmt) -> SqlEnd {
+            SqlEnd::Over
+        }
+        fn query(&mut self, _: &str) -> Result<Table, String> {
+            Err("no queries here".into())
+        }
+        fn print(&mut self, _: String) {}
+        fn progress(&mut self, _: String) {}
+        fn stopped(&self) -> bool {
+            false
+        }
+    }
+    let mut p = P::new(src)?;
+    let e = p.list_or_expr()?;
+    p.done()?;
+    eval(&e, vars, d, &mut NoHost)
+}
+
+// ───────────────────────────── into SQL ─────────────────────────────
+
+/// The variables put into a statement: `:x` a value, `&x` text as it is,
+/// `:x.f` / `&x.f` a field, `:{…}` / `&{…}` an expression, `&x.` the dot
+/// ending the name. Names with no value stay as they are (strings and
+/// comments too).
+pub fn put(sql: &str, vars: &Vars, d: Dialect) -> Result<String, String> {
+    if !sql.contains([':', '&']) {
+        return Ok(sql.to_string());
+    }
+    let toks = lex::lex(sql, d);
+    let dead: Vec<Range<usize>> = toks.iter().filter(|t| matches!(t.kind, Tk::Str | Tk::LineComment | Tk::BlockComment | Tk::Quoted)).map(|t| t.start..t.end).collect();
+    let comments: Vec<Range<usize>> = toks.iter().filter(|t| matches!(t.kind, Tk::LineComment | Tk::BlockComment)).map(|t| t.start..t.end).collect();
+    let b = sql.as_bytes();
+    let ident_at = |k: usize| sql[k..].chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+    let name_end = |mut k: usize| {
+        while k < sql.len() && sql[k..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            k += sql[k..].chars().next().unwrap().len_utf8();
+        }
+        k
+    };
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        let c = b[i];
+        let amp = c == b'&';
+        // `&` goes in strings and quoted names too (as SQL*Plus has it),
+        // `:` doesn't; neither in comments.
+        let skip = |r: &&Range<usize>| r.contains(&i);
+        if (c != b':' && !amp) || (amp && dead.iter().filter(|r| comments.iter().any(|c| c == *r)).any(|r| skip(&r))) || (!amp && dead.iter().any(|r| skip(&r))) {
+            i += 1;
+            continue;
+        }
+        let prev = if i > 0 { b[i - 1] } else { b' ' };
+        // a::type, x := 1, {p:T}; `&` after a name is fine (events_&i).
+        if !amp && (prev.is_ascii_alphanumeric() || prev == b'_' || prev == b':') {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if amp && b.get(j) == Some(&b'&') {
+            j += 1;
+        }
+        let (value, mut end) = if b.get(j) == Some(&b'{') {
+            let Some(close) = sql[j..].find('}') else {
+                i += 1;
+                continue;
+            };
+            let v = eval_plain(&sql[j + 1..j + close], vars, d).map_err(|m| format!("{}: {m}", &sql[i..j + close + 1]))?;
+            (v, j + close + 1)
+        } else if ident_at(j) {
+            let e = name_end(j);
+            let Some(v) = vars.get(&sql[j..e]) else {
+                i = e;
+                continue;
+            };
+            let mut v = v.clone();
+            let mut e = e;
+            // Fields: .name while it's a row / dictionary that has it.
+            while b.get(e) == Some(&b'.') && ident_at(e + 1) {
+                let fe = name_end(e + 1);
+                match v.field(&sql[e + 1..fe]) {
+                    Some(f) => {
+                        v = f.clone();
+                        e = fe;
+                    }
+                    None => break,
+                }
+            }
+            (v, e)
+        } else {
+            i += 1;
+            continue;
+        };
+        // "&x." — the dot ends the name.
+        if amp && b.get(end) == Some(&b'.') {
+            end += 1;
+        }
+        let text = if amp { value.text() } else { value.sql(d) }.map_err(|m| format!("{}: {m}", &sql[i..end]))?;
+        out += &sql[copied..i];
+        out += &text;
+        copied = end;
+        i = end;
+    }
+    out += &sql[copied..];
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(src: &str) -> Value {
+        eval_plain(src, &Vars::default(), Dialect::ClickHouse).unwrap()
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vars {
+        let mut out = Vars::default();
+        for (n, e) in pairs {
+            let val = eval_plain(e, &out, Dialect::ClickHouse).unwrap();
+            out.globals.insert(n.to_string(), val);
+        }
+        out
+    }
+
+    #[test]
+    fn values_and_expressions() {
+        assert_eq!(v("1 + 2 * 3"), Value::Int(7));
+        assert_eq!(v("7 / 2"), Value::Num(3.5));
+        assert_eq!(v("'a' + 1"), Value::Str("a1".into()));
+        assert_eq!(v("\"123\" | number"), Value::Int(123));
+        assert_eq!(v("1 | string"), Value::Str("1".into()));
+        for l in ["1,2,3", "[1,2,3]", "(1,2,3)", "{1,2,3}"] {
+            assert_eq!(v(l), Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]), "{l}");
+        }
+        let dk = v("{\"key1\":1,\"key2\":2}");
+        assert_eq!(dk.field("KEY2"), Some(&Value::Int(2)));
+        assert_eq!(v("len([1,2]) + len('abc')"), Value::Int(5));
+        assert_eq!(v("2 in [1,2] and not 5 in [1,2] and 'k' in {k: 1}"), Value::Bool(true));
+        assert_eq!(v("[1,2][-1]"), Value::Int(2));
+        assert_eq!(v("`a ${1+1} b`"), Value::Str("a 2 b".into()));
+        assert_eq!(v("202611 | date yyyymm").shown(), "2026-11-01");
+        assert_eq!(v("202611 | date yyyymm | date yyyy-mm"), Value::Str("2026-11".into()));
+        assert_eq!(v("'2026-11-01' | date + 1").shown(), "2026-11-02");
+        assert_eq!(v("'2026-11-01 10:30' | date | date yyyymmdd_hh24mi"), Value::Str("20261101_1030".into()));
+        assert_eq!(v("'2026-11-01 10:30' | date | date dd.mm.yyyy"), Value::Str("01.11.2026".into()));
+        assert!(eval_plain("'2026-11-01' | date | date dd.mm.yyyy hh24:mi", &Vars::default(), Dialect::ClickHouse).is_err(), "a space in a format: quoted");
+        assert_eq!(v("'2026-11-01 10:30' | date | date 'dd.mm.yyyy hh24:mi'"), Value::Str("01.11.2026 10:30".into()));
+        assert_eq!(v("'01/11/2026' | date dd/mm/yyyy").shown(), "2026-11-01");
+        assert_eq!(v("[1, 'a', {x: null}]").shown(), "[1, \"a\", {\"x\": null}]");
+        assert!(eval_plain("1 +", &Vars::default(), Dialect::ClickHouse).is_err());
+        assert!(eval_plain("nope", &Vars::default(), Dialect::ClickHouse).unwrap_err().contains("nope"));
+    }
+
+    #[test]
+    fn ranges() {
+        let r = |a: &str, b: &str, s: Option<(Option<i64>, Option<Prec>)>| range(&v(a), &v(b), s).unwrap().iter().map(|x| x.text().unwrap()).collect::<Vec<_>>().join(" ");
+        assert_eq!(r("1", "4", None), "1 2 3 4");
+        assert_eq!(r("4", "1", None), "4 3 2 1");
+        assert_eq!(r("0", "100", Some((Some(25), None))), "0 25 50 75 100");
+        assert_eq!(r("08", "11", None), "08 09 10 11");
+        assert_eq!(r("'a'", "'d'", None), "a b c d");
+        // The end month in whole, by days.
+        let days = range(&v("202611 | date yyyymm"), &v("202612 | date yyyymm"), Some((None, Some(Prec::Day)))).unwrap();
+        assert_eq!(days.len(), 61);
+        assert_eq!(days.last().unwrap().text().unwrap(), "2026-12-31");
+        assert_eq!(r("202611 | date yyyymm", "202702 | date yyyymm", None), "2026-11-01 2026-12-01 2027-01-01 2027-02-01");
+        assert_eq!(r("'2026-11-01 22:00' | date", "'2026-11-02 01:00' | date", Some((None, Some(Prec::Hour)))), "2026-11-01 22:00:00 2026-11-01 23:00:00 2026-11-02 00:00:00 2026-11-02 01:00:00");
+        assert!(range(&v("1"), &v("5"), Some((Some(-1), None))).is_err());
+    }
+
+    #[test]
+    fn put_into_sql() {
+        let vs = vars(&[("i", "7"), ("p", "06"), ("s", "\"O'Neil\""), ("ls", "1,2,3"), ("names", "['a','b']"), ("t", "{database: 'db', name: 'ev_1'}"), ("d", "'2026-11-01' | date")]);
+        let ch = Dialect::ClickHouse;
+        assert_eq!(put("select * from events_&i where n = :i", &vs, ch).unwrap(), "select * from events_7 where n = 7");
+        assert_eq!(put("from events_&i._old, t_&p", &vs, ch).unwrap(), "from events_7_old, t_06");
+        assert_eq!(put("from &t.database..&t.name", &vs, ch).unwrap(), "from db.ev_1");
+        assert_eq!(put("where x in (:ls) and y in (:names) and n = :s", &vs, ch).unwrap(), "where x in (1, 2, 3) and y in ('a', 'b') and n = 'O\\'Neil'");
+        assert_eq!(put("where day = :d and t like 'x_&{d | date yyyymmdd}%' and s = ':d'", &vs, ch).unwrap(), "where day = '2026-11-01' and t like 'x_20261101%' and s = ':d'");
+        assert_eq!(put("from e_&{d | date yyyymmdd} where n > :{i * 2}", &vs, ch).unwrap(), "from e_20261101 where n > 14");
+        assert_eq!(put("where day = :d", &vs, Dialect::Oracle).unwrap(), "where day = DATE '2026-11-01'");
+        // Left alone: casts, :=, unknown names, `:` in strings, comments.
+        let keep = "select a::text, x := 1, :unknown, &unknown, ':i', a & b -- :i &i\nfrom {p:String}";
+        assert_eq!(put(keep, &vs, Dialect::Postgres).unwrap(), keep);
+        assert_eq!(put("select \"&i\", 'ev_&i'", &vs, Dialect::Postgres).unwrap(), "select \"7\", 'ev_7'");
+        assert!(put("select :t", &vs, ch).unwrap_err().contains("dictionary"));
+    }
+
+    fn prog(src: &str) -> Result<Program, Mistake> {
+        parse(src, 0, src, Dialect::ClickHouse, false)
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        log: Vec<String>,
+        fail_on: Option<String>,
+        answers: HashMap<String, Table>,
+    }
+
+    impl Host for Fake {
+        fn sql(&mut self, st: Stmt) -> SqlEnd {
+            self.log.push(st.sql.clone());
+            if self.fail_on.as_ref().is_some_and(|f| st.sql.contains(f.as_str())) { SqlEnd::Failed } else { SqlEnd::Ok }
+        }
+        fn query(&mut self, sql: &str) -> Result<Table, String> {
+            self.log.push(format!("? {sql}"));
+            self.answers.get(sql).cloned().ok_or(format!("no answer for {sql}"))
+        }
+        fn print(&mut self, text: String) {
+            self.log.push(format!("> {text}"));
+        }
+        fn progress(&mut self, _: String) {}
+        fn stopped(&self) -> bool {
+            false
+        }
+    }
+
+    fn table(cols: &[&str], rows: &[&[&str]]) -> Table {
+        Table {
+            cols: cols.iter().map(|c| crate::db::Col { name: c.to_string(), ty: "String".into(), numeric: false }).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|c| Some(c.to_string())).collect()).collect(),
+            more: false,
+        }
+    }
+
+    fn go(src: &str, host: &mut Fake) -> Result<End, Mistake> {
+        let p = prog(src)?;
+        run(&p, &mut Vars::default(), Dialect::ClickHouse, false, host)
+    }
+
+    #[test]
+    fn loops_and_conditions() {
+        let src = "-- @set day = '2026-11-01'\n\
+            -- @for i in 0 .. 2\n\
+            insert into agg select * from events_&i where d = :day;\n\
+            -- @if i = 1\n\
+            -- @print('one ', i)\n\
+            -- @elif i > 1\n\
+            -- @print(`more: ${i}`)\n\
+            -- @else\n\
+            optimize table events_&i final;\n\
+            -- @end if\n\
+            -- @end for\n\
+            -- @set x = 3\n\
+            -- @while x > 0\n\
+            -- @x--\n\
+            -- @if x = 1\n\
+            -- @break\n\
+            -- @end\n\
+            -- @end while\n\
+            -- @print(x)\n";
+        let mut h = Fake::default();
+        assert_eq!(go(src, &mut h), Ok(End::Done));
+        assert_eq!(
+            h.log,
+            [
+                "insert into agg select * from events_0 where d = '2026-11-01'",
+                "optimize table events_0 final",
+                "insert into agg select * from events_1 where d = '2026-11-01'",
+                "> one 1",
+                "insert into agg select * from events_2 where d = '2026-11-01'",
+                "> more: 2",
+                "> 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn match_dicts_and_queries() {
+        let src = "-- @set dk = {\"eu\": 1, \"us\": 7}\n\
+            -- @for k, v in dk\n\
+            -- @match v\n\
+            -- @case 'x', 1\n\
+            select '&k' as first;\n\
+            -- @case 5 .. 10\n\
+            select '&k' as mid;\n\
+            -- @default\n\
+            select 'other';\n\
+            -- @end match\n\
+            -- @end for\n\
+            -- @for t in (select database, name from system.tables)\n\
+            optimize table &t.database..&t.name final;\n\
+            -- @end for\n\
+            -- @set n = (select count() from x)\n\
+            -- @print(n + 1)";
+        let mut h = Fake::default();
+        h.answers.insert("select database, name from system.tables".into(), table(&["database", "name"], &[&["db", "a"], &["db", "b"]]));
+        let mut n = table(&["c"], &[&["41"]]);
+        n.cols[0].numeric = true;
+        h.answers.insert("select count() from x".into(), n);
+        assert_eq!(go(src, &mut h), Ok(End::Done));
+        assert_eq!(
+            h.log,
+            [
+                "select 'eu' as first",
+                "select 'us' as mid",
+                "? select database, name from system.tables",
+                "optimize table db.a final",
+                "optimize table db.b final",
+                "? select count() from x",
+                "> 42",
+            ]
+        );
+    }
+
+    #[test]
+    fn errors_stop_or_go_on() {
+        let src = "-- @for i in 1 .. 3\nselect &i;\n-- @end for";
+        let mut h = Fake { fail_on: Some("2".into()), ..Default::default() };
+        assert_eq!(go(src, &mut h), Ok(End::Failed));
+        assert_eq!(h.log.len(), 2);
+        let mut h = Fake { fail_on: Some("2".into()), ..Default::default() };
+        assert_eq!(go(&format!("-- @on error continue\n{src}"), &mut h), Ok(End::Done));
+        assert_eq!(h.log.len(), 3);
+    }
+
+    #[test]
+    fn mistakes_found_first() {
+        let line = |src: &str| prog(src).unwrap_err();
+        assert_eq!(line("select 1;\n-- @for i in 1 .. 3\nselect 2;").line, 2);
+        let m = line("-- @for i in 1..2\n-- @end while");
+        assert!(m.msg.contains("closes the @for"), "{m:?}");
+        assert_eq!(line("select 1;\n\n-- @set x = = 2").line, 3);
+        assert!(line("-- @else").msg.contains("outside"));
+        // Not directives: plain comments stay comments.
+        let p = prog("-- @author someone\n-- a @ b\nselect 1; -- @set x = 1\n").unwrap();
+        assert_eq!(p.nodes.len(), 1);
+        // A runaway loop.
+        let mut h = Fake::default();
+        assert!(go("-- @while true\n-- @end while", &mut h).unwrap_err().msg.contains("endless"));
+        // Names given values aren't asked for.
+        let p = prog("-- @set a = 1\n-- @for i, x in [1]\n-- @y++\n-- @end for").unwrap();
+        assert_eq!(p.names(), ["a", "i", "x", "y"]);
+    }
+}

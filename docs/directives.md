@@ -1,7 +1,7 @@
-# Script directives (design)
+# Script directives
 
-Status: **draft, not implemented yet.** This is the plan the implementation
-follows; open questions are at the end.
+Status: **implemented** (`src/script.rs`), except what §9 and §11 mark as
+not yet: the dry run, the "how much is ahead" count, hints and hover.
 
 ClickHouse has no procedural language of its own (unlike Oracle's PL/SQL or
 PostgreSQL's PL/pgSQL), yet work there often needs loops: the same
@@ -39,6 +39,17 @@ body and runs on every pass.
 
 Directives work in a tab's script and in notebook cells. A loop opened in a
 cell ends in the same cell.
+
+A script runs as one when it's run whole (Run script) or a part of it is
+picked and run; Run statement (one statement under the cursor) runs that
+statement alone, its variables asked for as before. In a notebook, once
+any cell has a directive every cell runs as a script, the variables
+shared down the notebook (and kept for the next runs of its cells).
+
+A line counts as a directive only when its first word is one (`set`,
+`var`, `for`, `while`, `if`, `elif`, `else`, `match`, `case`, `default`,
+`end`, `break`, `continue`, `print`, `pause`, `on`) or it assigns
+(`-- @x = …`, `-- @x++`); `-- @author someone` stays a comment.
 
 ## 2. Values
 
@@ -100,6 +111,7 @@ ls[0]          first element (negative counts from the end: ls[-1])
 dk["key1"]     dk.key1          a dictionary's value
 t.name         a row's column
 len(ls)        a list's / dictionary's / string's length
+upper(s) lower(s) keys(dk) values(dk)
 ```
 
 Operators, loosest first:
@@ -134,7 +146,9 @@ The same pipe formats a value where it's used (§5): a date piped to
 
 Date format tokens (Oracle style, any case): `yyyy`, `yy`, `mm`, `dd`,
 `hh24`, `hh`, `mi`, `ss`, `q` (quarter), `ddd` (day of year); anything else
-is taken as it is (`yyyy-mm-dd`, `yyyymmdd_hh24`).
+is taken as it is. Unquoted, a format is its words glued by `-` `.` `/`
+`:` `_` (`yyyy-mm-dd`, `dd.mm.yyyy`, `yyyymmdd_hh24`); with a space it's
+quoted (`| date 'dd.mm.yyyy hh24:mi'`).
 
 A date remembers its precision: `202611 | date yyyymm` is the month
 2026-11; used without a format it prints as `2026-11-01`.
@@ -162,8 +176,10 @@ from events_&{d | date yyyymmdd}   -- {…} takes an expression (a pipe, an elem
 where n > :{limit * 2}
 ```
 
-`::type` casts, `:=`, a trigger's `:new` / `:old`, `&&` and `a & b` stay as
-they are now (`sql/params.rs`); strings and comments are left alone.
+`::type` casts, `:=`, ClickHouse's `{p:Type}` and names with no value stay
+as they are. `&` goes in strings and quoted names too, as SQL*Plus has it
+(`like 'events_&i%'`), and right after a name (`events_&i`); `:` doesn't
+go in strings. Neither goes in comments.
 
 ## 6. Loops
 
@@ -209,14 +225,38 @@ they are now (`sql/params.rs`); strings and comments are left alone.
 
 The condition is checked before every pass. A query in it runs each time.
 
-`@end` alone closes whichever loop is open; `@end for` / `@end while` are
-checked against what they close.
+`@end` alone closes whichever block is open; `@end for` / `@end while` /
+`@end if` / `@end match` are checked against what they close.
 
 **Runaway guard**: Stop ends any loop at once (the running statement is
 cancelled too). A loop that makes 100 000 passes without running any SQL
 stops with an error, as it surely spins.
 
-## 7. Output and the rest
+## 7. Conditions
+
+```sql
+-- @if n = 0
+-- @print('nothing to do')
+-- @elif n < 1000
+insert into small select * from src;
+-- @else
+insert into big select * from src;
+-- @end if
+
+-- @match region                  -- the first case that fits; none fits: @default
+-- @case 'eu', 'uk'               -- any of these values
+optimize table events_eu final;
+-- @case 1 .. 5                   -- a range (dates too)
+-- @case [6, 7, 8]                -- in a list
+-- @default
+-- @print('unknown region ', region)
+-- @end match
+```
+
+`@else if` is the same as `@elif`. A condition is true when it's `true`, a
+non-zero number, a non-empty string / list / dictionary; `null` is false.
+
+## 8. Output and the rest
 
 ```sql
 -- @print('shard ', i, ': done')            -- the arguments joined
@@ -227,37 +267,43 @@ stops with an error, as it surely spins.
 -- @on error continue                        -- or stop (the default)
 ```
 
-- `@print` writes to Messages, with the time, like a statement's line.
+- `@print` writes to Output (where DBMS_OUTPUT and RAISE NOTICE go).
 - `@on error continue`: a statement failing in a loop is logged and the loop
   goes on with the next pass; `stop` ends the run there. It holds from where
   it's written to the end of the script (or the next `@on error`).
 
-## 8. Running it
+## 9. Running it
 
 - **Read through first.** The whole script's directives are parsed before
   anything runs; a mistake (an unclosed loop, `@end while` closing a `@for`,
   an unknown name in an expression) is shown with its line and nothing runs.
-- **Before a run with loops**, the run bar says how much is ahead when it
+- **(Not yet.) Before a run with loops**, the run bar says how much is ahead when it
   can be known without the server: "16 passes × 2 statements". **Dry run**
   ("Show SQL") expands the script with the values it would get and opens
   the result in a new tab without running anything; queries in directives
   are run for it (read only), or left as `(query)` when the dry run is told
   not to touch the server.
-- **While it runs**: progress "7/16 · i = 06" by the Stop button; each
+- **While it runs**: progress "7/16 · i = 06" by the results' tabs; each
   pass's statements log as usual (time, rows); results of the last pass's
-  SELECTs are shown (earlier passes' results aren't kept, to keep memory
-  flat; `@print` is the way to keep a figure from each pass).
+  SELECTs are shown (each pass's result takes the place of the one before,
+  to keep memory flat; `@print` is the way to keep a figure from each
+  pass).
 - **The session**: everything runs in the connection's session, one
   statement after another, like a script now — transactions and auto-commit
   as set; the "uncommitted changes" prompts work as before.
 - **Stop** cancels the statement running and ends the run; a statement
   queued behind it doesn't start.
 
-## 9. Grammar
+## 10. Grammar
 
 ```
-directive  = "@" ( set | assign | for | while | end | "break" | "continue"
+directive  = "@" ( set | assign | for | while | if | elif | "else" | match
+                 | case | "default" | end | "break" | "continue"
                  | print | pause | onerror ) [ "--" comment ]
+if         = "if" expr
+elif       = ("elif" | "else" "if") expr
+match      = "match" expr
+case       = "case" ( range | expr { "," expr } )
 set        = ("set" | "var") name "=" expr
 assign     = name ( ("=" | "+=" | "-=" | "*=" | "/=") expr | "++" | "--" )
 for        = "for" name [ "," name ] "in" source
@@ -265,7 +311,7 @@ source     = range | expr
 range      = expr ".." expr [ pipe ] [ "step" [ number ] [ unit ] ]
 unit       = "minute" | "hour" | "day" | "week" | "month" | "quarter" | "year"
 while      = "while" expr
-end        = "end" [ "for" | "while" ]
+end        = "end" [ "for" | "while" | "if" | "match" ]
 print      = "print" "(" [ expr { "," expr } ] ")"
 pause      = "pause" duration                 (10s, 500ms, 2m)
 onerror    = "on" "error" ( "stop" | "continue" )
@@ -296,10 +342,8 @@ In SQL text:
 &name.                            the dot ends the name
 ```
 
-## 10. Open questions
+## 11. Open questions
 
-- `@if … @else … @end if`: expressions already exist, so it's cheap; left
-  out of the first version to keep it a loop helper, not a language.
 - Results of every pass gathered into one table (a UNION of the passes'
   SELECTs) — useful for "count per shard"; `@print` covers it for now.
 - Running passes in parallel (several sessions) — ClickHouse would like it;

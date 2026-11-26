@@ -123,6 +123,9 @@ pub struct ResultView {
     /// Saved once every row's in.
     /// Rows written to a file so far, while the cursor's rest goes there.
     pub exporting: Option<usize>,
+    /// Where its statement starts in the editor (a script's loop puts each
+    /// pass's result in place of the one before).
+    pub at: Option<usize>,
     /// Shown as a chart: its settings.
     pub chart: crate::chart::Chart,
 }
@@ -184,7 +187,7 @@ pub enum Pane {
     Result(usize),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogKind {
     Run,
     Ok,
@@ -216,6 +219,8 @@ pub struct Running {
     pub since: Instant,
     /// Stop asked for at (the server may not listen: then it's ended by force).
     pub stop_asked: Option<Instant>,
+    /// A script's: where it's got to ("7/16 · i = 06").
+    pub progress: Option<String>,
 }
 
 impl Running {
@@ -1092,6 +1097,49 @@ impl App {
             return;
         };
         let d = self.dialect_of(Some(&conn));
+        // Directives in some cell: every cell runs as a script, the
+        // variables shared down the notebook.
+        let is_sql = |c: &&crate::config::Cell| c.kind == crate::config::CellKind::Sql;
+        if !explain && nb.cells.iter().filter(is_sql).any(|c| crate::script::has_directives(&c.text, d)) {
+            let mut known = sql::notebook::Known::default();
+            let mut progs = Vec::new();
+            for c in nb.cells.iter().filter(is_sql) {
+                let key = Self::cell_key(&tab.id, &c.id);
+                match crate::script::parse(&c.text, 0, &c.text, d, false) {
+                    Ok(mut prog) => {
+                        for s in prog.sql_mut() {
+                            let raw = s.sql.clone();
+                            s.sql = sql::notebook::glue(&raw, &known, d);
+                            known.learn(&raw, d);
+                        }
+                        progs.push((c.id.clone(), key, Some(prog)));
+                    }
+                    Err(m) => {
+                        progs.push((c.id.clone(), key.clone(), None));
+                        if only.as_ref().is_none_or(|o| *o == c.id) {
+                            self.script_mistake(&key, m);
+                        }
+                    }
+                }
+                if only.as_ref().is_some_and(|o| *o == c.id) {
+                    break;
+                }
+            }
+            let all_names: Vec<String> = progs.iter().filter_map(|(_, _, p)| p.as_ref()).flat_map(|p| p.names()).collect();
+            for (cell, key, prog) in progs {
+                if only.as_ref().is_some_and(|o| *o != cell) {
+                    continue;
+                }
+                // A cell that can't run: the ones below wait for it.
+                let Some(prog) = prog else { break };
+                if prog.nodes.is_empty() || self.rt.get(&key).is_some_and(|r| r.run.is_some()) {
+                    continue;
+                }
+                self.rt.entry(key.clone()).or_default().output.clear();
+                self.dispatch_script(ctx, key, prog, Some(tab.id.clone()), all_names.clone(), &conn);
+            }
+            return;
+        }
         let mut known = sql::notebook::Known::default();
         let mut todo: Vec<(String, Vec<Stmt>)> = Vec::new();
         for c in nb.cells.iter().filter(|c| c.kind == crate::config::CellKind::Sql) {
@@ -1210,6 +1258,21 @@ impl App {
             }
             return;
         }
+        // Directives in it: run as a script.
+        if !explain && let Some((conn, base, part)) = self.script_pick(all) {
+            let tab_id = self.tab().id.clone();
+            if self.rt.get(&tab_id).is_some_and(|r| r.run.is_some()) {
+                self.toast(t("Вкладка ещё выполняет запрос", "The tab is still running"));
+                return;
+            }
+            let d = self.dialect_of(Some(&conn));
+            let full = self.tab().text.clone();
+            match crate::script::parse(&full, base, &part, d, self.settings.blank_line_splits && all) {
+                Ok(prog) => self.dispatch_script(ctx, tab_id, prog, None, Vec::new(), &conn),
+                Err(m) => self.script_mistake(&tab_id, m),
+            }
+            return;
+        }
         let Some((conn, mut stmts, d)) = self.pick(all) else {
             if self.tab_conn(self.ws(), self.tab()).is_none() {
                 self.toast(t("Выберите подключение для вкладки", "Pick a connection for the tab"));
@@ -1255,13 +1318,72 @@ impl App {
         self.dispatch(ctx, tab_id, stmts, &conn);
     }
 
+    /// The text to run as a script (the whole or what's picked), when it
+    /// has directives: (connection, where it starts, the text).
+    fn script_pick(&self, all: bool) -> Option<(String, usize, String)> {
+        let tab = self.tab();
+        let conn = self.tab_conn(self.ws(), tab)?;
+        let d = self.dialect_of(Some(&conn));
+        let (base, part) = match self.rt.get(&tab.id).and_then(|r| editor::selection(&r.ed)) {
+            Some(r) => (r.start, &tab.text[r]),
+            None if all => (0, tab.text.as_str()),
+            None => return None,
+        };
+        crate::script::has_directives(part, d).then(|| (conn, base, part.to_string()))
+    }
+
+    /// A script that can't run as written: said in its messages.
+    fn script_mistake(&mut self, key: &str, m: crate::script::Mistake) {
+        let rt = self.rt.entry(key.to_string()).or_default();
+        let text = format!("{} {}: {}", t("Скрипт не запущен — строка", "The script didn't run: line"), m.line, m.msg);
+        rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text: text.clone(), at: None });
+        rt.shown = Pane::Messages;
+        self.toast(text);
+    }
+
+    /// Runs a script; `:name` / `&name` its directives don't give values
+    /// to are asked for first. `scope`: whose variables it shares (a
+    /// notebook's cells).
+    pub fn dispatch_script(&mut self, ctx: &egui::Context, key: String, prog: crate::script::Program, scope: Option<String>, also: Vec<String>, conn: &str) {
+        let d = self.dialect_of(Some(conn));
+        let mut given = prog.names();
+        given.extend(also);
+        let mut prog = prog;
+        let sqls: Vec<String> = prog.sql_mut().into_iter().map(|s| s.sql.clone()).collect();
+        let params: Vec<sql::params::Param> = sql::params::names(sqls.iter().map(String::as_str), d).into_iter().filter(|p| !given.contains(&p.name.to_lowercase())).collect();
+        if !params.is_empty() {
+            let stmts = prog.sql_mut().into_iter().map(|s| s.clone()).collect();
+            self.param_ask.push(crate::dialogs::ParamAsk { tab: key, stmts, conn: conn.to_string(), params, d, script: Some((Box::new(prog), scope)) });
+            return;
+        }
+        self.dispatch_script_now(ctx, key, prog, scope, conn);
+    }
+
+    pub fn dispatch_script_now(&mut self, ctx: &egui::Context, key: String, prog: crate::script::Program, scope: Option<String>, conn: &str) {
+        if !self.ensure_live(ctx, conn, None) {
+            return;
+        }
+        let run = self.next_run;
+        self.next_run += 1;
+        self.runs.insert(run, key.clone());
+        let limit = self.batch(conn);
+        let rt = self.rt.entry(key).or_default();
+        rt.results.clear();
+        rt.shown = Pane::Messages;
+        rt.server_err = None;
+        rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now(), stop_asked: None, progress: None });
+        rt.flag = Some(CellFlag { kind: Flag::Running, quiet: None, from: rt.log.len(), warn: false });
+        let l = &self.live[conn];
+        l.query.send(Req::Script { run, prog: Box::new(prog), vars: Box::default(), scope, limit, go_on: self.settings.continue_on_error });
+    }
+
     /// Runs statements; with `:name` / `&name` in them, asks for their
     /// values first.
     pub fn dispatch(&mut self, ctx: &egui::Context, tab_id: String, stmts: Vec<Stmt>, conn: &str) {
         let d = self.dialect_of(Some(conn));
         let params = sql::params::names(stmts.iter().map(|s| s.sql.as_str()), d);
         if !params.is_empty() {
-            self.param_ask.push(crate::dialogs::ParamAsk { tab: tab_id, stmts, conn: conn.to_string(), params, d });
+            self.param_ask.push(crate::dialogs::ParamAsk { tab: tab_id, stmts, conn: conn.to_string(), params, d, script: None });
             return;
         }
         self.dispatch_now(ctx, tab_id, stmts, conn);
@@ -1279,7 +1401,7 @@ impl App {
         rt.results.clear();
         rt.shown = Pane::Messages;
         rt.server_err = None;
-        rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now(), stop_asked: None });
+        rt.run = Some(Running { run, conn: conn.to_string(), since: Instant::now(), stop_asked: None, progress: None });
         rt.flag = Some(CellFlag { kind: Flag::Running, quiet: None, from: rt.log.len(), warn: false });
         let l = &self.live[conn];
         l.query.send(Req::Run { run, stmts, limit, go_on: self.settings.continue_on_error });
@@ -1561,6 +1683,21 @@ impl App {
                         rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Run, text: head(&sql, 200), at: Some(at) });
                     }
                 }
+                What::Progress { run, text } => {
+                    if let Some(r) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)).and_then(|rt| rt.run.as_mut()) {
+                        r.progress = Some(text);
+                    }
+                }
+                What::ScriptError { run, line, msg } => {
+                    if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
+                        let text = format!("{} {line}: {msg}", t("Директива, строка", "Directive, line"));
+                        rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Error, text, at: None });
+                        rt.shown = Pane::Messages;
+                        if let Some(f) = rt.flag.as_mut() {
+                            f.warn = true;
+                        }
+                    }
+                }
                 What::Note { run, text } => {
                     if let Some(rt) = self.runs.get(&run).and_then(|t| self.rt.get_mut(t)) {
                         if let Some(f) = rt.flag.as_mut().filter(|_| is_warning(&text)) {
@@ -1636,7 +1773,13 @@ impl App {
                                 rt.log.push(LogLine { err: None, when: now(), kind: LogKind::Ok, text: format!("{} {}{more} · {ms}", table.rows.len(), t("строк", "rows")), at: Some(at) });
                                 let mut v = ResultView::new(sql, table, took, None);
                                 v.arrange(&rt.col_orders);
-                                rt.results.push(v);
+                                v.at = Some(at);
+                                // A loop's next pass: in place of the last one's.
+                                if let Some(old) = rt.results.iter_mut().find(|r| r.at == Some(at) && r.cursor.is_none()) {
+                                    *old = v;
+                                } else {
+                                    rt.results.push(v);
+                                }
                                 if rt.shown == Pane::Messages {
                                     rt.shown = Pane::Result(rt.results.len() - 1);
                                 }

@@ -251,8 +251,13 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
                 }
                 let n = rt.output.len();
                 let label = if n > 0 { format!("🖹 {} ({n})", t("Вывод", "Output")) } else { format!("🖹 {}", t("Вывод", "Output")) };
-                if ui.selectable_label(rt.shown == Pane::Output, label).on_hover_text(t("Что напечатал сервер: DBMS_OUTPUT, RAISE NOTICE…", "What the server printed: DBMS_OUTPUT, RAISE NOTICE…")).clicked() {
+                if ui.selectable_label(rt.shown == Pane::Output, label).on_hover_text(t("Что напечатал сервер (DBMS_OUTPUT, RAISE NOTICE…) и скрипт (@print)", "What the server printed (DBMS_OUTPUT, RAISE NOTICE…) and the script (@print)")).clicked() {
                     rt.shown = Pane::Output;
+                }
+                // A script's: where it's got to.
+                if let Some(p) = rt.run.as_ref().and_then(|r| r.progress.as_ref()) {
+                    ui.separator();
+                    ui.label(RichText::new(format!("⟳ {p}")).monospace().color(ui.visuals().selection.stroke.color));
                 }
             });
         });

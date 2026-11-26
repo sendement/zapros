@@ -26,6 +26,7 @@ mod notebook_ui;
 mod outline_ui;
 mod results;
 mod route;
+mod script;
 mod sched;
 mod search;
 mod themes;

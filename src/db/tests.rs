@@ -1050,3 +1050,54 @@ fn postgres_idle_drop() {
 fn oracle_idle_drop() {
     idle_drop("ZAPROS_TEST_ORA", Kind::Oracle);
 }
+
+/// A script with directives on a real server: tables made in a loop,
+/// values from queries, a loop over system tables, a while asking the
+/// server, dates both ways.
+#[test]
+fn clickhouse_script() {
+    let Some((sp, pw)) = spec("ZAPROS_TEST_CH", Kind::ClickHouse) else { return };
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let w = Worker::spawn(sp, pw.into(), tx, egui::Context::default());
+    let src = "-- @for i in 0 .. 2\n\
+        drop table if exists zs_ev_&i;\n\
+        create table zs_ev_&i (n UInt32) engine = MergeTree order by n;\n\
+        insert into zs_ev_&i select number from numbers(:{(i + 1) * 10});\n\
+        -- @end for\n\
+        -- @set total = 0\n\
+        -- @for t in (select name from system.tables where database = currentDatabase() and name like 'zs_ev_%' order by name)\n\
+        -- @total += (select count() from &t)\n\
+        -- @end for\n\
+        -- @print('total ', total)\n\
+        -- @set k = 0\n\
+        -- @while (select count() from zs_ev_0 where n >= :k) > 5\n\
+        -- @k += 3\n\
+        -- @end while\n\
+        -- @set d = 20261101 | date yyyymmdd\n\
+        -- @print('k ', k, ', next day ', (select toDate(:d) + 1), ', ', d | date dd.mm.yyyy)\n\
+        -- @for i in 0 .. 2\n\
+        drop table zs_ev_&i;\n\
+        -- @end for\n";
+    let prog = crate::script::parse(src, 0, src, crate::sql::Dialect::ClickHouse, false).unwrap();
+    w.send(Req::Script { run: 1, prog: Box::new(prog), vars: Box::default(), scope: None, limit: 500, go_on: false });
+    let mut printed = Vec::new();
+    let mut failed = Vec::new();
+    wait_for(&rx, |w| match w {
+        What::Note { text, .. } => {
+            printed.push(text);
+            None
+        }
+        What::ScriptError { line, msg, .. } => {
+            failed.push(format!("{line}: {msg}"));
+            None
+        }
+        What::Result { outcome: Err(f), sql, .. } => {
+            failed.push(format!("{sql}: {}", f.message));
+            None
+        }
+        What::Finished { run: 1, cancelled } => Some(cancelled),
+        _ => None,
+    });
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(printed, ["total 60", "k 6, next day 2026-11-02, 01.11.2026"]);
+}
