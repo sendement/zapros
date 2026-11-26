@@ -351,7 +351,8 @@ fn date_add(d: NaiveDateTime, unit: Prec, n: i64) -> Option<NaiveDateTime> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Conv {
     Number,
-    Str,
+    /// To text; with a format, a date's (or a date's text) in it.
+    Str(Option<String>),
     List,
     Date(Option<String>),
     /// A collection's: an item added (at its place: 0 the first, -1 the
@@ -375,7 +376,7 @@ pub enum Conv {
 impl Conv {
     /// One that reads a collection (not a value's kind).
     fn on_items(&self) -> bool {
-        !matches!(self, Conv::Number | Conv::Str | Conv::List | Conv::Date(_))
+        !matches!(self, Conv::Number | Conv::Str(_) | Conv::List | Conv::Date(_))
     }
 }
 
@@ -740,36 +741,10 @@ impl P {
         let n = self.name()?.to_ascii_lowercase();
         Ok(match n.as_str() {
             "number" | "num" | "int" => Conv::Number,
-            "string" | "str" | "text" => Conv::Str,
+            // A date (or a date's text) in a format: | string mmyyyy.
+            "string" | "str" | "text" => Conv::Str(self.format(true)),
             "list" => Conv::List,
-            "date" => {
-                // The format: the words, digits and marks up to what can't
-                // be one (an operator, "step", "..", the end).
-                let mut f = String::new();
-                if let Some(T::Str(s)) = self.peek() {
-                    f = s.clone();
-                    self.i += 1;
-                } else {
-                    while let Some(T::Name(w)) = self.peek() {
-                        if w.eq_ignore_ascii_case("step") || w.eq_ignore_ascii_case("and") || w.eq_ignore_ascii_case("or") {
-                            break;
-                        }
-                        f += w;
-                        self.i += 1;
-                        // yyyy-mm-dd, dd.mm.yyyy, hh24:mi: marks glued
-                        // between format words.
-                        let mark = ["-", ".", "/", ":"].into_iter().find(|m| self.is_op(m));
-                        match mark {
-                            Some(m) if self.fmt_glued() => {
-                                f += m;
-                                self.i += 1;
-                            }
-                            _ => break,
-                        }
-                    }
-                }
-                Conv::Date((!f.is_empty()).then_some(f))
-            }
+            "date" => Conv::Date(self.format(false)),
             "push" | "append" | "add" => {
                 let x = self.arg()?;
                 let at = if self.eat_word("at") { Some(Box::new(self.arg()?)) } else { None };
@@ -798,6 +773,39 @@ impl P {
             "join" => Conv::Join(if self.arg_follows() { Some(Box::new(self.arg()?)) } else { None }),
             other => return Err(format!("no \"| {other}\" (number, string, list, date, push, pop, remove, map, filter, sort, reverse, unique, join)")),
         })
+    }
+
+    /// A date format after "| date" / "| string": the words, digits and
+    /// marks up to what can't be one (an operator, "step", "..", the end).
+    /// `strict`: only words made of format tokens (yyyy, mm…).
+    fn format(&mut self, strict: bool) -> Option<String> {
+        let mut f = String::new();
+        if let Some(T::Str(s)) = self.peek() {
+            f = s.clone();
+            self.i += 1;
+        } else {
+            while let Some(T::Name(w)) = self.peek() {
+                if ["step", "and", "or", "in", "not", "at", "by", "desc", "asc"].iter().any(|x| w.eq_ignore_ascii_case(x)) {
+                    break;
+                }
+                if strict && fmt_tokens(w).iter().any(|t| matches!(t, Fmt::Lit(_))) {
+                    break;
+                }
+                f += w;
+                self.i += 1;
+                // yyyy-mm-dd, dd.mm.yyyy, hh24:mi: marks glued between
+                // format words.
+                let mark = ["-", ".", "/", ":"].into_iter().find(|m| self.is_op(m));
+                match mark {
+                    Some(m) if self.fmt_glued() => {
+                        f += m;
+                        self.i += 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        (!f.is_empty()).then_some(f)
     }
 
     /// The word after a "-" is a date format's piece.
@@ -1202,7 +1210,8 @@ pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, 
             continue;
         }
         let start = i;
-        if fmt_next && c != '\'' && c != '"' {
+        let next_word: String = s[i..rest_end].chars().take_while(|c| c.is_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        if fmt_next && c != '\'' && c != '"' && !["step", "and", "or", "in", "not", "at", "by", "desc", "asc"].contains(&next_word.as_str()) {
             while i < rest_end && !s[i..].starts_with(char::is_whitespace) {
                 i += s[i..].chars().next().unwrap().len_utf8();
             }
@@ -1227,7 +1236,7 @@ pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, 
             let w = s[start..i].to_ascii_lowercase();
             let call = s[i..rest_end].trim_start().starts_with('(');
             let p = if prev_pipe {
-                fmt_next = w == "date";
+                fmt_next = matches!(w.as_str(), "date" | "string" | "str" | "text");
                 kind
             } else if call && FUNCTIONS.contains(&w.as_str()) {
                 Paint::Func
@@ -2173,9 +2182,18 @@ fn convert(v: Value, c: &Conv) -> Result<Value, String> {
                 }
             }
         },
-        Conv::Str => match v {
+        Conv::Str(None) => match v {
             Value::Null => Value::Null,
             v => Value::Str(v.text()?),
+        },
+        Conv::Str(Some(f)) => match v {
+            Value::Null => Value::Null,
+            Value::Date(d, _) => Value::Str(date_fmt(&d, f)),
+            v => {
+                let t = v.text()?;
+                let (d, _) = date_iso(&t).map_err(|_| format!("| string {f}: '{t}' isn't a date (read it first: | date yyyymm)"))?;
+                Value::Str(date_fmt(&d, f))
+            }
         },
         Conv::List => match v {
             Value::List(_) => v,
@@ -2771,6 +2789,13 @@ mod tests {
         assert!(eval_plain("'2026-11-01' | date | date dd.mm.yyyy hh24:mi", &Vars::default(), Dialect::ClickHouse).is_err(), "a space in a format: quoted");
         assert_eq!(v("'2026-11-01 10:30' | date | date 'dd.mm.yyyy hh24:mi'"), Value::Str("01.11.2026 10:30".into()));
         assert_eq!(v("'01/11/2026' | date dd/mm/yyyy").shown(), "2026-11-01");
+        // A date to text by a mask.
+        assert_eq!(v("202611 | date yyyymm | string mmyyyy"), Value::Str("112026".into()));
+        assert_eq!(v("'2026-11-05' | string dd.mm.yyyy"), Value::Str("05.11.2026".into()));
+        assert_eq!(v("'2026-11-05 10:30' | date | string 'dd.mm.yyyy hh24:mi'"), Value::Str("05.11.2026 10:30".into()));
+        assert_eq!(v("202611 | string"), Value::Str("202611".into()));
+        assert_eq!(v("1 | string in ['1']"), Value::Bool(true));
+        assert!(eval_plain("'abc' | string yyyy", &Vars::default(), Dialect::ClickHouse).unwrap_err().contains("isn't a date"));
         assert_eq!(v("[1, 'a', {x: null}]").shown(), "[1, \"a\", {\"x\": null}]");
         assert!(eval_plain("1 +", &Vars::default(), Dialect::ClickHouse).is_err());
         assert!(eval_plain("nope", &Vars::default(), Dialect::ClickHouse).unwrap_err().contains("nope"));
@@ -3000,6 +3025,7 @@ mod tests {
         assert_eq!(show("-- @end", &mut open), "--:Mark @end:Cond");
         assert_eq!(show("-- @end for", &mut open), "--:Mark @end for:Loop");
         assert_eq!(show("-- @d = (select max(d) from t) | date yyyy-mm", &mut open), "--:Mark @:Var d:Name =:Op (:Op select max(d) from t:Query ):Op |:Op date:Var yyyy-mm:Str");
+        assert_eq!(show("-- @v = d | string mmyyyy", &mut open), "--:Mark @:Var v:Name =:Op d:Name |:Op string:Var mmyyyy:Str");
         assert_eq!(show("-- @pause 10s", &mut open), "--:Mark @pause:Misc 10s:Num");
         assert!(paint("-- @author me", &mut open).is_none());
         assert_eq!(shape("-- @else if x"), Some(Shape::Mid));

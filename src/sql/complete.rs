@@ -975,7 +975,7 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
     let mut items: Vec<Item> = Vec::new();
     let word = |w: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: w.to_string(), kind: Kind::Keyword, detail: t(ru, en).into() };
     if pipe {
-        items.extend([word("number", "в число", "to a number"), word("string", "в строку", "to a string"), word("list", "в список", "to a list"), word("date", "в дату / дату в текст: | date yyyymmdd", "to a date / a date to text: | date yyyymmdd")]);
+        items.extend([word("number", "в число", "to a number"), word("string", "в строку; дату по маске: | string mmyyyy", "to a string; a date by a mask: | string mmyyyy"), word("list", "в список", "to a list"), word("date", "в дату / дату в текст: | date yyyymmdd", "to a date / a date to text: | date yyyymmdd")]);
         let op = |w: &str, ins: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: ins.to_string(), kind: Kind::Function, detail: t(ru, en).into() };
         items.extend([
             op("push", "push $0", "добавить в конец; push x at 0 — в начало", "add at the end; push x at 0 — at the start"),

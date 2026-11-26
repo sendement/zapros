@@ -139,13 +139,16 @@ reads as one; dates compare as dates.
 ```
 x | number                 '12' → 12
 x | string                 12 → '12'
+x | string mmyyyy          a date (or a date's text) → text by the mask: '112026'
 x | date                   '2026-11-01' (ISO, with or without time) → a date
 x | date yyyymm            202611 / '202611' read with the format → a date
 x | list                   a single value → a list of one
 ```
 
 The same pipe formats a value where it's used (§5): a date piped to
-`date yyyymmdd` while it's already a date becomes text in that format.
+`date yyyymmdd` while it's already a date becomes text in that format —
+or, saying so, `| string yyyymmdd` (`202611 | date yyyymm | string
+mmyyyy` → `'112026'`).
 
 Date format tokens (Oracle style, any case): `yyyy`, `yy`, `mm`, `dd`,
 `hh24`, `hh`, `mi`, `ss`, `q` (quarter), `ddd` (day of year); anything else
@@ -363,7 +366,7 @@ add        = mul { ( "+" | "-" ) mul }
 mul        = unary { ( "*" | "/" | "%" ) unary }
 unary      = [ "-" ] piped
 piped      = post { "|" conv }
-conv       = "number" | "string" | "list" | "date" [ format ]
+conv       = "number" | "string" [ format ] | "list" | "date" [ format ]
            | "push" arg [ "at" arg ] | "pop" [ arg ] | "remove" arg
            | "map" fn | "filter" fn | "sort" [ "by" fn ] [ "desc" | "asc" ]
            | "reverse" | "unique" | "join" [ arg ]
