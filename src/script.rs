@@ -2175,17 +2175,20 @@ impl Run<'_> {
     }
 }
 
-/// A date's `.start`, `.end` (the next period's start), `.year`…
+/// A date's `.start`, `.end` (the next period's start), `.last` (its last
+/// second), `.year`…
 fn date_field(dt: &NaiveDateTime, p: Prec, name: &str) -> Result<Value, String> {
     Ok(match name.to_ascii_lowercase().as_str() {
         "start" => Value::Date(*dt, p),
         "end" => Value::Date(date_add(*dt, p, 1).ok_or("a date out of range")?, p),
+        // Its last second (for BETWEEN; fractions past it are left out).
+        "last" => Value::Date(date_add(date_add(*dt, p, 1).ok_or("a date out of range")?, Prec::Second, -1).ok_or("a date out of range")?, Prec::Second),
         "year" => Value::Int(dt.year() as i64),
         "quarter" => Value::Int(((dt.month() - 1) / 3 + 1) as i64),
         "month" => Value::Pad(dt.month() as i64, 2),
         "day" => Value::Pad(dt.day() as i64, 2),
         "hour" => Value::Pad(dt.hour() as i64, 2),
-        _ => return Err(format!("a date has no \".{name}\" (start, end, year, quarter, month, day, hour)")),
+        _ => return Err(format!("a date has no \".{name}\" (start, end, last, year, quarter, month, day, hour)")),
     })
 }
 
@@ -3187,6 +3190,8 @@ mod tests {
         let f = |e: &str| eval_plain(e, &vs, Dialect::ClickHouse).unwrap().text().unwrap();
         assert_eq!((f("m.start"), f("m.end"), f("m.year"), f("m.month"), f("m.quarter")), ("2026-11-01".into(), "2026-12-01".into(), "2026".into(), "11".into(), "4".into()));
         assert_eq!(put("where dt >= :{m.start} and dt < :{m.end}", &vs, Dialect::Oracle).unwrap(), "where dt >= DATE '2026-11-01' and dt < DATE '2026-12-01'");
+        assert_eq!(f("m.last"), "2026-11-30 23:59:59");
+        assert_eq!(put("between :{m.start} and :{m.last}", &vs, Dialect::ClickHouse).unwrap(), "between '2026-11-01' and '2026-11-30 23:59:59'");
         // A loop's items converted as they're named.
         let mut h = Fake::default();
         go("-- @for m as yyyymm in 2026 | range month\nselect &m;\n-- @end for", &mut h).unwrap();

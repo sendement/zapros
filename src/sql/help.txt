@@ -1522,8 +1522,8 @@ ex: SELECT count() FROM events SETTINGS max_threads = 4;
 @ @for, @endfor | * | k | directive
 title: @for … in … | @for … in …
 sig: -- @for i in 1..10 [step n] | -- @for x in список | -- @for k, v in словарь | -- @for r in (select …) | -- @for m as yyyymm in 2026 | range month … -- @end for
-ru: Цикл: SQL до «-- @end for» выполняется для каждого значения. Диапазон включает оба конца (01..16 — с нулями, дни: step day), список, словарь (ключ, значение) или строки запроса. «| range month» режет период даты на части (у части есть .start и .end), «as маска» переводит каждое значение в текст по маске.
-en: A loop: the SQL down to "-- @end for" runs for each value. A range includes both ends (01..16 keeps zeros, days: step day), a list, a dictionary (key, value) or a query's rows. "| range month" cuts a date's period into parts (each has .start and .end), "as mask" turns each value into text by the mask.
+ru: Цикл: SQL до «-- @end for» выполняется для каждого значения. Диапазон включает оба конца (01..16 — с нулями, дни: step day), список, словарь (ключ, значение) или строки запроса. «| range month» режет период даты на части (у части есть .start, .end и .last), «as маска» переводит каждое значение в текст по маске.
+en: A loop: the SQL down to "-- @end for" runs for each value. A range includes both ends (01..16 keeps zeros, days: step day), a list, a dictionary (key, value) or a query's rows. "| range month" cuts a date's period into parts (each has .start, .end and .last), "as mask" turns each value into text by the mask.
 ex: -- @for i in 01..16
 ex: insert into events_all select * from events_&i;
 ex: -- @end for

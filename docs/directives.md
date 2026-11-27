@@ -184,11 +184,14 @@ of the unit's precision, so each is a period of its own:
 
 ```
 m.start  m.end             the period's first moment and the next one's (2026-11-01, 2026-12-01)
+m.last                     its last second (2026-11-30 23:59:59), for BETWEEN
 m.year  m.quarter  m.month  m.day  m.hour     its parts (month, day, hour with two digits)
 ```
 
 `where dt >= :{m.start} and dt < :{m.end}` takes one month of rows with no
-date arithmetic.
+date arithmetic, fractions of a second in the last day too.
+`between :{m.start} and :{m.last}` is the same for columns without
+fractions (`23:59:59.5` falls past `.last`).
 
 ### Collections: `| push`, `| pop`, `| map`…
 
