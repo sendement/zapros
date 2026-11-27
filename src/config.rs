@@ -192,6 +192,8 @@ pub struct Settings {
     pub auto_pairs: bool,
     /// SQL inside strings (dynamic SQL, $$ bodies) coloured as SQL.
     pub embedded_sql: bool,
+    /// The "-- " before a script's directive hidden (shown on the caret's line).
+    pub hide_directive_dashes: bool,
     pub format: FmtOptions,
     /// Keys set instead of the usual ones (by command).
     pub keys: crate::keys::Keymap,
@@ -273,6 +275,7 @@ impl Default for Settings {
             confirm_unsafe: true,
             autosave_secs: 3,
             embedded_sql: true,
+            hide_directive_dashes: true,
             close_always: false,
             scheme: String::new(),
             backdrop: crate::themes::Backdrop::default(),

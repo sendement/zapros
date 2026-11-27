@@ -447,6 +447,10 @@ In SQL text:
   its block's colour. Variables as parameters, strings, numbers and a
   query's SQL as usual; `&x`, `&{…}`, `:{…}` in the SQL as parameters (in
   strings too). Each colour is set in Settings → Colours.
+- **`-- ` hidden**: off the caret's line a directive shows as `@for i in
+  1..3`, the `-- ` before it laid out with no width; on the caret's line
+  it's there to edit. The text itself keeps it (copied, saved, run as a
+  comment). Settings → Colours has a box to show it always.
 - **Rainbow bands and frames**: a block (`@for` … `@end for`) is a
   construct like BEGIN … END: a band under the indent of what's inside, a
   frame round it, folded by its first line.
@@ -457,8 +461,9 @@ In SQL text:
 - **Hints**: after `-- @` the directives (`for`, `if`, `match` as blocks
   with their `@end`; the open block's `@end …` first); further on the
   script's variables, `len()` / `upper()` / …, `step` and the date units,
-  the conversions after `|`, `error continue | stop` after `@on`; in the
-  SQL the variables after `&` and `:`.
+  the conversions after `|`, `error continue | stop` after `@on`; inside a
+  directive's `(select …)` the usual SQL hints (tables, columns, aliases);
+  in the SQL the variables after `&` and `:`.
 - **Help**: Ctrl+click on a directive's word shows what it does, with an
   example.
 - The checker doesn't call a name made with `&x` (`events_&i`) unknown.

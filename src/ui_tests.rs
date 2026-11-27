@@ -3884,6 +3884,33 @@ fn script_loop_stops() {
 }
 
 #[test]
+fn directive_dashes_hidden_and_query_hinted() {
+    let script = "-- @set n = (select count(*) from orders o where o.)\n-- @for i in 1..n\nselect :i;\n-- @end for\n";
+    let (mut h, _g) = harness("dir-dashes", script, false);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    // Away from the directives: "-- " hidden; the "@for" sits at the line's start.
+    focus_editor(&mut h, script.find("select :i").unwrap());
+    h.step();
+    shot(&mut h, "dashes-hidden");
+    // On a directive's query: SQL hints (the alias's columns).
+    let dot = script.find("o.)").unwrap() + 2;
+    focus_editor(&mut h, dot);
+    key(&mut h, egui::Key::Space, egui::Modifiers::COMMAND);
+    h.step();
+    let labels: Vec<String> = h.state().rt[&id].ed.popup.as_ref().map(|p| p.hints.items.iter().map(|i| i.label.clone()).collect()).unwrap_or_default();
+    assert!(labels.contains(&"total".to_string()), "{labels:?}");
+    shot(&mut h, "dashes-shown-query-hints");
+    // The text itself is untouched.
+    assert_eq!(h.state().tab().text, script);
+    // Hidden: next to no width.
+    let d = crate::editor::directive_dashes(script, Some(script.find("select :i").unwrap()));
+    assert_eq!(d.iter().map(|r| &script[r.clone()]).collect::<Vec<_>>(), ["-- ", "-- ", "-- "]);
+    assert_eq!(crate::editor::directive_dashes(script, Some(3)).len(), 2, "the caret's line shown");
+    assert!(crate::editor::directive_dashes("-- @author me\n-- plain\n", None).is_empty());
+}
+
+#[test]
 fn directives_coloured_shot() {
     let script = "-- @set shards = 01..03 -- each day's table\n-- @set day = '20261101' | date yyyymmdd\n-- @for i in shards\n    -- @if i > 1\n        insert into events_&i\n        select * from events_00 where d = :day and n < :{i * 10};\n    -- @else\n        select /*+ index(e events_d_idx) leading(e) */ count(*) from events_&i e;\n    -- @end if\n    -- @print(`shard ${i}`)\n-- @end for\n";
     let (mut h, _g) = harness("directives-shot", script, false);

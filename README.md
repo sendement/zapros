@@ -253,8 +253,10 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   In SQL `:x` puts a value in, `&x` text as it is (`events_&i`,
   `&{d | date yyyymmdd}`). Progress by the results, Stop ends the loop; a
   notebook's cells share their variables. In the editor directives have
-  their own colours (loops, conditions, variables — set in Colours, the
-  `--` faint), rainbow bands and frames for their blocks, indents by Enter
+  their own colours (loops, conditions, variables — set in Colours), the
+  `-- ` before them hidden but on the caret's line (`@for i in 1..3` reads
+  as code; a box in Colours shows it), SQL hints inside a directive's
+  `(select …)`, rainbow bands and frames for their blocks, indents by Enter
   and by the formatter, hints after `-- @` and for variables after `&` /
   `:`, help on Ctrl+click. Tables named with `&x` (`from bis.calls_&m c`)
   get their columns hinted and open by Ctrl+click: the name is worked

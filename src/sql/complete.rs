@@ -671,6 +671,9 @@ pub fn star_at(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Rela
 /// parameter, in INSERT INTO t ( its columns.
 pub fn ghost(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine]) -> Option<String> {
     let at = at.min(src.len());
+    if let Some(q) = src.contains('@').then(|| directive_query(src, at)).flatten() {
+        return ghost_here(&src[q.clone()], at - q.start, d, rels, lent, routines);
+    }
     // A script's &x put in first (as for hints).
     if let Some((text, map)) = src.is_char_boundary(at).then(|| crate::script::resolved(src, at, d)).flatten() {
         if let Some(delta) = shift(&map, at) {
@@ -1043,8 +1046,40 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
 
 /// Hints at `at` (None inside strings and comments, or with nothing to say).
 /// (`lent`: relations from elsewhere, a notebook's CTEs from cells above.)
+/// The query of a directive (`-- @set n = (select …)`) that `at` is in:
+/// its text's range.
+fn directive_query(src: &str, at: usize) -> Option<Range<usize>> {
+    if !src.is_char_boundary(at) {
+        return None;
+    }
+    let ls = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let le = src[at..].find('\n').map_or(src.len(), |i| at + i);
+    let line = &src[ls..le];
+    let lead = line.len() - line.trim_start().len();
+    let comment = line[lead..].trim_end_matches('\r');
+    if !comment.starts_with("--") {
+        return None;
+    }
+    let base = ls + lead;
+    let found = crate::script::paint(comment, &mut Vec::new())?
+        .into_iter()
+        .find(|(r, p)| *p == crate::script::Paint::Query && base + r.start <= at && at <= base + r.end)
+        .map(|(r, _)| base + r.start..base + r.end);
+    // A query being started: "(sel".
+    found.or_else(|| {
+        let open = src[base..at].rfind('(')? + base + 1;
+        let w = src[open..at].trim_start().to_ascii_lowercase();
+        (!w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic()) && ("select".starts_with(&w) || "with".starts_with(&w))).then(|| open..at)
+    })
+}
+
 pub fn hints(src: &str, at: usize, d: Dialect, rels: &[Relation], lent: &[Relation], routines: &[Routine], case: Case, forced: bool, quote_schemas: bool) -> Option<Hints> {
     let at = at.min(src.len());
+    // In a directive's query: the query's own hints.
+    if let Some(q) = src.contains('@').then(|| directive_query(src, at)).flatten() {
+        let h = hints_here(&src[q.clone()], at - q.start, d, rels, lent, routines, case, forced, quote_schemas)?;
+        return Some(Hints { range: q.start + h.range.start..q.start + h.range.end, items: h.items });
+    }
     if src.contains('@') {
         if let Some(h) = directive_hints(src, at, d, forced) {
             return Some(h);
@@ -1506,6 +1541,11 @@ mod tests {
         assert_eq!(labels, ["error"]);
         // A plain comment: none.
         assert!(h("-- about fo‸").is_none());
+        // A directive's query: SQL hints there.
+        let (r, labels, _) = h("-- @set n = (sel‸)").unwrap();
+        assert!(r == (13..16) && labels.contains(&"SELECT".to_string()), "{r:?} {labels:?}");
+        let (_, labels, _) = h("-- @set n = (select count(*) fr‸)").unwrap();
+        assert!(labels.contains(&"FROM".to_string()), "{labels:?}");
     }
 
     #[test]
@@ -1539,6 +1579,9 @@ mod tests {
         assert_eq!(&src[back(&map, w, false)..back(&map, w + 5, true)], "WHERE");
         let inside = t.find("062026").unwrap();
         assert_eq!(&src[back(&map, inside, false)..back(&map, inside + 6, true)], "&call_mnth");
+        // Columns in a directive's query.
+        let (word, labels) = h("-- @set n = (select c.ms‸ from bis.calls_062026 c)").unwrap();
+        assert_eq!((word.as_str(), labels[0].as_str()), ("ms", "MSISDN"));
         // The ghost too.
         let src = format!("{head}SELECT c.call_id FROM bis.CALLS_&call_mnth c WHERE c.");
         let _ = ghost(&src, src.len(), Dialect::Oracle, &r, &[], &[]);

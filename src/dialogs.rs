@@ -1515,6 +1515,7 @@ fn settings(app: &mut App, ctx: &egui::Context) {
                 let dark = ui.visuals().dark_mode;
                 ui.label(RichText::new(if dark { t("Палитра тёмной темы", "Dark theme palette") } else { t("Палитра светлой темы", "Light theme palette") }).strong());
                 ui.checkbox(&mut s.embedded_sql, t("SQL внутри строк подсвечивать как SQL (динамический SQL, тела $$)", "Colour SQL inside strings as SQL (dynamic SQL, $$ bodies)"));
+                ui.checkbox(&mut s.hide_directive_dashes, t("Прятать «-- » перед директивами (-- @for → @for; видно на строке с кареткой)", "Hide the \"-- \" before directives (-- @for → @for; shown on the caret's line)"));
                 let p = if dark { &mut s.dark } else { &mut s.light };
                 palette_ui(ui, p);
                 if ui.button(t("Вернуть по умолчанию", "Reset to defaults")).clicked() {

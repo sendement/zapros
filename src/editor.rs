@@ -444,7 +444,49 @@ struct Found {
 /// `own_bands`: the bands come back to be painted by the caller (as text
 /// backgrounds egui rounds each piece's edges on its own: hairline gaps
 /// between neighbours at most scales).
+/// The "-- " before each directive (its own colour's "--" and the spaces
+/// up to the "@"), but on the line holding `caret`.
+pub fn directive_dashes(text: &str, caret: Option<usize>) -> Vec<Range<usize>> {
+    if !text.contains('@') {
+        return Vec::new();
+    }
+    let caret_line = caret.map(|c| {
+        let c = floor(text, c.min(text.len()));
+        let a = text[..c].rfind('\n').map_or(0, |i| i + 1);
+        let z = text[c..].find('\n').map_or(text.len(), |i| c + i);
+        a..z
+    });
+    let mut out = Vec::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let lead = line.len() - line.trim_start().len();
+        let body = &line[lead..];
+        if !body.starts_with("--") {
+            continue;
+        }
+        let gap = body[2..].len() - body[2..].trim_start_matches([' ', '\t']).len();
+        let a = start + lead;
+        if !body[2 + gap..].starts_with('@') || caret_line.as_ref().is_some_and(|l| l.start <= a && a <= l.end) {
+            continue;
+        }
+        // A directive (not "-- @author" and the like).
+        let comment = body.trim_end_matches(['\n', '\r']);
+        if crate::script::paint(comment, &mut Vec::new()).is_none() {
+            continue;
+        }
+        out.push(a..a + 2 + gap);
+    }
+    out
+}
+
 fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool, hidden: &[Range<usize>], own_bands: bool) -> (LayoutJob, Found) {
+    layout_veiled(text, cx, pair, font, mono_bold, hidden, &[], own_bands)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_veiled(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, mono_bold: bool, hidden: &[Range<usize>], veiled: &[Range<usize>], own_bands: bool) -> (LayoutJob, Found) {
     use crate::sql::embed::Class;
     let pal: &Palette = if cx.dark { &cx.settings.dark } else { &cx.settings.light };
     // Every byte's class; SQL inside strings (dynamic SQL, $$ bodies) too.
@@ -545,7 +587,7 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         cuts.push(floor(text, r.start));
         cuts.push(floor(text, r.end));
     }
-    for r in hidden {
+    for r in hidden.iter().chain(veiled) {
         cuts.push(r.start.min(text.len()));
         cuts.push(r.end.min(text.len()));
     }
@@ -556,7 +598,11 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
     let mut gone = TextFormat::simple(FontId::monospace(0.5), Color32::TRANSPARENT);
     gone.line_height = Some(0.0);
     gone.expand_bg = 0.0;
+    // A directive's "-- ": next to no width, the line's height kept.
+    let mut veil = TextFormat::simple(FontId::monospace(0.5), Color32::TRANSPARENT);
+    veil.expand_bg = 0.0;
     let mut hi = 0;
+    let mut vi = 0;
     let mut job = LayoutJob { text: text.to_string(), ..Default::default() };
     job.wrap.max_width = f32::INFINITY;
     let pair_bg = if cx.dark { Color32::from_rgba_unmultiplied(120, 160, 255, 70) } else { Color32::from_rgba_unmultiplied(80, 120, 255, 60) };
@@ -575,6 +621,13 @@ fn layout_blocks(text: &str, cx: &Ctx, pair: Option<(usize, usize)>, font: f32, 
         }
         if hidden.get(hi).is_some_and(|r| r.start <= a && b <= r.end) {
             job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: gone.clone() });
+            continue;
+        }
+        while vi < veiled.len() && veiled[vi].end <= a {
+            vi += 1;
+        }
+        if veiled.get(vi).is_some_and(|r| r.start <= a && b <= r.end) {
+            job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(b), format: veil.clone() });
             continue;
         }
         let mut f = spans.get(ti).map(&fmt_of).unwrap_or_else(|| TextFormat::simple(mono.clone(), rgb(pal.text)));
@@ -1503,6 +1556,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
             ctx.request_repaint();
         }
     }
+    // A directive's "-- " shows on the caret's line (while it's being typed in).
+    let caret_shown = cursor_now.filter(|_| ctx.memory(|m| m.has_focus(id)));
     // The text as laid out (egui's own copy has the selection's glyphs
     // recoloured): the selected part is drawn again from it.
     let mut plain: Option<Arc<egui::Galley>> = None;
@@ -1511,12 +1566,15 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut String, st: &mut EditorS
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // (Folds made for another text don't fit an edited one.)
         let hidden: Vec<Range<usize>> = if s.len() == text_len { hidden.clone() } else { Vec::new() };
-        (key, s, &hidden).hash(&mut h);
+        // (The caret's line as of the text before an edit: the line typed
+        // in stays shown.)
+        let veiled: Vec<Range<usize>> = if cx.settings.hide_directive_dashes { directive_dashes(s, caret_shown) } else { Vec::new() };
+        (key, s, &hidden, &veiled).hash(&mut h);
         let k = h.finish();
         let job = match &st.job {
             Some((kk, j)) if *kk == k => j.clone(),
             _ => {
-                let (j, found) = layout_blocks(s, cx, pair, font, mono_bold, &hidden, true);
+                let (j, found) = layout_veiled(s, cx, pair, font, mono_bold, &hidden, &veiled, true);
                 st.job = Some((k, j.clone()));
                 st.blocks = found.blocks;
                 st.foldable = found.foldable;
