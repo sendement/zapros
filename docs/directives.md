@@ -62,7 +62,7 @@ A line counts as a directive only when its first word is one (`set`,
 | boolean | `true`, `false` | |
 | null | `null` | |
 | date | `202611 \| date yyyymm`, `'2026-11-01' \| date` | see §4; a date keeps the precision it was read with |
-| list | `1, 2, 3` · `[1, 2, 3]` · `(1, 2, 3)` · `{1, 2, 3}` | all four the same; elements of any kind |
+| list | `1, 2, 3` · `[1, 2, 3]` · `(1, 2, 3)` · `{1, 2, 3}` | all four the same; elements of any kind; `[]` is an empty one |
 | dictionary | `{"key1": 1, "key2": 2}` · `{key1: 1}` | `{…}` with `:` inside is a dictionary; `{}` is an empty one |
 | query | `(select …)` / `(with … select …)` | runs on the tab's connection, see below |
 
@@ -143,6 +143,7 @@ x | string mmyyyy          a date (or a date's text) → text by the mask: '1120
 x | date                   '2026-11-01' (ISO, with or without time) → a date
 x | date yyyymm            202611 / '202611' read with the format → a date
 x | list                   a single value → a list of one
+d | range month            a date's period cut into months: a list of dates
 ```
 
 The same pipe formats a value where it's used (§5): a date piped to
@@ -158,6 +159,36 @@ quoted (`| date 'dd.mm.yyyy hh24:mi'`).
 
 A date remembers its precision: `202611 | date yyyymm` is the month
 2026-11; used without a format it prints as `2026-11-01`.
+
+**Numbers aren't guessed to be dates**, but for a year: `2026` (four
+digits) is the year 2026 wherever a date is wanted; `202611` or `20261105`
+are numbers until read with a format (`| date yyyymm`), and saying
+otherwise is an error that names the format to add. Text in the usual
+form (`'2026'`, `'2026-11'`, `'2026-11-05'`, `'2026-11-05 10:30'`) is
+read by itself.
+
+### A period cut: `| range`
+
+```
+2026 | range month                        12 months of 2026
+2026 | range day                          every day of the year
+202611 | date yyyymm | range day          the days of November
+20261105 | date yyyymmdd | range 6 hour   00:00, 06:00, 12:00, 18:00
+'2026-11' | range week                    weeks from the 1st (the last one may start in it only)
+[2025, 2026] | range quarter              a list: each item cut, all in one list
+```
+
+`range` takes `second`, `minute`, `hour`, `day`, `week`, `month`,
+`quarter`, `year`, with a count before it if wanted. The items are dates
+of the unit's precision, so each is a period of its own:
+
+```
+m.start  m.end             the period's first moment and the next one's (2026-11-01, 2026-12-01)
+m.year  m.quarter  m.month  m.day  m.hour     its parts (month, day, hour with two digits)
+```
+
+`where dt >= :{m.start} and dt < :{m.end}` takes one month of rows with no
+date arithmetic.
 
 ### Collections: `| push`, `| pop`, `| map`…
 
@@ -237,9 +268,17 @@ go in strings. Neither goes in comments.
 -- @for t in (select database, name from system.tables where name like 'ev_%')
 -- @for n, x in ls                 -- with the pass number (from 0)
 -- @for k, v in dk                 -- a dictionary: key and value
+-- @for m in 2026 | range month    -- the months of a year (§4)
+-- @for m as yyyymm in 2026 | range month     -- each one as text: '202601' … '202612'
+-- @for d as date yyyymm in 202601 .. 202612  -- numbers read as dates
 …
 -- @end for
 ```
+
+- **`as`** converts each item as it's given to the loop's variable: a bare
+  mask is `| string mask` (`as yyyymm`, `as 'dd.mm.yyyy'`), or any
+  conversion of §4 (`as date yyyymm`, `as number`, `as string`). With two
+  names (`k, v`) it's the value's.
 
 - **Date ranges.** `step` takes `minute`, `hour`, `day`, `week`, `month`,
   `quarter`, `year`, with a count before it if wanted (`step 2 hour`). A
@@ -347,10 +386,10 @@ match      = "match" expr
 case       = "case" ( range | expr { "," expr } )
 set        = ("set" | "var") name "=" expr
 assign     = name ( ("=" | "+=" | "-=" | "*=" | "/=") expr | "|=" conv { "|" conv } | "++" | "--" )
-for        = "for" name [ "," name ] "in" source
+for        = "for" name [ "," name ] [ "as" ( format | conv ) ] "in" source
 source     = range | expr
 range      = expr ".." expr [ pipe ] [ "step" [ number ] [ unit ] ]
-unit       = "minute" | "hour" | "day" | "week" | "month" | "quarter" | "year"
+unit       = "second" | "minute" | "hour" | "day" | "week" | "month" | "quarter" | "year"
 while      = "while" expr
 end        = "end" [ "for" | "while" | "if" | "match" ]
 print      = "print" "(" [ expr { "," expr } ] ")"
@@ -369,7 +408,7 @@ piped      = post { "|" conv }
 conv       = "number" | "string" [ format ] | "list" | "date" [ format ]
            | "push" arg [ "at" arg ] | "pop" [ arg ] | "remove" arg
            | "map" fn | "filter" fn | "sort" [ "by" fn ] [ "desc" | "asc" ]
-           | "reverse" | "unique" | "join" [ arg ]
+           | "reverse" | "unique" | "join" [ arg ] | "range" [ number ] unit
 arg        = expr                              (a "|" ends it, unless in brackets)
 fn         = [ name "=>" ] arg                 (without a name: "it")
 post       = atom { "." name | "[" expr "]" | "(" args ")" }

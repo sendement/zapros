@@ -981,7 +981,7 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
     // Further on: words of the place, variables, functions.
     let words: Vec<String> = src[ls..start].split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
     let last = words.last().map(String::as_str).unwrap_or("");
-    let first = words.get(1).map(String::as_str).unwrap_or("");
+    let first = words.first().map(String::as_str).unwrap_or("");
     let pipe = src[ls..start].trim_end().ends_with('|') || src[ls..start].trim_end().ends_with("|=");
     let mut items: Vec<Item> = Vec::new();
     let word = |w: &str, ru: &'static str, en: &'static str| Item { label: w.to_string(), insert: w.to_string(), kind: Kind::Keyword, detail: t(ru, en).into() };
@@ -998,8 +998,9 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
             op("reverse", "reverse", "в обратном порядке", "in reverse"),
             op("unique", "unique", "без повторов", "without repeats"),
             op("join", "join $0", "в текст через ', ' или join '-'", "to text with ', ' or join '-'"),
+            op("range", "range $0", "период даты по частям: 2026 | range month", "a date's period in parts: 2026 | range month"),
         ]);
-    } else if first == "end" && words.len() == 2 {
+    } else if first == "end" && words.len() == 1 {
         items.extend(["for", "while", "if", "match"].map(|w| word(w, "", "")));
     } else if first == "on" {
         if last == "on" {
@@ -1008,11 +1009,16 @@ fn directive_hints(src: &str, at: usize, d: Dialect, forced: bool) -> Option<Hin
             items.extend([word("continue", "дальше после ошибки", "go on after an error"), word("stop", "стоп на ошибке", "stop at an error")]);
         }
     } else {
-        if last == "step" || words.iter().any(|w| w == "step") && last.chars().all(|c| c.is_ascii_digit()) {
+        if last == "range" || words.iter().any(|w| w == "range") && last.chars().all(|c| c.is_ascii_digit()) {
+            items.extend(["second", "minute", "hour", "day", "week", "month", "quarter", "year"].map(|w| word(w, "на что разбить период", "what to cut the period into")));
+        } else if last == "step" || words.iter().any(|w| w == "step") && last.chars().all(|c| c.is_ascii_digit()) {
             items.extend(["second", "minute", "hour", "day", "week", "month", "quarter", "year"].map(|w| word(w, "шаг диапазона дат", "a date range's step")));
         }
-        if first == "for" && !words.iter().any(|w| w == "in") && words.len() >= 3 {
+        if first == "for" && !words.iter().any(|w| w == "in") && words.len() >= 2 {
             items.push(word("in", "", ""));
+            if !words.iter().any(|w| w == "as") {
+                items.push(word("as", "каждый элемент по маске: as yyyymm, as date yyyymm", "each item by a mask: as yyyymm, as date yyyymm"));
+            }
         }
         items.extend(var_items(Kind::Param));
         if words.iter().any(|w| matches!(w.as_str(), "map" | "filter" | "sort" | "where")) {
@@ -1486,6 +1492,18 @@ mod tests {
         assert!(labels.is_empty() || labels.contains(&"day".to_string()));
         let (_, labels, _) = h("-- @x = y | d‸").unwrap();
         assert_eq!(labels, ["date"]);
+        let (_, labels, _) = h("-- @x = y | ra‸").unwrap();
+        assert_eq!(labels, ["range"]);
+        let (_, labels, _) = h("-- @for m in 2026 | range mo‸").unwrap();
+        assert_eq!(labels, ["month"]);
+        let (_, labels, _) = h("-- @for m a‸").unwrap();
+        assert!(labels.contains(&"as".to_string()), "{labels:?}");
+        let (_, labels, _) = h("-- @for m i‸").unwrap();
+        assert!(labels.contains(&"in".to_string()), "{labels:?}");
+        let (_, labels, _) = h("-- @end w‸").unwrap();
+        assert_eq!(labels, ["while"]);
+        let (_, labels, _) = h("-- @on e‸").unwrap();
+        assert_eq!(labels, ["error"]);
         // A plain comment: none.
         assert!(h("-- about fo‸").is_none());
     }

@@ -291,6 +291,10 @@ fn date_by(s: &str, f: &str) -> Result<(NaiveDateTime, Prec), String> {
 /// A date written the usual way: 2026-11-01, 2026-11-01 10:30[:00], 2026-11.
 fn date_iso(s: &str) -> Result<(NaiveDateTime, Prec), String> {
     let s = s.trim();
+    // A year alone: the only number read as a date by itself.
+    if let Some(d) = year(s) {
+        return Ok((d, Prec::Year));
+    }
     for (f, p) in [("%Y-%m-%d %H:%M:%S", Prec::Second), ("%Y-%m-%dT%H:%M:%S", Prec::Second), ("%Y-%m-%d %H:%M", Prec::Minute)] {
         if let Ok(d) = NaiveDateTime::parse_from_str(s, f) {
             return Ok((d, p));
@@ -310,6 +314,41 @@ fn date_iso(s: &str) -> Result<(NaiveDateTime, Prec), String> {
         return Ok((d.and_hms_opt(0, 0, 0).unwrap(), Prec::Month));
     }
     Err(format!("'{s}' doesn't read as a date (2026-11-01, 2026-11-01 10:30, 2026-11; or give a format: | date yyyymmdd)"))
+}
+
+/// Four digits, a year: its first day.
+fn year(s: &str) -> Option<NaiveDateTime> {
+    if s.len() != 4 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(s.parse().ok()?, 1, 1)?.and_hms_opt(0, 0, 0)
+}
+
+/// A value as a date for `| range`: a date, a year (2026) or a date's text
+/// written the usual way; other numbers aren't guessed.
+fn as_period(v: &Value) -> Result<(NaiveDateTime, Prec), String> {
+    match v {
+        Value::Date(d, p) => Ok((*d, *p)),
+        Value::Str(t) => date_iso(t).map_err(|_| format!("| range: '{t}' isn't a date (2026, 2026-11, 2026-11-05; or read it first: | date yyyymm)")),
+        v => {
+            let t = v.text()?;
+            match v {
+                Value::Int(_) => year(&t).map(|d| (d, Prec::Year)),
+                _ => None,
+            }
+            .ok_or_else(|| format!("| range: the number {t} is taken for a date only when it's a year (2026); read it first: {t} | date {}", guess_fmt(&t)))
+        }
+    }
+}
+
+/// A format the digits likely are in (for a hint).
+fn guess_fmt(t: &str) -> &'static str {
+    match t.len() {
+        6 => "yyyymm",
+        8 => "yyyymmdd",
+        10 => "yyyymmddhh24",
+        _ => "yyyymm",
+    }
 }
 
 fn date_fmt(d: &NaiveDateTime, f: &str) -> String {
@@ -371,6 +410,9 @@ pub enum Conv {
     Unique,
     /// The items as text, between them ", " or the given text.
     Join(Option<Box<Expr>>),
+    /// A date's period (a list's: each item's) cut by so many units:
+    /// `2026 | range month`.
+    Range(Option<Box<Expr>>, Prec),
 }
 
 impl Conv {
@@ -737,6 +779,22 @@ impl P {
         Ok((name, Box::new(self.arg()?)))
     }
 
+    /// A loop variable's "as …": `as yyyymm` (text by a mask), `as date
+    /// yyyymm`, `as string …`, `as number`.
+    fn loop_as(&mut self) -> Result<Option<Conv>, String> {
+        if !self.eat_word("as") {
+            return Ok(None);
+        }
+        let word = match self.peek() {
+            Some(T::Name(w)) => w.to_ascii_lowercase(),
+            _ => return Err(format!("as what: a mask (as yyyymm), as date yyyymm, as number{}", self.here())),
+        };
+        Ok(Some(match word.as_str() {
+            "date" | "string" | "str" | "text" | "number" | "num" | "int" => self.conv()?,
+            _ => Conv::Str(Some(self.format(true).ok_or_else(|| format!("\"{word}\" isn't a mask (yyyy, mm, dd, hh24, mi, ss, q)"))?)),
+        }))
+    }
+
     fn conv(&mut self) -> Result<Conv, String> {
         let n = self.name()?.to_ascii_lowercase();
         Ok(match n.as_str() {
@@ -771,7 +829,17 @@ impl P {
             "reverse" => Conv::Reverse,
             "unique" | "distinct" => Conv::Unique,
             "join" => Conv::Join(if self.arg_follows() { Some(Box::new(self.arg()?)) } else { None }),
-            other => return Err(format!("no \"| {other}\" (number, string, list, date, push, pop, remove, map, filter, sort, reverse, unique, join)")),
+            "range" => {
+                let is_unit = |p: &Self| matches!(p.peek(), Some(T::Name(w)) if unit(w).is_some());
+                let n = if is_unit(self) || !self.arg_follows() { None } else { Some(Box::new(self.unary()?)) };
+                let u = match self.peek() {
+                    Some(T::Name(w)) if unit(w).is_some() => unit(w).unwrap(),
+                    _ => return Err(format!("| range by what: month, day, hour… (| range month){}", self.here())),
+                };
+                self.i += 1;
+                Conv::Range(n, u)
+            }
+            other => return Err(format!("no \"| {other}\" (number, string, list, date, push, pop, remove, map, filter, sort, reverse, unique, join, range)")),
         })
     }
 
@@ -1240,7 +1308,17 @@ pub fn paint(comment: &str, open: &mut Vec<Paint>) -> Option<Vec<(Range<usize>, 
                 kind
             } else if call && FUNCTIONS.contains(&w.as_str()) {
                 Paint::Func
-            } else if matches!(w.as_str(), "in" | "step" | "and" | "or" | "not" | "true" | "false" | "null" | "error" | "continue" | "stop" | "at" | "by" | "desc" | "asc") || (unit(&w).is_some() && out.iter().any(|(r, _)| s[r.clone()].eq_ignore_ascii_case("step"))) {
+            } else if w == "as" && low == "for" {
+                // "as yyyymm": the mask; "as date yyyymm": as after a pipe.
+                let nxt: String = s[i..rest_end].trim_start().chars().take_while(|c| c.is_alphanumeric()).collect::<String>().to_ascii_lowercase();
+                if matches!(nxt.as_str(), "date" | "string" | "str" | "text" | "number" | "num" | "int") {
+                    out.push((start..i, kind));
+                    prev_pipe = true;
+                    continue;
+                }
+                fmt_next = true;
+                kind
+            } else if matches!(w.as_str(), "in" | "step" | "and" | "or" | "not" | "true" | "false" | "null" | "error" | "continue" | "stop" | "at" | "by" | "desc" | "asc") || (unit(&w).is_some() && out.iter().any(|(r, _)| s[r.clone()].eq_ignore_ascii_case("step") || s[r.clone()].eq_ignore_ascii_case("range"))) {
                 kind
             } else {
                 Paint::Name
@@ -1322,7 +1400,8 @@ pub fn var_names(text: &str, d: Dialect) -> Vec<String> {
         let names: Vec<&str> = match low.as_str() {
             "set" | "var" => words.get(1).into_iter().copied().collect(),
             "for" => {
-                let before_in = s.to_ascii_lowercase().find(" in ").map_or(s.len(), |k| k);
+                let low = s.to_ascii_lowercase();
+                let before_in = [low.find(" in "), low.find(" as ")].into_iter().flatten().min().unwrap_or(s.len());
                 s[3.min(s.len())..before_in].split(',').map(str::trim).filter(|w| !w.is_empty()).collect()
             }
             w if !WORDS.contains(&w) => vec![*first],
@@ -1396,7 +1475,7 @@ fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
     let mut conv = None;
     let (from, to) = match (from, to) {
         // "a .. b | date f": the pipe reads both ends.
-        (f, Expr::Pipe(t, c)) if !matches!(f, Expr::Pipe(..)) && after.is_empty() => {
+        (f, Expr::Pipe(t, c)) if !matches!(f, Expr::Pipe(..)) => {
             conv = Some(c);
             (f, *t)
         }
@@ -1419,6 +1498,11 @@ fn steps(p: &mut P, from: Expr) -> Result<Steps, String> {
         after.push(p.conv()?);
     }
     Ok(Steps { from, to, conv, step, after })
+}
+
+/// A conversion done on each item: `| map (it | conv)`.
+fn as_map(c: Conv) -> Conv {
+    Conv::Map("it".into(), Box::new(Expr::Pipe(Box::new(Expr::Var("it".into())), c)))
 }
 
 fn unit(w: &str) -> Option<Prec> {
@@ -1473,6 +1557,7 @@ fn read_line(src: &str, line: usize) -> Result<Line, String> {
             if p.eat_op(",") {
                 names.push(p.name()?.to_ascii_lowercase());
             }
+            let each = p.loop_as()?;
             if !p.eat_word("in") {
                 return Err(format!("\"in\" expected{}", p.here()));
             }
@@ -1493,8 +1578,18 @@ fn read_line(src: &str, line: usize) -> Result<Line, String> {
                 if p.eat_op(",") {
                     p.name()?;
                 }
+                p.loop_as()?;
                 p.eat_word("in");
                 Source::Expr(p.list_or_expr()?)
+            };
+            // "as …": each item converted (as a map after the list).
+            let source = match (source, each) {
+                (s, None) => s,
+                (Source::Range(mut st), Some(c)) => {
+                    st.after.push(as_map(c));
+                    Source::Range(st)
+                }
+                (Source::Expr(e), Some(c)) => Source::Expr(Expr::Pipe(Box::new(e), as_map(c))),
             };
             Line::For(names, source)
         }
@@ -2080,6 +2175,20 @@ impl Run<'_> {
     }
 }
 
+/// A date's `.start`, `.end` (the next period's start), `.year`…
+fn date_field(dt: &NaiveDateTime, p: Prec, name: &str) -> Result<Value, String> {
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "start" => Value::Date(*dt, p),
+        "end" => Value::Date(date_add(*dt, p, 1).ok_or("a date out of range")?, p),
+        "year" => Value::Int(dt.year() as i64),
+        "quarter" => Value::Int(((dt.month() - 1) / 3 + 1) as i64),
+        "month" => Value::Pad(dt.month() as i64, 2),
+        "day" => Value::Pad(dt.day() as i64, 2),
+        "hour" => Value::Pad(dt.hour() as i64, 2),
+        _ => return Err(format!("a date has no \".{name}\" (start, end, year, quarter, month, day, hour)")),
+    })
+}
+
 /// `v` is at or before a range's end (a date's end: to the end of its
 /// precision).
 fn le_end(v: &Value, end: &Value) -> bool {
@@ -2132,6 +2241,14 @@ fn range(a: &Value, b: &Value, step: Option<(Option<i64>, Option<Prec>)>) -> Res
             Ok(int_range(x, y, n)?.into_iter().filter_map(|c| char::from_u32(c as u32)).map(|c| Value::Str(c.to_string())).collect())
         }
         (x, y) if x.int().is_some() && y.int().is_some() && !matches!(x, Value::Str(_)) => {
+            if let Some(u) = step.and_then(|s| s.1) {
+                // Years are dates by themselves; other numbers aren't guessed.
+                let (tx, ty) = (x.text()?, y.text()?);
+                if let (Value::Int(_), Value::Int(_), Some(dx), Some(dy)) = (x, y, year(&tx), year(&ty)) {
+                    return range(&Value::Date(dx, Prec::Year), &Value::Date(dy, Prec::Year), Some((n, Some(u))));
+                }
+                return Err(format!("a step by a date's unit over numbers: read them as dates first ({tx} .. {ty} | date {})", guess_fmt(&tx)));
+            }
             let w = match (x, y) {
                 (Value::Pad(_, w), _) | (_, Value::Pad(_, w)) => Some(*w),
                 _ => None,
@@ -2360,6 +2477,7 @@ fn eval(e: &Expr, vars: &Vars, d: Dialect, host: &mut dyn Host) -> Result<Value,
             let v = eval(x, vars, d, host)?;
             match &v {
                 Value::Dict(_) => v.field(name).cloned().ok_or(format!("no \"{name}\" in it"))?,
+                Value::Date(dt, p) => date_field(dt, *p, name)?,
                 other => return Err(format!("\".{name}\" of a {}: a dictionary or a row wanted", other.kind())),
             }
         }
@@ -2612,6 +2730,28 @@ fn on_items(v: Value, c: &Conv, vars: &Vars, d: Dialect, host: &mut dyn Host) ->
             }
             Value::List(out)
         }
+        (Value::List(l), Conv::Range(..)) => {
+            let mut out = Vec::new();
+            for x in l {
+                match on_items(x, c, vars, d, host)? {
+                    Value::List(more) => out.extend(more),
+                    other => out.push(other),
+                }
+            }
+            Value::List(out)
+        }
+        (v, Conv::Range(n, u)) => {
+            let (dt, p) = as_period(&v)?;
+            let n = match n {
+                Some(e) => Some(eval(e, vars, d, host)?.int().ok_or("| range: a count is a whole number")?),
+                None => None,
+            };
+            if n.is_some_and(|n| n <= 0) {
+                return Err("| range: a count above 0".into());
+            }
+            let at = Value::Date(dt, p);
+            Value::List(range(&at, &at, Some((n, Some(*u))))?)
+        }
         (Value::List(l), Conv::Join(sep)) => {
             let sep = match sep {
                 Some(e) => eval(e, vars, d, host)?.text()?,
@@ -2630,6 +2770,7 @@ fn on_items(v: Value, c: &Conv, vars: &Vars, d: Dialect, host: &mut dyn Host) ->
                 Conv::Reverse => "reverse",
                 Conv::Unique => "unique",
                 Conv::Join(_) => "join",
+                Conv::Range(..) => "range",
                 _ => "",
             };
             return Err(format!("| {what} of a {}: a list (or a dictionary) wanted", v.kind()));
@@ -3017,6 +3158,52 @@ mod tests {
                 "> 1",
             ]
         );
+    }
+
+    #[test]
+    fn periods_cut_by_range() {
+        let txt = |e: &str| match v(e) {
+            Value::List(l) => l.iter().map(|x| x.text().unwrap()).collect::<Vec<_>>().join(" "),
+            other => panic!("{other:?}"),
+        };
+        let months = txt("2026 | range month");
+        assert!(months.starts_with("2026-01-01 2026-02-01") && months.ends_with("2026-12-01"), "{months}");
+        assert_eq!(match v("2026 | range day") { Value::List(l) => l.len(), _ => 0 }, 365);
+        assert_eq!(txt("'2026-11' | range 2 week").split(' ').count(), 3);
+        assert_eq!(txt("202611 | date yyyymm | range day").split(' ').count(), 30);
+        assert_eq!(txt("20261105 | date yyyymmdd | range 6 hour"), "2026-11-05 00:00:00 2026-11-05 06:00:00 2026-11-05 12:00:00 2026-11-05 18:00:00");
+        // A list: each item cut, all in one list.
+        assert_eq!(txt("[2025, 2026] | range year"), "2025-01-01 2026-01-01");
+        assert_eq!(txt("202601 .. 202602 | date yyyymm | range day").split(' ').count(), 59);
+        // Other numbers aren't guessed to be dates.
+        let e = eval_plain("202611 | range day", &Vars::default(), Dialect::ClickHouse).unwrap_err();
+        assert!(e.contains("| date yyyymm"), "{e}");
+        let e = eval_plain("202601 .. 202612 step month", &Vars::default(), Dialect::ClickHouse).unwrap_err();
+        assert!(e.contains("read them as dates"), "{e}");
+        assert_eq!(txt("2025 .. 2026 step quarter").split(' ').count(), 8);
+        assert!(eval_plain("2026 | range", &Vars::default(), Dialect::ClickHouse).is_err());
+        // A period's start, end and parts.
+        let vs = vars(&[("m", "202611 | date yyyymm")]);
+        let f = |e: &str| eval_plain(e, &vs, Dialect::ClickHouse).unwrap().text().unwrap();
+        assert_eq!((f("m.start"), f("m.end"), f("m.year"), f("m.month"), f("m.quarter")), ("2026-11-01".into(), "2026-12-01".into(), "2026".into(), "11".into(), "4".into()));
+        assert_eq!(put("where dt >= :{m.start} and dt < :{m.end}", &vs, Dialect::Oracle).unwrap(), "where dt >= DATE '2026-11-01' and dt < DATE '2026-12-01'");
+        // A loop's items converted as they're named.
+        let mut h = Fake::default();
+        go("-- @for m as yyyymm in 2026 | range month\nselect &m;\n-- @end for", &mut h).unwrap();
+        assert_eq!(h.log.len(), 12);
+        assert_eq!((h.log[0].as_str(), h.log[11].as_str()), ("select 202601", "select 202612"));
+        let mut h = Fake::default();
+        go("-- @for d as date yyyymm in 202611 .. 202612\nselect :{d.end};\n-- @end for", &mut h).unwrap();
+        assert_eq!(h.log, ["select '2026-12-01'", "select '2027-01-01'"]);
+        let mut h = Fake::default();
+        go("-- @for k, x as string in [1, 2]\nselect '&k-&x';\n-- @end for", &mut h).unwrap();
+        assert_eq!(h.log, ["select '0-1'", "select '1-2'"]);
+        assert!(prog("-- @for m as in 1..2\n-- @end for").is_err());
+        assert_eq!(var_names("-- @for m as yyyymm in 2026 | range month\n", Dialect::Generic), ["m"]);
+        let mut open = Vec::new();
+        let show = |c: &str, open: &mut Vec<Paint>| paint(c, open).unwrap().into_iter().map(|(r, p)| format!("{}:{p:?}", &c[r])).collect::<Vec<_>>().join(" ");
+        assert_eq!(show("-- @for m as yyyymm in y | range 2 month", &mut open), "--:Mark @for:Loop m:Name as:Loop yyyymm:Str in:Loop y:Name |:Op range:Loop 2:Num month:Loop");
+        assert_eq!(show("-- @for m as date yyyymm in 1..2", &mut open), "--:Mark @for:Loop m:Name as:Loop date:Loop yyyymm:Str in:Loop 1:Num ..:Op 2:Num");
     }
 
     #[test]

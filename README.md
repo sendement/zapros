@@ -242,6 +242,9 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   comments so the script stays SQL: `@set` values, lists, dictionaries and
   query results; `@for` over ranges (numbers keeping leading zeros, dates
   by day / hour / month…, letters), lists, dictionaries and query rows;
+  a date's period cut by `| range` (`@for m as yyyymm in 2026 | range
+  month`, each part with `.start` / `.end`); numbers taken for dates only
+  when they're a year, others read with `| date yyyymm`;
   collections changed by a pipe (`ls | push x`, `| pop 0`, `| remove x`,
   `| map it * 2`, `| filter it > 3`, `| sort by it.n desc`, `| unique`,
   `| join`, in place `@ls |= pop`);
