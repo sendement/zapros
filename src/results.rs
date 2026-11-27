@@ -375,7 +375,7 @@ pub fn panel_for(app: &mut App, ui: &mut egui::Ui, key: &str) {
         let v = &rt.results[i];
         let format = crate::export::Format::Csv;
         let name = format!("result-{}.{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), format.ext());
-        app.export = Some((tab_id.clone(), i, crate::export::Export { format, path: save_dir(app).join(name), header: true, sep: ',', split: 0, table: crate::export::table_of(&v.sql), load_all: v.cursor.is_some() }));
+        app.export = Some((tab_id.clone(), i, crate::export::Export { format, path: save_dir(app).join(name), header: true, sep: ',', split: 0, num: Default::default(), table: crate::export::table_of(&v.sql), load_all: v.cursor.is_some() }));
     }
     app.rt.insert(tab_id.clone(), rt);
     if let Some((i, all)) = more {
@@ -408,10 +408,22 @@ pub fn export_window(app: &mut App, ctx: &egui::Context) {
                 e.path.set_extension(e.format.ext());
             }
             ui.end_row();
-            ui.label(t("Файл", "File"));
-            let mut p = e.path.display().to_string();
-            if ui.add(egui::TextEdit::singleline(&mut p).desired_width(crate::dialogs::FIELD_W)).changed() {
-                e.path = p.into();
+            // The folder and the name apart (the extension follows the format).
+            ui.label(t("Папка", "Folder"));
+            let mut dir = e.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+            let mut stem = e.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut edited = ui.add(egui::TextEdit::singleline(&mut dir).desired_width(crate::dialogs::FIELD_W)).changed();
+            ui.end_row();
+            ui.label(t("Имя файла", "File name"));
+            ui.horizontal(|ui| {
+                let ext = format!(".{}", e.format.ext());
+                let w = ui.fonts_mut(|f| f.layout_no_wrap(ext.clone(), egui::TextStyle::Body.resolve(ui.style()), egui::Color32::WHITE).size().x);
+                edited |= ui.add(egui::TextEdit::singleline(&mut stem).hint_text("result").desired_width(crate::dialogs::FIELD_W - w - ui.spacing().item_spacing.x)).changed();
+                ui.label(RichText::new(ext).weak());
+            });
+            if edited {
+                let stem = if stem.trim().is_empty() { "result".to_string() } else { stem.replace('/', "_") };
+                e.path = std::path::PathBuf::from(dir).join(format!("{stem}.{}", e.format.ext()));
             }
             ui.end_row();
             if matches!(e.format, Format::Csv | Format::Tsv | Format::Xlsx) {
@@ -444,6 +456,18 @@ pub fn export_window(app: &mut App, ctx: &egui::Context) {
                 }
             });
             ui.end_row();
+            if e.split > 0 {
+                ui.label(t("Нумерация", "Numbering"));
+                let stem = e.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "result".into());
+                let ext = e.format.ext();
+                let show = |n: crate::export::Numbering| format!("{}.{ext}, {}.{ext}…", n.name(&stem, 1), n.name(&stem, 2));
+                egui::ComboBox::from_id_salt("export-num").width(crate::dialogs::FIELD_W).selected_text(show(e.num)).truncate().show_ui(ui, |ui| {
+                    for n in crate::export::Numbering::ALL {
+                        ui.selectable_value(&mut e.num, n, show(n));
+                    }
+                });
+                ui.end_row();
+            }
             if open {
                 ui.label(t("Строки", "Rows"));
                 ui.checkbox(&mut e.load_all, t("все строки с сервера — пишутся прямо в файл, не в таблицу", "every row from the server — written straight to the file, not into the table"));
@@ -587,6 +611,11 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
     let footer_h = if v.totals.is_empty() { 0.0 } else { 24.0 };
     let mut heads: Vec<egui::Rect> = vec![egui::Rect::NOTHING; v.cols.len()];
     let mut dragging: Option<usize> = None;
+    // A plain press's drag over the headers: where it started (and the keys).
+    let mut run_from: Option<(usize, egui::Modifiers)> = None;
+    let press_id = ui.id().with(("head-press", tab, i));
+    let armed_id = ui.id().with(("head-armed", tab, i));
+    let mut pick_all = false;
     let view = v.cols.clone();
     let cols = v.table.cols.clone();
     let order = v.order.clone();
@@ -722,15 +751,32 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
                         }
                         {
                             {
-                                let tip = t("Щелчок — выделить (Ctrl, Shift — несколько), перетащить — переставить, правый — меню", "Click: pick (Ctrl, Shift: several), drag: move, right click: menu");
+                                let tip = t("Щелчок — выделить (Ctrl, Shift — несколько), протянуть — выделить подряд, двойной щелчок с зажатием — переставить, правый — меню", "Click: pick (Ctrl, Shift: several), drag: pick a run, double click and hold: move, right click: menu");
                                 let r = if col.ty.is_empty() { r.on_hover_text(tip) } else { r.on_hover_text(format!("{}\n{tip}", col.ty)) };
-                                if r.clicked() {
+                                // A press right after a click on the same header
+                                // arms the move: its drag moves the column; a
+                                // plain press's drag picks the headers it runs over.
+                                let now = ui.input(|i| i.time);
+                                if r.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+                                    let last = ui.data(|d| d.get_temp::<(usize, f64)>(press_id));
+                                    let armed = last.is_some_and(|(lc, lt)| lc == c && now - lt < DOUBLE_PRESS);
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(press_id, (c, now));
+                                        d.insert_temp(armed_id, if armed { Some(c) } else { None::<usize> });
+                                    });
+                                }
+                                let armed = ui.data(|d| d.get_temp::<Option<usize>>(armed_id)).flatten() == Some(c);
+                                if r.clicked() && !armed {
                                     pick = Some((c, ui.input(|i| i.modifiers)));
                                 }
                                 if r.dragged() {
-                                    dragging = Some(k);
+                                    if armed {
+                                        dragging = Some(k);
+                                    } else {
+                                        run_from = Some((k, ui.input(|i| i.modifiers)));
+                                    }
                                 }
-                                if r.drag_stopped() {
+                                if r.drag_stopped() && armed {
                                     if let Some(p) = ui.ctx().pointer_interact_pos() {
                                         move_to = Some((vec![c], Place::Drop(p.x)));
                                     }
@@ -748,6 +794,10 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
                                     }
                                     if ui.button(if many { t("Копировать колонки", "Copy columns") } else { t("Копировать колонку", "Copy column") }).clicked() {
                                         copy = Some(order.iter().map(|&r| group.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
+                                        ui.close();
+                                    }
+                                    if ui.button(if many { t("Копировать колонки с заголовками", "Copy columns with headers") } else { t("Копировать колонку с заголовком", "Copy column with header") }).clicked() {
+                                        copy = Some(with_head(&cols, &group, rows, &order));
                                         ui.close();
                                     }
                                     ui.separator();
@@ -903,8 +953,33 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
                     p.set_opacity(0.0);
                 }
                 p.rect_filled(r, 0.0, head_bg);
-                p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), ui.visuals().weak_text_color());
+                let all = !order.is_empty() && rows_picked.len() == order.len() && picked.len() == view.len();
+                let hit = ui.interact(clip, ui.id().with(("hash-head", tab, i)), egui::Sense::click());
+                if all {
+                    p.rect_filled(r, 0.0, sel_fill);
+                } else if hit.hovered() {
+                    p.rect_filled(r, 0.0, picked_bg);
+                }
+                p.text(r.center(), egui::Align2::CENTER_CENTER, "#", small.clone(), if all || hit.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() });
                 p.vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, edge));
+                let hit = hit.on_hover_text(t("Щелчок — выделить всю таблицу, правый — меню", "Click: pick the whole table; right click: menu"));
+                if hit.clicked() {
+                    pick_all = true;
+                }
+                hit.context_menu(|ui| {
+                    if ui.button(t("Выделить всё", "Pick everything")).clicked() {
+                        pick_all = true;
+                        ui.close();
+                    }
+                    if ui.button(t("Копировать всё", "Copy all")).clicked() {
+                        copy = Some(order.iter().map(|&r| view.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
+                        ui.close();
+                    }
+                    if ui.button(t("Копировать всё с заголовками", "Copy all with headers")).clicked() {
+                        copy = Some(with_head(&cols, &view, rows, &order));
+                        ui.close();
+                    }
+                });
             }
             for (ri, cell, _) in pins {
                 let r = shift(cell);
@@ -1108,6 +1183,36 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
     if let Some((c, m)) = pick {
         pick_column(v, c, m);
     }
+    if let (Some((k0, m)), Some(p)) = (run_from, ctx.pointer_interact_pos()) {
+        // The header under the pointer (past either end: the end one).
+        let shown: Vec<(usize, &egui::Rect)> = heads.iter().enumerate().filter(|(_, r)| r.is_positive()).collect();
+        let k1 = shown.iter().find(|(_, r)| p.x < r.right()).or(shown.last()).map_or(k0, |(k, _)| *k);
+        let run: std::collections::BTreeSet<usize> = v.cols[k0.min(k1)..=k0.max(k1).min(v.cols.len() - 1)].iter().copied().collect();
+        // (With Ctrl: added to what was picked when the drag began.)
+        let base_id = ui.id().with(("head-run-base", tab, i));
+        if m.command || m.ctrl {
+            let base = ui.data(|d| d.get_temp::<std::collections::BTreeSet<usize>>(base_id)).unwrap_or_else(|| {
+                let b = v.picked.iter().copied().collect::<std::collections::BTreeSet<usize>>();
+                ui.data_mut(|d| d.insert_temp(base_id, b.clone()));
+                b
+            });
+            v.picked = base.union(&run).copied().collect();
+        } else {
+            v.picked = run.into_iter().collect();
+        }
+    } else {
+        ui.data_mut(|d| d.remove_temp::<std::collections::BTreeSet<usize>>(ui.id().with(("head-run-base", tab, i))));
+    }
+    if pick_all {
+        let all = !v.order.is_empty() && v.rows_picked.len() == v.order.len() && v.picked.len() == v.cols.len();
+        if all {
+            v.picked.clear();
+            v.rows_picked.clear();
+        } else {
+            v.picked = v.cols.iter().copied().collect();
+            v.rows_picked = v.order.iter().copied().collect();
+        }
+    }
     if clear_picks {
         v.picked.clear();
         v.rows_picked.clear();
@@ -1165,11 +1270,23 @@ fn table_in(ui: &mut egui::Ui, tab: &str, i: usize, v: &mut ResultView) -> bool 
         if !v.rows_picked.is_empty() {
             let text = v.order.iter().filter(|r| v.rows_picked.contains(r)).map(|&r| v.cols.iter().map(|&x| tsv_cell(&v.table.rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n");
             ctx.copy_text(text);
+        } else if !v.picked.is_empty() {
+            let group: Vec<usize> = v.cols.iter().copied().filter(|x| v.picked.contains(x)).collect();
+            ctx.copy_text(v.order.iter().map(|&r| group.iter().map(|&x| tsv_cell(&v.table.rows[r][x])).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n"));
         } else if let Some((r, c)) = v.sel {
             ctx.copy_text(v.table.rows[r][c].clone().unwrap_or_default());
         }
     }
     moved
+}
+
+/// A second press within this long of a click on the same header arms its move.
+const DOUBLE_PRESS: f64 = 0.4;
+
+/// `group`'s columns (in this order) with their names on the first line, as TSV.
+fn with_head(cols: &[crate::db::Col], group: &[usize], rows: &[Vec<Option<String>>], order: &[usize]) -> String {
+    let head = group.iter().map(|&x| cols[x].name.clone()).collect::<Vec<_>>().join("\t");
+    std::iter::once(head).chain(order.iter().map(|&r| group.iter().map(|&x| tsv_cell(&rows[r][x])).collect::<Vec<_>>().join("\t"))).collect::<Vec<_>>().join("\n")
 }
 
 /// Where columns go.

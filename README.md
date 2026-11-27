@@ -479,7 +479,8 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   last statement's cursor stays open, the bar above the table loads the next
   batch, all the rest, or stops (closing the cursor). Export to CSV / TSV /
   JSON / SQL INSERT / Markdown / HTML / XLSX, whole or split into files of
-  N rows; with every row from the server, the rest of the cursor is written
+  N rows (the folder and the file's name apart; parts numbered `name_1`,
+  `name_001`, `name-1`, `name (1)`, `name_part1` or `1_name`); with every row from the server, the rest of the cursor is written
   straight to the file a batch at a time (not into the table: a result of
   any size, in the memory of one batch; XLSX too, sheets past a million
   rows go on in the next file), its progress beside the table. Totals on demand: a column header's
@@ -488,11 +489,14 @@ An SQL IDE for Linux in Rust (egui) for **PostgreSQL**, **ClickHouse**,
   another or to remove it), worked out again only when the rows change.
   Sorting by several columns (the header's little square opens under the
   mouse into ▲ ▼ ✕; Shift adds a level, the menu too). Columns are picked
-  by a click anywhere on their header (Ctrl / Shift for several)
-  and moved by dragging or from the menu; the order is kept for the next
+  by a click anywhere on their header (Ctrl / Shift for several, or a
+  drag across the headers) and moved by a double click held and dragged,
+  or from the menu (which also copies them, with their names or without);
+  the `#` corner picks the whole table (its menu copies it all); the order is kept for the next
   runs giving the same columns, and export follows it. A clicked cell
   lights its row and its column's header, the cell itself deeper; rows are
-  picked by their number (Ctrl / Shift for several; Ctrl+C copies them).
+  picked by their number (Ctrl / Shift for several; Ctrl+C copies them, or
+  the picked columns).
   The narrow number column stays pinned at the left when the table scrolls
   sideways. NULLs sit on a shade of their own. Messages (timings, errors; the server's error position is marked
   in the script) and Output (`RAISE NOTICE`, `DBMS_OUTPUT`) are tabs of

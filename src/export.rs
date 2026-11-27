@@ -46,6 +46,40 @@ impl Format {
     }
 }
 
+/// How the parts of a cut result are named after the file's own name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Numbering {
+    /// `name_1`
+    #[default]
+    Underscore,
+    /// `name_001`
+    Padded,
+    /// `name-1`
+    Dash,
+    /// `name (1)`
+    Paren,
+    /// `name_part1`
+    Part,
+    /// `1_name`
+    Before,
+}
+
+impl Numbering {
+    pub const ALL: [Numbering; 6] = [Numbering::Underscore, Numbering::Padded, Numbering::Dash, Numbering::Paren, Numbering::Part, Numbering::Before];
+
+    /// The `n`th part's name of `stem`.
+    pub fn name(self, stem: &str, n: usize) -> String {
+        match self {
+            Numbering::Underscore => format!("{stem}_{n}"),
+            Numbering::Padded => format!("{stem}_{n:03}"),
+            Numbering::Dash => format!("{stem}-{n}"),
+            Numbering::Paren => format!("{stem} ({n})"),
+            Numbering::Part => format!("{stem}_part{n}"),
+            Numbering::Before => format!("{n}_{stem}"),
+        }
+    }
+}
+
 /// What to save, and how.
 #[derive(Clone, Debug)]
 pub struct Export {
@@ -58,6 +92,8 @@ pub struct Export {
     pub sep: char,
     /// Rows per file; 0: one file.
     pub split: usize,
+    /// How a cut's parts are numbered.
+    pub num: Numbering,
     /// INSERT INTO which table.
     pub table: String,
     /// Load the rest of the rows first.
@@ -205,7 +241,7 @@ pub fn render(e: &Export, s: &Snapshot, rows: &[Vec<Option<String>>]) -> String 
     out
 }
 
-/// The files `rows` rows make: one, or `name_1.ext`, `name_2.ext`…
+/// The files `rows` rows make: one, or the parts numbered (`name_1.ext`…).
 pub fn paths(e: &Export, rows: usize) -> Vec<PathBuf> {
     let sink = Sink::new(e.clone(), Vec::new(), Vec::new(), Vec::new());
     let cap = sink.cap();
@@ -266,7 +302,7 @@ impl Sink {
     fn numbered(&self, n: usize) -> PathBuf {
         let stem = self.e.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "result".into());
         let ext = self.e.path.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| self.e.format.ext().into());
-        self.e.path.with_file_name(format!("{stem}_{n}.{ext}"))
+        self.e.path.with_file_name(format!("{}.{ext}", self.e.num.name(&stem, n)))
     }
 
     fn open(&mut self) -> Result<(), String> {
@@ -393,7 +429,7 @@ mod tests {
     }
 
     fn ex(format: Format, split: usize, dir: &Path) -> Export {
-        Export { format, path: dir.join(format!("out.{}", format.ext())), header: true, sep: ',', split, table: "t".into(), load_all: false }
+        Export { format, path: dir.join(format!("out.{}", format.ext())), header: true, sep: ',', split, num: Numbering::Underscore, table: "t".into(), load_all: false }
     }
 
     #[test]
@@ -422,6 +458,13 @@ mod tests {
         assert_eq!(third, "id,name\n5,\"n,'5\"\n");
         assert!(!d.join("out.csv").exists(), "the first part numbered too");
         assert!(d.join("out_1.csv").exists());
+        // Numbered another way.
+        for (num, name) in [(Numbering::Padded, "out_002.csv"), (Numbering::Paren, "out (2).csv"), (Numbering::Before, "2_out.csv"), (Numbering::Part, "out_part2.csv"), (Numbering::Dash, "out-2.csv")] {
+            let e = Export { num, ..ex(Format::Csv, 2, &d) };
+            save(&e, &s);
+            assert!(d.join(name).exists(), "{name}");
+            assert_eq!(paths(&e, 5)[1], d.join(name));
+        }
         let e = ex(Format::Xlsx, 0, &d);
         save(&e, &s);
         assert!(std::fs::metadata(d.join("out.xlsx")).unwrap().len() > 1000);

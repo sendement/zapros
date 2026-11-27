@@ -770,6 +770,78 @@ fn results_in_batches_export_and_totals() {
 }
 
 #[test]
+fn columns_picked_by_drag_moved_by_double_press() {
+    let (mut h, _g) = harness("colpick", "select id, total, note from orders order by id;\n", false);
+    focus_editor(&mut h, 5);
+    key(&mut h, egui::Key::Enter, egui::Modifiers::COMMAND);
+    settle(&mut h);
+    let id = h.state().tab().id.clone();
+    let v = |h: &Harness<'static, App>| {
+        let r = &h.state().rt[&id].results[0];
+        (r.picked.clone(), r.rows_picked.len(), r.order.len(), r.cols.clone())
+    };
+    let head = |h: &Harness<'static, App>, name: &str| h.get_by_label(name).rect().center();
+    let press = |h: &mut Harness<'static, App>, at: egui::Pos2, down: bool| {
+        h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: down, modifiers: egui::Modifiers::NONE });
+        h.step();
+    };
+    // A plain press dragged over the headers: they're picked, none moved.
+    let (a, b) = (head(&h, "id"), head(&h, "note"));
+    drag_to(&mut h, a, b, 8);
+    assert_eq!(v(&h).0.into_iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(v(&h).3, vec![0, 1, 2], "a plain drag doesn't move");
+    shot(&mut h, "columns-run-picked");
+    for _ in 0..40 {
+        h.step();
+    }
+    // A click, then pressed again and dragged: the column moves.
+    let n = head(&h, "note");
+    let to = head(&h, "id") - egui::vec2(30.0, 0.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(n));
+    h.step();
+    press(&mut h, n, true);
+    press(&mut h, n, false);
+    press(&mut h, n, true);
+    for k in 1..=8 {
+        h.input_mut().events.push(egui::Event::PointerMoved(n + (to - n) * k as f32 / 8.0));
+        h.step();
+    }
+    shot(&mut h, "columns-moving");
+    press(&mut h, to, false);
+    h.step();
+    assert_eq!(v(&h).3, vec![2, 0, 1], "moved to the front");
+    for _ in 0..40 {
+        h.step();
+    }
+    // The corner: the whole table picked; again: nothing.
+    let corner = egui::pos2(h.get_by_label("note").rect().left() - 12.0, head(&h, "note").y);
+    h.input_mut().events.push(egui::Event::PointerMoved(corner));
+    h.step();
+    press(&mut h, corner, true);
+    press(&mut h, corner, false);
+    h.step();
+    let got = v(&h);
+    assert_eq!((got.0.len(), got.1), (3, got.2));
+    shot(&mut h, "table-all-picked");
+    press(&mut h, corner, true);
+    press(&mut h, corner, false);
+    h.step();
+    assert!(v(&h).0.is_empty() && v(&h).1 == 0);
+    // A column copied with its name.
+    h.get_by_label("total").click_secondary();
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_label("Копировать колонку с заголовком").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert!(copied.as_deref().is_some_and(|t| t.starts_with("total\n37.5\n")), "{copied:?}");
+}
+
+#[test]
 fn big_result_streamed_to_a_file() {
     // 300 000 rows: written a batch at a time, none kept but the first.
     let sql = "with recursive n(i) as (select 1 union all select i + 1 from n where i < 300000)\nselect i, 'row ' || i as name, i * 1.5 as v from n;\n";
@@ -2753,7 +2825,9 @@ fn export_format_picked() {
     }
     assert!(h.state().export.is_some());
     shot(&mut h, "export-window");
-    click_at(&mut h, egui::pos2(685.0, 334.0), egui::PointerButton::Primary);
+    let row = h.get_by_label("Формат").rect();
+    let combo = egui::pos2(row.left() + 200.0, row.center().y);
+    click_at(&mut h, combo, egui::PointerButton::Primary);
     for _ in 0..3 {
         h.step();
     }
