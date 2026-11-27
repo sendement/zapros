@@ -5907,7 +5907,7 @@ dependencies = [
 
 [[package]]
 name = "zapros"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "base64 0.22.1",
  "calamine",
